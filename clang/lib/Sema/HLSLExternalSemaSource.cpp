@@ -519,6 +519,46 @@ void HLSLExternalSemaSource::defineHLSLTypesWithForwardDeclarations() {
         .addArraySubscriptOperators()
         .completeDefinition();
   });
+
+  Decl = BuiltinTypeDeclBuilder(*SemaPtr, HLSLNamespace, "ConstantBuffer")
+    .addSimpleTemplateParams(*SemaPtr, {"element_type"})
+    .Record;
+    
+  onCompletion(Decl, [this](CXXRecordDecl *Decl) {
+    setupBufferType(Decl, *SemaPtr, ResourceClass::SRV,
+                   ResourceKind::CBuffer, /*IsROV=*/false,
+                   /*RawBuffer=*/false);
+    setupConstantBufferFields(Decl);
+    Decl->completeDefinition();
+  });
+}
+
+void HLSLExternalSemaSource::setupConstantBufferFields(CXXRecordDecl *BufferDecl) {
+  if (const auto *CTSD = dyn_cast<ClassTemplateSpecializationDecl>(BufferDecl)) {
+    if (const Type *ElementType = CTSD->getTemplateArgs()[0].getAsType().getTypePtr()) {
+      if (const CXXRecordDecl *ElementRecord = ElementType->getAsCXXRecordDecl()) {
+        // Forward all fields from element type
+        ASTContext &Context = BufferDecl->getASTContext();
+        
+        for (const FieldDecl *Field : ElementRecord->fields()) {
+          FieldDecl *ForwardingField = FieldDecl::Create(
+              Context,
+              BufferDecl,
+              Field->getLocation(),
+              Field->getLocation(),
+              Field->getIdentifier(),
+              Field->getType(),
+              Field->getTypeSourceInfo(),
+              Field->isBitField() ? Field->getBitWidth() : nullptr,
+              Field->isMutable(),
+              ICIS_NoInit);
+
+          ForwardingField->setAccess(Field->getAccess());
+          BufferDecl->addDecl(ForwardingField);
+        }
+      }
+    }
+  }
 }
 
 void HLSLExternalSemaSource::onCompletion(CXXRecordDecl *Record,

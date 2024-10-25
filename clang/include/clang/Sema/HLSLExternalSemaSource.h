@@ -32,6 +32,7 @@ class HLSLExternalSemaSource : public ExternalSemaSource {
   void defineHLSLTypesWithForwardDeclarations();
 
   void onCompletion(CXXRecordDecl *Record, CompletionFunction Fn);
+  void setupConstantBufferFields(CXXRecordDecl *BufferDecl);
 
 public:
   ~HLSLExternalSemaSource() override;
