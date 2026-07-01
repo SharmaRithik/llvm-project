@@ -323,7 +323,7 @@ RValue CIRGenFunction::emitCXXMemberOrOperatorCall(
   assert((ce || currSrcLoc) && "expected source location");
   mlir::Location loc = ce ? getLoc(ce->getExprLoc()) : *currSrcLoc;
   assert(!cir::MissingFeatures::opCallMustTail());
-  return emitCall(fnInfo, callee, returnValue, args, nullptr, loc);
+  return emitCall(fnInfo, callee, returnValue, args, nullptr, loc, ce);
 }
 
 static void emitNullBaseClassInitialization(CIRGenFunction &cgf,

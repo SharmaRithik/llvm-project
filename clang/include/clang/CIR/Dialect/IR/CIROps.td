@@ -4312,7 +4312,8 @@ class CIR_CallOpBase<string mnemonic, list<Trait> extra_traits = []>
       UnitAttr:$musttail,
       DefaultValuedAttr<CIR_SideEffect, "SideEffect::All">:$side_effect,
       OptionalAttr<DictArrayAttr>:$arg_attrs,
-      OptionalAttr<DictArrayAttr>:$res_attrs
+      OptionalAttr<DictArrayAttr>:$res_attrs,
+      OptionalAttr<ASTCallExprInterface>:$ast
       );
 }
 
@@ -8637,5 +8638,7 @@ def CIR_LaunderOp : CIR_Op<"launder", [SameOperandsAndResultType]> {
 
   let llvmOp = "LaunderInvariantGroupOp";
 }
+
+include "clang/CIR/Dialect/IR/CIRStdOps.td"
 
 #endif // CLANG_CIR_DIALECT_IR_CIROPS_TD

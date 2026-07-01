@@ -98,6 +98,8 @@ struct LoweringPreparePass
   void lowerTrivialCopyCall(cir::CallOp op);
   void lowerStoreOfConstAggregate(cir::StoreOp op);
   void lowerLocalInitOp(cir::LocalInitOp op);
+  void lowerStdFindOp(cir::StdFindOp op);
+  void lowerStrLenOp(cir::StrLenOp op);
 
   /// Return the FuncOp called by `callOp`.  Uses the cached `symbolTables`
   /// member to avoid the O(M) module-wide scan that the static
@@ -2251,11 +2253,49 @@ void LoweringPreparePass::lowerStoreOfConstAggregate(cir::StoreOp op) {
     constOp.erase();
 }
 
+// Ops raised by the idiom recognizer carry the original callee and the call
+// attributes the recognizer preserved, so lowering them back rebuilds an
+// equivalent plain call.
+static void restoreCallAttrs(cir::CallOp call, mlir::Operation *raised) {
+  for (llvm::StringRef name :
+       {"nothrow", "side_effect", "arg_attrs", "res_attrs"})
+    if (mlir::Attribute attr = raised->getAttr(name))
+      call->setAttr(name, attr);
+}
+
+void LoweringPreparePass::lowerStdFindOp(cir::StdFindOp op) {
+  cir::CIRBaseBuilderTy builder(getContext());
+  builder.setInsertionPointAfter(op.getOperation());
+  cir::CallOp call = builder.createCallOp(
+      op.getLoc(), op.getOriginalFnAttr(), op.getType(),
+      mlir::ValueRange{op.getFirst(), op.getLast(), op.getPattern()});
+  restoreCallAttrs(call, op);
+
+  op.replaceAllUsesWith(call);
+  op.erase();
+}
+
+void LoweringPreparePass::lowerStrLenOp(cir::StrLenOp op) {
+  cir::CIRBaseBuilderTy builder(getContext());
+  builder.setInsertionPointAfter(op.getOperation());
+  cir::CallOp call =
+      builder.createCallOp(op.getLoc(), op.getOriginalFnAttr(), op.getType(),
+                           mlir::ValueRange{op.getString()});
+  restoreCallAttrs(call, op);
+
+  op.replaceAllUsesWith(call);
+  op.erase();
+}
+
 void LoweringPreparePass::runOnOp(mlir::Operation *op) {
   if (auto arrayCtor = dyn_cast<cir::ArrayCtor>(op)) {
     lowerArrayCtor(arrayCtor);
   } else if (auto arrayDtor = dyn_cast<cir::ArrayDtor>(op)) {
     lowerArrayDtor(arrayDtor);
+  } else if (auto stdFind = mlir::dyn_cast<cir::StdFindOp>(op)) {
+    lowerStdFindOp(stdFind);
+  } else if (auto strLen = mlir::dyn_cast<cir::StrLenOp>(op)) {
+    lowerStrLenOp(strLen);
   } else if (auto cast = mlir::dyn_cast<cir::CastOp>(op)) {
     lowerCastOp(cast);
   } else if (auto complexConj = mlir::dyn_cast<cir::ComplexConjOp>(op)) {
@@ -2894,7 +2934,8 @@ void LoweringPreparePass::runOnOperation() {
                   cir::ComplexConjOp, cir::ComplexMulOp, cir::ComplexDivOp,
                   cir::DynamicCastOp, cir::FuncOp, cir::CallOp,
                   cir::GetGlobalOp, cir::GlobalOp, cir::StoreOp,
-                  cir::CmpThreeWayOp, cir::LocalInitOp>(op))
+                  cir::CmpThreeWayOp, cir::LocalInitOp, cir::StdFindOp,
+                  cir::StrLenOp>(op))
       opsToTransform.push_back(op);
   });
 

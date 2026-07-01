@@ -34,6 +34,26 @@ let cppNamespace = "::cir" in {
       }]>
     ];
   }
+
+  def ASTCallExprInterface : AttrInterface<"ASTCallExprInterface"> {
+    let methods = [
+      InterfaceMethod<"", "bool", "isStdFunctionCall",
+                      (ins "llvm::StringRef":$fn), [{}],
+                      /*defaultImplementation=*/[{
+        // Determine whether the callee is the free function named `fn` from
+        // the "std" namespace. Member functions are excluded, e.g. a call to
+        // std::string::find is not a call to std::find, and so are variadic
+        // functions, which cannot be the standard entity. The AST node is
+        // null when CIR was parsed from text.
+        if (!$_attr.getAst())
+          return false;
+        const clang::FunctionDecl *fd = $_attr.getAst()->getDirectCallee();
+        return fd && !fd->isCXXClassMember() && !fd->isVariadic() &&
+               fd->isInStdNamespace() && fd->getIdentifier() &&
+               fd->getName() == fn;
+      }]>
+    ];
+  }
 } // namespace cir
 
 #endif // MLIR_CIR_INTERFACES_ASTATTRINTERFACES_TD

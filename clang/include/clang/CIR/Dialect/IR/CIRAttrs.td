@@ -1677,6 +1677,10 @@ def CIR_ASTVarDeclAttr : CIR_AST<"VarDecl", "var.decl", [
   ASTVarDeclInterface
 ]>;
 
+def CIR_ASTCallExprAttr : CIR_AST<"CallExpr", "call.expr", [
+  ASTCallExprInterface
+]>;
+
 //===----------------------------------------------------------------------===//
 // AnnotationAttr
 //===----------------------------------------------------------------------===//
