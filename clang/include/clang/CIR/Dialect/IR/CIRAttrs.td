@@ -1296,6 +1296,53 @@ def CIR_CXXAssignAttr : CIR_Attr<"CXXAssign", "cxx_assign"> {
 // FuncInfoAttr
 //===----------------------------------------------------------------------===//
 
+// The standard library entities the IdiomRecognizer pass knows. Each entry
+// pairs with one operation in CIRStdOps.td, which carries it through its
+// getFuncKind helper.
+def CIR_KnownFuncKind : CIR_I32EnumAttr<"KnownFuncKind",
+    "known standard library entity", [
+  I32EnumAttrCase<"StdFind", 1, "std_find">,
+]> {
+  let genSpecializedAttr = 0;
+}
+
+def CIR_FuncIdentityAttr : CIR_Attr<"FuncIdentity", "func_identity"> {
+  let summary = "Identifies a function as a known standard library entity";
+  let description = [{
+    Names the standard library entity a function represents, so that
+    transformations can recognize calls to well known library functions
+    without decoding mangled symbol names.
+
+    The tag names the whole entity. For `std_find` that is the free
+    function named `find` in the `std` namespace, so a member function, a
+    static member, or an operator can never carry the tag of a free
+    function. CIRGen computes the tag from the declaration while it still
+    exists. Membership in `std` follows the declaration rather than the
+    spelling at any use site, and inline namespaces, such as the versioning
+    namespace of libc++, are looked through, so a function declared in
+    `std::__1` counts as a member of `std`.
+
+    The recognizer still checks the shape of each call, so the tag never
+    has to encode signatures. A function that matches no known entity
+    carries no attribute, and the recognizer stays away from it.
+
+    Example:
+    ```
+    #cir.func_identity<std_find>
+    ```
+  }];
+
+  let parameters = (ins
+    EnumParameter<CIR_KnownFuncKind>:$kind
+  );
+
+  let assemblyFormat = [{
+    `<` $kind `>`
+  }];
+
+  let canHaveIllegalCXXABIType = 0;
+}
+
 // The attributes accepted in the optional func_info slot on cir.func. Each
 // form records one kind of precomputed fact about the function. The special
 // member forms embed the record type they operate on, and the CXX ABI
@@ -1303,7 +1350,8 @@ def CIR_CXXAssignAttr : CIR_Attr<"CXXAssign", "cxx_assign"> {
 def CIR_FuncInfoAttr : AnyAttrOf<[
   CIR_CXXCtorAttr,
   CIR_CXXDtorAttr,
-  CIR_CXXAssignAttr
+  CIR_CXXAssignAttr,
+  CIR_FuncIdentityAttr
 ], "function information attribute">;
 
 //===----------------------------------------------------------------------===//

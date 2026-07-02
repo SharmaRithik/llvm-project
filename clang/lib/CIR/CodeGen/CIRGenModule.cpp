@@ -3446,6 +3446,9 @@ CIRGenModule::createCIRFunction(mlir::Location loc, StringRef name,
     // Mark C++ special member functions (Constructor, Destructor etc.)
     setCXXSpecialMemberAttr(func, funcDecl);
 
+    // Tag functions that match a known standard library entity.
+    setFuncIdentityAttr(func, funcDecl);
+
     if (!cgf)
       theModule.push_back(func);
 
@@ -3520,6 +3523,35 @@ void CIRGenModule::setCXXSpecialMemberAttr(
     funcOp.setFuncInfoAttr(cxxAssign);
     return;
   }
+}
+
+void CIRGenModule::setFuncIdentityAttr(cir::FuncOp funcOp,
+                                       const clang::FunctionDecl *funcDecl) {
+  // Only a function with a plain identifier can match a known entity.
+  if (!funcDecl || !funcDecl->getIdentifier())
+    return;
+
+  // For a member function the record decides std membership. Inline
+  // namespaces, like the versioning namespace of libc++, are looked through.
+  const auto *method = dyn_cast<CXXMethodDecl>(funcDecl);
+  bool inStdNamespace = method ? method->getParent()->isInStdNamespace()
+                               : funcDecl->isInStdNamespace();
+  if (!inStdNamespace)
+    return;
+
+  // A tag names one entity by name, freeness, and std membership, so a
+  // member like char_traits::find can never take the tag of the free
+  // std::find. Call shapes are checked by the recognizer, and the names
+  // and the tags come from CIRStdOps.td.
+  bool freeFunction = !method;
+  std::optional<cir::KnownFuncKind> kind;
+  if (freeFunction && funcDecl->getName() == cir::StdFindOp::getFunctionName())
+    kind = cir::StdFindOp::getFuncKind();
+
+  if (!kind)
+    return;
+
+  funcOp.setFuncInfoAttr(cir::FuncIdentityAttr::get(&getMLIRContext(), *kind));
 }
 
 static void setWindowsItaniumDLLImport(CIRGenModule &cgm, bool isLocal,
