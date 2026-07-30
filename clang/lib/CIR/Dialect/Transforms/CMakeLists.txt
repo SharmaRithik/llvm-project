@@ -11,6 +11,7 @@ add_clang_library(MLIRCIRTransforms
   FlattenCFG.cpp
   HoistAllocas.cpp
   LoweringPrepare.cpp
+  LoopInterchange.cpp
   GotoSolver.cpp
   IdiomRecognizer.cpp
   LibOpt.cpp
@@ -31,6 +32,7 @@ add_clang_library(MLIRCIRTransforms
   MLIRTransformUtils
 
   MLIRCIR
+  MLIRCIRAnalysis
   MLIRCIRInterfaces
   MLIRCIRTargetLowering
   MLIROpenACCDialect

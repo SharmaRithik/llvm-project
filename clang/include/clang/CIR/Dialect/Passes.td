@@ -48,6 +48,21 @@ def CIRSimplify : Pass<"cir-simplify"> {
   let dependentDialects = ["cir::CIRDialect"];
 }
 
+def CIRLoopInterchange : Pass<"cir-loop-interchange"> {
+  let summary = "Analyzes and interchanges suitable CIR loop nests";
+  let description = [{
+    Recover canonical induction variables and normalized integer domains from
+    structured CIR loop nests. The pass only reports recognized domains until
+    legality and rewriting support are enabled.
+  }];
+  let constructor = "mlir::createCIRLoopInterchangePass()";
+  let dependentDialects = ["cir::CIRDialect"];
+  let options = [
+    Option<"emitAnalysisRemarks", "emit-analysis-remarks", "bool",
+           /*default=*/"false", "Report recognized loop domains">
+  ];
+}
+
 def HoistAllocas : Pass<"cir-hoist-allocas"> {
   let summary = "Hoist allocas to the entry of the function";
   let description = [{
