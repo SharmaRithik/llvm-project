@@ -33,7 +33,8 @@ runCIRToCIRPasses(mlir::ModuleOp theModule, mlir::MLIRContext &mlirContext,
                   clang::ASTContext &astContext, bool enableVerifier,
                   bool enableIdiomRecognizer, bool enableCIRSimplify,
                   bool enableLibOpt, llvm::StringRef libOptOptions,
-                  bool enableCallConvLowering) {
+                  bool enableCallConvLowering,
+                  bool enableLoopPatternRecognizer) {
 
   llvm::TimeTraceScope scope("CIR To CIR Passes");
 
@@ -45,6 +46,9 @@ runCIRToCIRPasses(mlir::ModuleOp theModule, mlir::MLIRContext &mlirContext,
 
   if (enableIdiomRecognizer)
     pm.addPass(mlir::createIdiomRecognizerPass());
+
+  if (enableLoopPatternRecognizer)
+    pm.addPass(mlir::createLoopPatternRecognizerPass());
 
   if (enableLibOpt) {
     auto libOptPass = mlir::createLibOptPass();

@@ -195,6 +195,18 @@ def IdiomRecognizer : Pass<"cir-idiom-recognizer", "mlir::ModuleOp"> {
   let dependentDialects = ["cir::CIRDialect"];
 }
 
+def LoopPatternRecognizer : Pass<"cir-loop-pattern-recognizer", "mlir::ModuleOp"> {
+  let summary = "Name the loop nest shapes LLVM declines to interchange";
+  let description = [{
+    This pass classifies two deep loop nests by the start value and the exit
+    bound of the inner loop, and by what the inner body reads and writes, and
+    reports each shape it recognizes by name. It only reports, it transforms
+    nothing.
+  }];
+  let constructor = "mlir::createLoopPatternRecognizerPass()";
+  let dependentDialects = ["cir::CIRDialect"];
+}
+
 def LibOpt : Pass<"cir-lib-opt"> {
   let summary = "Optimize C/C++ library calls";
   let description = [{

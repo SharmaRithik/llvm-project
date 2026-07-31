@@ -423,6 +423,10 @@ public:
   LLVM_PREFERRED_TYPE(bool)
   unsigned ClangIREnableIdiomRecognizer : 1;
 
+  /// Enable Clang IR (CIR) loop pattern recognizer
+  LLVM_PREFERRED_TYPE(bool)
+  unsigned ClangIREnableLoopPatternRecognizer : 1;
+
   /// Enable Clang IR (CIR) calling-convention lowering
   LLVM_PREFERRED_TYPE(bool)
   unsigned ClangIREnableCallConvLowering : 1;
@@ -569,6 +573,7 @@ public:
         EmitPrettySymbolGraphs(false), GenReducedBMI(false),
         UseClangIRPipeline(false), ClangIRDisablePasses(false),
         ClangIRDisableCIRVerifier(false), ClangIREnableIdiomRecognizer(false),
+        ClangIREnableLoopPatternRecognizer(false),
         ClangIREnableCallConvLowering(false), ClangIRLibOptEnabled(false),
         TimeTraceGranularity(500), TimeTraceVerbose(false) {}
 

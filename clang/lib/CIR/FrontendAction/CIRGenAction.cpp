@@ -145,7 +145,8 @@ public:
               MlirModule, MlirCtx, C, !FEOptions.ClangIRDisableCIRVerifier,
               FEOptions.ClangIREnableIdiomRecognizer, CGO.OptimizationLevel > 0,
               EnableLibOpt, LibOptOptions,
-              FEOptions.ClangIREnableCallConvLowering)
+              FEOptions.ClangIREnableCallConvLowering,
+              FEOptions.ClangIREnableLoopPatternRecognizer)
               .failed()) {
         CI.getDiagnostics().Report(diag::err_cir_to_cir_transform_failed);
         return;
