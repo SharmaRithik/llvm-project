@@ -39,6 +39,8 @@ struct CIRLoopInterchangePass
       if (failed(nest) || !emitAnalysisRemarks)
         continue;
 
+      cir::LoopMemoryAnalysis memory = cir::analyzeLoopMemory(*nest);
+
       std::string message;
       llvm::raw_string_ostream os(message);
       os << "recognized loop nest";
@@ -58,6 +60,7 @@ struct CIRLoopInterchangePass
       os << ' ' << cir::stringifyCmpOpKind(nest->inner.comparison.getKind())
          << ' ';
       nest->inner.conditionRHS.print(os);
+      os << " memory " << cir::stringifyLoopMemoryLegality(memory.result);
       loop.emitRemark(os.str());
     }
 

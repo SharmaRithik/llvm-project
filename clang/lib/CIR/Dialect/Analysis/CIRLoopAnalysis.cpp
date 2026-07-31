@@ -10,6 +10,8 @@
 
 #include "mlir/IR/Block.h"
 #include "mlir/IR/Operation.h"
+#include "mlir/IR/SymbolTable.h"
+#include "mlir/Interfaces/SideEffectInterfaces.h"
 #include "llvm/ADT/STLExtras.h"
 
 using namespace mlir;
@@ -67,6 +69,31 @@ bool LoopDomainExpr::dependsOn(cir::AllocaOp variable) const {
   if (kind == Kind::Induction)
     return induction == variable;
   return (lhs && lhs->dependsOn(variable)) || (rhs && rhs->dependsOn(variable));
+}
+
+bool LoopDomainExpr::isStructurallyEqual(const LoopDomainExpr &other) const {
+  if (kind != other.kind)
+    return false;
+
+  switch (kind) {
+  case Kind::Constant: {
+    auto lhsConstant = source.getDefiningOp<cir::ConstantOp>();
+    auto rhsConstant = other.source.getDefiningOp<cir::ConstantOp>();
+    return lhsConstant && rhsConstant &&
+           lhsConstant.getValue() == rhsConstant.getValue();
+  }
+  case Kind::Symbol:
+    return source == other.source;
+  case Kind::Induction:
+    return induction == other.induction;
+  case Kind::Add:
+  case Kind::Sub:
+  case Kind::Mul:
+  case Kind::Div:
+    return lhs->isStructurallyEqual(*other.lhs) &&
+           rhs->isStructurallyEqual(*other.rhs);
+  }
+  llvm_unreachable("unknown loop domain expression kind");
 }
 
 void LoopDomainExpr::print(llvm::raw_ostream &os) const {
@@ -207,6 +234,189 @@ FailureOr<TwoLevelLoopNest> analyzeTwoLevelLoopNest(cir::ForOp outerLoop) {
     return failure();
 
   return TwoLevelLoopNest{std::move(*outer), std::move(*inner)};
+}
+
+StringRef stringifyLoopMemoryLegality(LoopMemoryLegality result) {
+  switch (result) {
+  case LoopMemoryLegality::Safe:
+    return "safe";
+  case LoopMemoryLegality::UnsupportedOperation:
+    return "unsupported operation";
+  case LoopMemoryLegality::UnsupportedAddress:
+    return "unsupported address";
+  case LoopMemoryLegality::PotentialDependence:
+    return "potential dependence";
+  }
+  llvm_unreachable("unknown loop memory legality result");
+}
+
+static FailureOr<Value> stripIndexCast(Value value) {
+  while (auto cast = value.getDefiningOp<cir::CastOp>()) {
+    if (cast.getKind() != cir::CastKind::integral)
+      return failure();
+
+    auto sourceType = dyn_cast<cir::IntType>(cast.getSrc().getType());
+    auto resultType = dyn_cast<cir::IntType>(cast.getResult().getType());
+    if (!sourceType || !resultType ||
+        sourceType.isSigned() != resultType.isSigned() ||
+        sourceType.getWidth() > resultType.getWidth())
+      return failure();
+    value = cast.getSrc();
+  }
+  return value;
+}
+
+static FailureOr<LoopMemoryAccess>
+analyzeMemoryAccess(Operation *operation, Value address, bool isWrite,
+                    ArrayRef<cir::AllocaOp> inductions) {
+  SmallVector<Value, 2> indices;
+  Value current = address;
+  while (auto element = current.getDefiningOp<cir::GetElementOp>()) {
+    indices.insert(indices.begin(), element.getIndex());
+    current = element.getBase();
+  }
+
+  auto getGlobal = current.getDefiningOp<cir::GetGlobalOp>();
+  if (!getGlobal || getGlobal.getTls())
+    return failure();
+
+  auto base = SymbolTable::lookupNearestSymbolFrom<cir::GlobalOp>(
+      getGlobal, getGlobal.getNameAttr());
+  if (!base || base.isDeclaration() || base.getAliasee() ||
+      !cir::isLocalLinkage(base.getLinkage()))
+    return failure();
+
+  SmallVector<LoopDomainExpr, 2> subscripts;
+  for (Value index : indices) {
+    FailureOr<Value> stripped = stripIndexCast(index);
+    if (failed(stripped))
+      return failure();
+    FailureOr<LoopDomainExpr> expression =
+        buildLoopDomainExpr(*stripped, inductions);
+    if (failed(expression))
+      return failure();
+    subscripts.push_back(std::move(*expression));
+  }
+
+  return LoopMemoryAccess{operation, base, std::move(subscripts), isWrite};
+}
+
+static bool hasIdenticalSubscripts(const LoopMemoryAccess &lhs,
+                                   const LoopMemoryAccess &rhs) {
+  if (lhs.subscripts.size() != rhs.subscripts.size())
+    return false;
+  for (auto [lhsSubscript, rhsSubscript] :
+       llvm::zip(lhs.subscripts, rhs.subscripts))
+    if (!lhsSubscript.isStructurallyEqual(rhsSubscript))
+      return false;
+  return true;
+}
+
+static bool isInjectiveOverNest(const LoopMemoryAccess &access,
+                                const TwoLevelLoopNest &nest) {
+  if (access.subscripts.size() != 2)
+    return false;
+
+  bool foundOuter = false;
+  bool foundInner = false;
+  for (const LoopDomainExpr &subscript : access.subscripts) {
+    if (subscript.getKind() != LoopDomainExpr::Kind::Induction)
+      return false;
+    if (subscript.getInduction() == nest.outer.induction) {
+      if (foundOuter)
+        return false;
+      foundOuter = true;
+      continue;
+    }
+    if (subscript.getInduction() == nest.inner.induction) {
+      if (foundInner)
+        return false;
+      foundInner = true;
+      continue;
+    }
+    return false;
+  }
+  return foundOuter && foundInner;
+}
+
+LoopMemoryAnalysis analyzeLoopMemory(const TwoLevelLoopNest &nest) {
+  SmallVector<LoopMemoryAccess, 8> accesses;
+  LoopMemoryLegality result = LoopMemoryLegality::Safe;
+  cir::ForOp innerLoop = nest.inner.loop;
+  cir::AllocaOp outerInduction = nest.outer.induction;
+  cir::AllocaOp innerInduction = nest.inner.induction;
+  Value outerInductionAddress = outerInduction.getAddr();
+  Value innerInductionAddress = innerInduction.getAddr();
+  SmallVector<cir::AllocaOp, 2> inductions = {outerInduction, innerInduction};
+
+  WalkResult walkResult = innerLoop.getBody().walk([&](Operation *operation)
+                                                       -> WalkResult {
+    if (auto load = dyn_cast<cir::LoadOp>(operation)) {
+      if (load.getIsVolatile() || load.getMemOrder()) {
+        result = LoopMemoryLegality::UnsupportedOperation;
+        return WalkResult::interrupt();
+      }
+      if (load.getAddr() == outerInductionAddress ||
+          load.getAddr() == innerInductionAddress)
+        return WalkResult::advance();
+      FailureOr<LoopMemoryAccess> access =
+          analyzeMemoryAccess(operation, load.getAddr(), false, inductions);
+      if (failed(access)) {
+        result = LoopMemoryLegality::UnsupportedAddress;
+        return WalkResult::interrupt();
+      }
+      accesses.push_back(std::move(*access));
+      return WalkResult::advance();
+    }
+
+    if (auto store = dyn_cast<cir::StoreOp>(operation)) {
+      if (store.getIsVolatile() || store.getMemOrder()) {
+        result = LoopMemoryLegality::UnsupportedOperation;
+        return WalkResult::interrupt();
+      }
+      FailureOr<LoopMemoryAccess> access =
+          analyzeMemoryAccess(operation, store.getAddr(), true, inductions);
+      if (failed(access)) {
+        result = LoopMemoryLegality::UnsupportedAddress;
+        return WalkResult::interrupt();
+      }
+      accesses.push_back(std::move(*access));
+      return WalkResult::advance();
+    }
+
+    if (isa<cir::YieldOp, cir::ScopeOp, cir::GetGlobalOp, cir::GetElementOp,
+            cir::PtrStrideOp>(operation))
+      return WalkResult::advance();
+    if (isa<cir::LoopOpInterface, cir::BreakOp, cir::ContinueOp, cir::ReturnOp>(
+            operation) ||
+        operation->getNumRegions() != 0 ||
+        !mlir::isMemoryEffectFree(operation)) {
+      result = LoopMemoryLegality::UnsupportedOperation;
+      return WalkResult::interrupt();
+    }
+    return WalkResult::advance();
+  });
+
+  if (walkResult.wasInterrupted())
+    return LoopMemoryAnalysis{result, std::move(accesses)};
+
+  for (const LoopMemoryAccess &access : accesses) {
+    if (access.isWrite && !isInjectiveOverNest(access, nest))
+      return LoopMemoryAnalysis{LoopMemoryLegality::PotentialDependence,
+                                std::move(accesses)};
+  }
+
+  for (auto lhs = accesses.begin(), end = accesses.end(); lhs != end; ++lhs) {
+    for (auto rhs = std::next(lhs); rhs != end; ++rhs) {
+      if ((!lhs->isWrite && !rhs->isWrite) || lhs->base != rhs->base)
+        continue;
+      if (!hasIdenticalSubscripts(*lhs, *rhs))
+        return LoopMemoryAnalysis{LoopMemoryLegality::PotentialDependence,
+                                  std::move(accesses)};
+    }
+  }
+
+  return LoopMemoryAnalysis{LoopMemoryLegality::Safe, std::move(accesses)};
 }
 
 } // namespace cir

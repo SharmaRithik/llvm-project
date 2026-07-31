@@ -12,6 +12,7 @@
 #include "mlir/Support/LLVM.h"
 #include "clang/CIR/Dialect/IR/CIRDialect.h"
 #include "llvm/ADT/SmallVector.h"
+#include "llvm/ADT/StringRef.h"
 #include "llvm/Support/raw_ostream.h"
 
 #include <memory>
@@ -36,6 +37,7 @@ public:
   const LoopDomainExpr *getRHS() const { return rhs.get(); }
 
   bool dependsOn(cir::AllocaOp variable) const;
+  bool isStructurallyEqual(const LoopDomainExpr &other) const;
   void print(llvm::raw_ostream &os) const;
 
 private:
@@ -57,6 +59,10 @@ private:
   std::unique_ptr<LoopDomainExpr> rhs;
 };
 
+mlir::FailureOr<LoopDomainExpr>
+buildLoopDomainExpr(mlir::Value value,
+                    mlir::ArrayRef<cir::AllocaOp> inductions);
+
 /// Canonical memory form loop domain
 struct LoopDomain {
   cir::ForOp loop;
@@ -76,6 +82,29 @@ struct TwoLevelLoopNest {
   LoopDomain inner;
 };
 
+enum class LoopMemoryLegality {
+  Safe,
+  UnsupportedOperation,
+  UnsupportedAddress,
+  PotentialDependence
+};
+
+llvm::StringRef stringifyLoopMemoryLegality(LoopMemoryLegality result);
+
+struct LoopMemoryAccess {
+  mlir::Operation *operation;
+  cir::GlobalOp base;
+  llvm::SmallVector<LoopDomainExpr, 2> subscripts;
+  bool isWrite;
+};
+
+struct LoopMemoryAnalysis {
+  LoopMemoryLegality result;
+  llvm::SmallVector<LoopMemoryAccess, 8> accesses;
+
+  bool isSafe() const { return result == LoopMemoryLegality::Safe; }
+};
+
 /// Canonical unit step induction variable and loop domain
 mlir::FailureOr<LoopDomain>
 analyzeLoopDomain(cir::ForOp loop,
@@ -83,6 +112,9 @@ analyzeLoopDomain(cir::ForOp loop,
 
 /// Two level loop nest with transparent CIR scopes
 mlir::FailureOr<TwoLevelLoopNest> analyzeTwoLevelLoopNest(cir::ForOp outerLoop);
+
+/// Restricted memory independence for pointwise array nests
+LoopMemoryAnalysis analyzeLoopMemory(const TwoLevelLoopNest &nest);
 
 } // namespace cir
 
