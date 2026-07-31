@@ -195,7 +195,24 @@ def IdiomRecognizer : Pass<"cir-idiom-recognizer", "mlir::ModuleOp"> {
   let dependentDialects = ["cir::CIRDialect"];
 }
 
-def LoopPatternRecognizer : Pass<"cir-loop-pattern-recognizer", "mlir::ModuleOp"> {
+def LoopOpt : Pass<"cir-loop-opt"> {
+  let summary = "High level loop optimizations on structured CIR";
+  let description = [{
+    Loop transforms on structured CIR while cir.for and cir.get_element are
+    visible. This step recognizes canonical counted loop nests. A test only
+    option annotates the recognized nest depth with no effect on codegen.
+  }];
+  let constructor = "mlir::createLoopOptPass()";
+  let dependentDialects = ["cir::CIRDialect"];
+  let options = [
+    Option<"testAnnotate", "test-annotate", "bool", /*default=*/"false",
+           "Attach a cir.loopopt.nest_depth attribute to each recognized "
+           "counted loop nest for testing only with no effect on codegen.">
+  ];
+}
+
+def LoopPatternRecognizer
+    : Pass<"cir-loop-pattern-recognizer", "mlir::ModuleOp"> {
   let summary = "Name the loop nest shapes LLVM declines to interchange";
   let description = [{
     This pass classifies two deep loop nests by the start value and the exit

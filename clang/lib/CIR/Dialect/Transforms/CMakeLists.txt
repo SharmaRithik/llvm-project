@@ -14,6 +14,7 @@ add_clang_library(MLIRCIRTransforms
   GotoSolver.cpp
   IdiomRecognizer.cpp
   LibOpt.cpp
+  LoopOpt.cpp
   LoopPatternRecognizer.cpp
 
   DEPENDS
