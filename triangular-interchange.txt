@@ -1,0 +1,113 @@
+CIR TRIANGULAR LOOP INTERCHANGE
+===============================
+
+WHAT CHANGED
+
+All eight of these kernels walk a two dimensional array with the inner loop
+varying the row index, so each step of the inner loop moves a whole row in
+memory. On a 1024 by 1024 double array that is an 8 KB stride, one cache line
+consumed per element. Swapping the two loops makes the inner index the
+contiguous one, and the nest becomes unit stride and vectorizable. LLVM's
+LoopInterchange declines all eight, seven of them in isLoopStructureUnderstood
+because the inner loop's bound or start names the outer induction variable, and
+one because the start arrives as a function Argument rather than a Constant or
+an Instruction. ClangIR had no loop pass at all, so -fclangir -O3 tracked
+clang -O3 and the gap stayed open.
+
+The cir-loop-opt pass closes it. It runs on structured CIR while the cir.for
+regions and the cir.get_element subscripts are still intact, which is what
+makes these shapes readable at all. It recognizes four bound forms, rebuilds
+the bounds rather than copying them across, and swaps the nest. It reaches the
+hand written ceiling on all eight, 3.6x to 75.9x, with every checksum bit
+identical to the clang -O3 baseline.
+
+
+THE EIGHT SHAPES
+
+The swap is always the same. What differs is the arithmetic needed to rebuild
+the bounds. Shown with N = 1024, K = 64, M = 512.
+
+tri_upper_bound, tri_ldlt_update, tri_fill
+  The bound is the outer variable. Same nest for all three, different bodies.
+
+    for (int i = 1; i < N; i++)          for (int j = 0; j < N-1; j++)
+      for (int j = 0; j < i; j++)   ->     for (int i = j+1; i < N; i++)
+
+tri_addk_bound
+  Offset bound. The rebuilt start needs a clamp at zero.
+
+    for (int i = 0; i < N-K; i++)        for (int j = 0; j < N-1; j++)
+      for (int j = 0; j < i+K; j++)  ->      for (int i = max(0, j-K+1);
+                                                  i < N-K; i++)
+
+tri_variant_2i
+  Scaled bound. Inverting it needs an integer division.
+
+    for (int i = 1; i < M; i++)          for (int j = 0; j < 2*M-2; j++)
+      for (int j = 0; j < 2*i; j++) ->     for (int i = j/2+1; i < M; i++)
+
+tri_mul_bound
+  Non affine. The exit test names neither variable on its own.
+
+    for (int i = 1; i < N; i++)          for (int j = 0; j < N; j++)
+      for (int j = 0; j*i < N; j++)  ->      for (int i = 1;
+                                                  i < (j ? (N-1)/j+1 : N); i++)
+
+tri_lower_start
+  The triangle is on the start, not the bound.
+
+    for (int i = 0; i < N; i++)          for (int j = 0; j < N; j++)
+      for (int j = i; j < N; j++)   ->     for (int i = 0; i < j+1; i++)
+
+tri_arg_start
+  Rectangular. No bound arithmetic at all, a pure swap. LLVM refuses only
+  because lo arrives as a function argument.
+
+    for (long i = 0; i < N; i++)         for (long j = lo; j < N; j++)
+      for (long j = lo; j < N; j++) ->     for (long i = 0; i < N; i++)
+
+
+RESULTS
+
+Serial and pinned, minimum of five launches, times in milliseconds.
+
+  TEST              clang -O3   CIR -O3  CIR+Pass  speedup  handwrit  detect
+  tri_ldlt_update      26.138    26.155     0.345   75.86x     0.346  found
+  tri_addk_bound       10.694    10.635     0.217   49.12x     0.217  found
+  tri_upper_bound      10.608    10.690     0.219   48.82x     0.222  found
+  tri_arg_start        22.779    22.777     0.524   43.49x     0.521  found
+  tri_variant_2i        5.314     5.316     0.126   42.13x     0.125  found
+  tri_fill              2.030     2.033     0.056   36.53x     0.056  found
+  tri_mul_bound        21.468    21.548     3.527    6.11x     3.607  found
+  tri_lower_start       7.822     7.878     2.185    3.61x     2.183  found
+
+All eight report correctness ok, checksums bit identical to the clang -O3
+binary.
+
+The CIR -O3 column sits on clang -O3 in all eight, within a percent. That is
+the gap the suite exists to measure. The pass column matches the hand written
+column everywhere, so there is no headroom left in these shapes.
+
+tri_mul_bound at 6.11x and tri_lower_start at 3.61x are structural rather than
+weak transforms. The first has a hyperbolic iteration space with far less
+traffic to fix. The second trades three column gathers for one scatter. Both
+sit at their own ceiling.
+
+
+RUNNING IT
+
+  clang -fclangir -march=native -Xclang -emit-cir -S kernel.c -o k.cir
+  cir-opt --cir-loop-opt k.cir -o k.opt.cir
+  cir-translate --cir-to-llvmir k.opt.cir -o k.ll
+
+There is no driver flag for cir-loop-opt, cir-opt is the only entry point. The
+detection column comes from a separate pass, cir-loop-pattern-recognizer, which
+names the shape without transforming it and has the driver flag
+-Xclang -clangir-enable-loop-pattern-recognizer.
+
+
+STATE
+
+No lit tests yet for either pass. Verification so far is the cirBench suite,
+a 150 case differential enumeration over the four bound forms with zero
+mismatches, and the upstream CIR lit suite at 888 pass and 0 fail.
