@@ -3,6 +3,9 @@
 // RUN: cir-opt %t.cir \
 // RUN:   "--cir-loop-interchange=emit-analysis-remarks=true" \
 // RUN:   -o /dev/null 2>&1 | FileCheck %s
+// RUN: cir-opt %t.cir \
+// RUN:   --cir-loop-interchange \
+// RUN:   | FileCheck %s --check-prefix=INTERCHANGE
 
 #define N 128
 #define K 8
@@ -100,3 +103,26 @@ void rejected_volatile(void) {
     for (int j = 0; j < i; ++j)
       B[j][i] = A[j][i];
 }
+
+// INTERCHANGE-LABEL: cir.func dso_local @tri_upper()
+// INTERCHANGE: [[I:%[0-9]+]] = cir.alloca "i"
+// INTERCHANGE-NEXT: [[J:%[0-9]+]] = cir.alloca "j"
+// INTERCHANGE-NEXT: [[ZERO:%[0-9]+]] = cir.const #cir.int<0>
+// INTERCHANGE-NEXT: cir.store{{.*}} [[ZERO]], [[J]]
+// INTERCHANGE-NEXT: cir.for : cond {
+// INTERCHANGE-NEXT: [[JCOND:%[0-9]+]] = cir.load{{.*}} [[J]]
+// INTERCHANGE-NEXT: [[JBOUND:%[0-9]+]] = cir.const #cir.int<127>
+// INTERCHANGE-NEXT: [[JCMP:%[0-9]+]] = cir.cmp lt [[JCOND]], [[JBOUND]]
+// INTERCHANGE: } body {
+// INTERCHANGE-NEXT: [[JVALUE:%[0-9]+]] = cir.load{{.*}} [[J]]
+// INTERCHANGE-NEXT: [[ISTART:%[0-9]+]] = cir.inc nsw [[JVALUE]]
+// INTERCHANGE-NEXT: cir.store{{.*}} [[ISTART]], [[I]]
+// INTERCHANGE-NEXT: cir.for : cond {
+// INTERCHANGE-NEXT: [[ICOND:%[0-9]+]] = cir.load{{.*}} [[I]]
+// INTERCHANGE-NEXT: [[IBOUND:%[0-9]+]] = cir.const #cir.int<128>
+// INTERCHANGE-NEXT: [[ICMP:%[0-9]+]] = cir.cmp lt [[ICOND]], [[IBOUND]]
+
+// INTERCHANGE-LABEL: cir.func dso_local @shifted_dependence()
+// INTERCHANGE: [[SHIFTI:%[0-9]+]] = cir.alloca "i"
+// INTERCHANGE-NEXT: [[SHIFTONE:%[0-9]+]] = cir.const #cir.int<1>
+// INTERCHANGE-NEXT: cir.store{{.*}} [[SHIFTONE]], [[SHIFTI]]
