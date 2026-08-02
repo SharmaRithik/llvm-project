@@ -6,6 +6,12 @@
 // RUN: cir-opt %t.cir \
 // RUN:   --cir-loop-interchange \
 // RUN:   | FileCheck %s --check-prefix=INTERCHANGE
+// RUN: %clang_cc1 -triple x86_64-unknown-linux-gnu -fclangir -O3 \
+// RUN:   -floop-interchange -emit-cir %s -o - \
+// RUN:   | FileCheck %s --check-prefix=INTERCHANGE
+// RUN: %clang_cc1 -triple x86_64-unknown-linux-gnu -fclangir -O3 \
+// RUN:   -floop-interchange -fno-loop-interchange -emit-cir %s -o - \
+// RUN:   | FileCheck %s --check-prefix=NOINTERCHANGE
 
 #define N 128
 #define K 8
@@ -97,6 +103,13 @@ void unknown_call(void) {
       opaque();
 }
 
+// CHECK-DAG: recognized loop nest in @already_contiguous {{.*}} memory safe profitability not profitable
+void already_contiguous(void) {
+  for (int i = 1; i < N; ++i)
+    for (int j = 0; j < i; ++j)
+      B[i][j] = A[i][j];
+}
+
 // CHECK-NOT: recognized loop nest in @rejected_volatile
 void rejected_volatile(void) {
   for (volatile int i = 1; i < N; ++i)
@@ -126,3 +139,14 @@ void rejected_volatile(void) {
 // INTERCHANGE: [[SHIFTI:%[0-9]+]] = cir.alloca "i"
 // INTERCHANGE-NEXT: [[SHIFTONE:%[0-9]+]] = cir.const #cir.int<1>
 // INTERCHANGE-NEXT: cir.store{{.*}} [[SHIFTONE]], [[SHIFTI]]
+
+// INTERCHANGE-LABEL: cir.func dso_local @already_contiguous()
+// INTERCHANGE: [[CONTIGI:%[0-9]+]] = cir.alloca "i"
+// INTERCHANGE-NEXT: [[CONTIGONE:%[0-9]+]] = cir.const #cir.int<1>
+// INTERCHANGE-NEXT: cir.store{{.*}} [[CONTIGONE]], [[CONTIGI]]
+
+// NOINTERCHANGE-LABEL: cir.func dso_local @tri_upper()
+// NOINTERCHANGE: [[NOI:%[0-9]+]] = cir.alloca "i"
+// NOINTERCHANGE-NEXT: [[NOONE:%[0-9]+]] = cir.const #cir.int<1>
+// NOINTERCHANGE-NEXT: cir.store{{.*}} [[NOONE]], [[NOI]]
+// NOINTERCHANGE-NEXT: cir.for : cond {

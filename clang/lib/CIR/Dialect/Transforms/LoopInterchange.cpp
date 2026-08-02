@@ -12,6 +12,7 @@
 #include "clang/CIR/Dialect/IR/CIRDialect.h"
 #include "clang/CIR/Dialect/Passes.h"
 #include "llvm/ADT/APInt.h"
+#include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/Support/raw_ostream.h"
 
@@ -41,6 +42,21 @@ static bool isConstantZero(const cir::LoopDomainExpr &expression) {
 static bool isConstantOne(const cir::LoopDomainExpr &expression) {
   cir::IntAttr constant = getIntegerConstant(expression);
   return constant && constant.getValue().isOne();
+}
+
+static bool isProfitableInterchange(const cir::TwoLevelLoopNest &nest,
+                                    const cir::LoopMemoryAnalysis &memory) {
+  if (memory.accesses.empty())
+    return false;
+
+  return llvm::all_of(
+      memory.accesses, [&](const cir::LoopMemoryAccess &access) {
+        if (access.subscripts.empty())
+          return false;
+        const cir::LoopDomainExpr &innermost = access.subscripts.back();
+        return innermost.getKind() == cir::LoopDomainExpr::Kind::Induction &&
+               innermost.getInduction() == nest.outer.induction;
+      });
 }
 
 static bool isCanonicalUpperTriangle(cir::TwoLevelLoopNest &nest) {
@@ -213,6 +229,7 @@ struct CIRLoopInterchangePass
         continue;
 
       cir::LoopMemoryAnalysis memory = cir::analyzeLoopMemory(*nest);
+      bool profitable = isProfitableInterchange(*nest, memory);
 
       std::string message;
       llvm::raw_string_ostream os(message);
@@ -234,10 +251,12 @@ struct CIRLoopInterchangePass
          << ' ';
       nest->inner.conditionRHS.print(os);
       os << " memory " << cir::stringifyLoopMemoryLegality(memory.result);
+      os << " profitability " << (profitable ? "profitable" : "not profitable");
       if (emitAnalysisRemarks)
         loop.emitRemark(os.str());
 
-      if (!memory.isSafe() || failed(interchangeCanonicalUpperTriangle(*nest)))
+      if (!memory.isSafe() || !profitable ||
+          failed(interchangeCanonicalUpperTriangle(*nest)))
         continue;
 
       changed = true;

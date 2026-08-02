@@ -155,7 +155,8 @@ public:
       if (runCIRToCIRPasses(
               MlirModule, MlirCtx, C, !FEOptions.ClangIRDisableCIRVerifier,
               FEOptions.ClangIREnableIdiomRecognizer, CGO.OptimizationLevel > 0,
-              EnableLibOpt, LibOptOptions, FEOptions.ClangIRCallConvLowering)
+              CGO.InterchangeLoops, EnableLibOpt, LibOptOptions,
+              FEOptions.ClangIRCallConvLowering)
               .failed()) {
         // Pass-side errors already routed through ClangIRDiagnosticHandler.
         // Skip the generic catch-all if a specific diagnostic was emitted.

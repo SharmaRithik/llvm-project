@@ -52,8 +52,8 @@ def CIRLoopInterchange : Pass<"cir-loop-interchange"> {
   let summary = "Analyzes and interchanges suitable CIR loop nests";
   let description = [{
     Recover canonical induction variables and normalized integer domains from
-    structured CIR loop nests. The pass only reports recognized domains until
-    legality and rewriting support are enabled.
+    structured CIR loop nests. Restricted memory independence and contiguous
+    innermost access profitability guard the loop interchange rewrite.
   }];
   let constructor = "mlir::createCIRLoopInterchangePass()";
   let dependentDialects = ["cir::CIRDialect"];
