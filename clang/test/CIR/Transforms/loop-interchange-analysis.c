@@ -110,6 +110,13 @@ void already_contiguous(void) {
       B[i][j] = A[i][j];
 }
 
+// CHECK-DAG: recognized loop nest in @balanced_layout {{.*}} memory safe profitability not profitable
+void balanced_layout(void) {
+  for (int i = 1; i < N; ++i)
+    for (int j = 0; j < i; ++j)
+      B[j][i] = A[i][j];
+}
+
 // CHECK-NOT: recognized loop nest in @rejected_volatile
 void rejected_volatile(void) {
   for (volatile int i = 1; i < N; ++i)
@@ -135,6 +142,22 @@ void rejected_volatile(void) {
 // INTERCHANGE-NEXT: [[IBOUND:%[0-9]+]] = cir.const #cir.int<128>
 // INTERCHANGE-NEXT: [[ICMP:%[0-9]+]] = cir.cmp lt [[ICOND]], [[IBOUND]]
 
+// INTERCHANGE-LABEL: cir.func dso_local @tri_lower()
+// INTERCHANGE: [[LOWERI:%[0-9]+]] = cir.alloca "i"
+// INTERCHANGE-NEXT: [[LOWERZERO:%[0-9]+]] = cir.const #cir.int<0>
+// INTERCHANGE-NEXT: [[LOWERJ:%[0-9]+]] = cir.alloca "j"
+// INTERCHANGE-NEXT: cir.store{{.*}} [[LOWERZERO]], [[LOWERJ]]
+// INTERCHANGE-NEXT: cir.for : cond {
+// INTERCHANGE-NEXT: [[LOWERJCOND:%[0-9]+]] = cir.load{{.*}} [[LOWERJ]]
+// INTERCHANGE-NEXT: [[LOWERJBOUND:%[0-9]+]] = cir.const #cir.int<128>
+// INTERCHANGE-NEXT: [[LOWERJCMP:%[0-9]+]] = cir.cmp lt [[LOWERJCOND]], [[LOWERJBOUND]]
+// INTERCHANGE: } body {
+// INTERCHANGE-NEXT: cir.store{{.*}} [[LOWERZERO]], [[LOWERI]]
+// INTERCHANGE-NEXT: cir.for : cond {
+// INTERCHANGE-NEXT: [[LOWERICOND:%[0-9]+]] = cir.load{{.*}} [[LOWERI]]
+// INTERCHANGE-NEXT: [[LOWERJVALUE:%[0-9]+]] = cir.load{{.*}} [[LOWERJ]]
+// INTERCHANGE-NEXT: [[LOWERICMP:%[0-9]+]] = cir.cmp le [[LOWERICOND]], [[LOWERJVALUE]]
+
 // INTERCHANGE-LABEL: cir.func dso_local @shifted_dependence()
 // INTERCHANGE: [[SHIFTI:%[0-9]+]] = cir.alloca "i"
 // INTERCHANGE-NEXT: [[SHIFTONE:%[0-9]+]] = cir.const #cir.int<1>
@@ -144,6 +167,11 @@ void rejected_volatile(void) {
 // INTERCHANGE: [[CONTIGI:%[0-9]+]] = cir.alloca "i"
 // INTERCHANGE-NEXT: [[CONTIGONE:%[0-9]+]] = cir.const #cir.int<1>
 // INTERCHANGE-NEXT: cir.store{{.*}} [[CONTIGONE]], [[CONTIGI]]
+
+// INTERCHANGE-LABEL: cir.func dso_local @balanced_layout()
+// INTERCHANGE: [[BALANCEDI:%[0-9]+]] = cir.alloca "i"
+// INTERCHANGE-NEXT: [[BALANCEDONE:%[0-9]+]] = cir.const #cir.int<1>
+// INTERCHANGE-NEXT: cir.store{{.*}} [[BALANCEDONE]], [[BALANCEDI]]
 
 // NOINTERCHANGE-LABEL: cir.func dso_local @tri_upper()
 // NOINTERCHANGE: [[NOI:%[0-9]+]] = cir.alloca "i"

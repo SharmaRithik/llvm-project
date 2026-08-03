@@ -12,9 +12,10 @@
 #include "clang/CIR/Dialect/IR/CIRDialect.h"
 #include "clang/CIR/Dialect/Passes.h"
 #include "llvm/ADT/APInt.h"
-#include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/Support/raw_ostream.h"
+
+#include <iterator>
 
 using namespace mlir;
 
@@ -49,14 +50,25 @@ static bool isProfitableInterchange(const cir::TwoLevelLoopNest &nest,
   if (memory.accesses.empty())
     return false;
 
-  return llvm::all_of(
-      memory.accesses, [&](const cir::LoopMemoryAccess &access) {
-        if (access.subscripts.empty())
-          return false;
-        const cir::LoopDomainExpr &innermost = access.subscripts.back();
-        return innermost.getKind() == cir::LoopDomainExpr::Kind::Induction &&
-               innermost.getInduction() == nest.outer.induction;
-      });
+  unsigned improved = 0;
+  unsigned regressed = 0;
+  for (const cir::LoopMemoryAccess &access : memory.accesses) {
+    if (access.subscripts.empty())
+      return false;
+    const cir::LoopDomainExpr &innermost = access.subscripts.back();
+    if (innermost.getKind() != cir::LoopDomainExpr::Kind::Induction)
+      return false;
+    if (innermost.getInduction() == nest.outer.induction) {
+      ++improved;
+      continue;
+    }
+    if (innermost.getInduction() == nest.inner.induction) {
+      ++regressed;
+      continue;
+    }
+    return false;
+  }
+  return improved > regressed;
 }
 
 static bool isCanonicalUpperTriangle(cir::TwoLevelLoopNest &nest) {
@@ -89,6 +101,32 @@ static bool isCanonicalUpperTriangle(cir::TwoLevelLoopNest &nest) {
   llvm::APInt one(bound.getValue().getBitWidth(), 1);
   return boundType.isSigned() ? bound.getValue().sgt(one)
                               : bound.getValue().ugt(one);
+}
+
+static bool isCanonicalLowerTriangle(cir::TwoLevelLoopNest &nest) {
+  if (nest.outer.comparison.getKind() != cir::CmpOpKind::lt ||
+      nest.inner.comparison.getKind() != cir::CmpOpKind::lt ||
+      !isConstantZero(nest.outer.initial) ||
+      nest.inner.initial.getKind() != cir::LoopDomainExpr::Kind::Induction ||
+      nest.inner.initial.getInduction() != nest.outer.induction)
+    return false;
+
+  if (nest.outer.conditionLHS.getKind() !=
+          cir::LoopDomainExpr::Kind::Induction ||
+      nest.outer.conditionLHS.getInduction() != nest.outer.induction ||
+      nest.outer.conditionRHS.getKind() !=
+          cir::LoopDomainExpr::Kind::Constant ||
+      nest.inner.conditionLHS.getKind() !=
+          cir::LoopDomainExpr::Kind::Induction ||
+      nest.inner.conditionLHS.getInduction() != nest.inner.induction ||
+      nest.inner.conditionRHS.getKind() != cir::LoopDomainExpr::Kind::Constant)
+    return false;
+
+  cir::IntAttr outerBound = getIntegerConstant(nest.outer.conditionRHS);
+  cir::IntAttr innerBound = getIntegerConstant(nest.inner.conditionRHS);
+  return outerBound && innerBound && outerBound == innerBound &&
+         nest.outer.stepLoad.getResult().getType() ==
+             nest.inner.stepLoad.getResult().getType();
 }
 
 static bool hasCanonicalConditionLayout(cir::LoopDomain &domain) {
@@ -133,10 +171,9 @@ static cir::ScopeOp getPerfectNestScope(cir::TwoLevelLoopNest &nest) {
   auto operation = scopeBody.begin();
   if (&*operation++ != nest.inner.induction.getOperation())
     return {};
-  auto innerInitialConstant =
-      nest.inner.initial.getSource().getDefiningOp<cir::ConstantOp>();
-  if (!innerInitialConstant ||
-      &*operation++ != innerInitialConstant.getOperation() ||
+  Operation *innerInitialOperation =
+      nest.inner.initial.getSource().getDefiningOp();
+  if (!innerInitialOperation || &*operation++ != innerInitialOperation ||
       &*operation++ != nest.inner.initialization.getOperation() ||
       &*operation++ != innerLoop.getOperation() ||
       !isa<cir::YieldOp>(&*operation))
@@ -146,6 +183,30 @@ static cir::ScopeOp getPerfectNestScope(cir::TwoLevelLoopNest &nest) {
       nest.outer.initialization->getBlock() != outerLoop->getBlock())
     return {};
   return scope;
+}
+
+static void interchangeLoopStructure(cir::TwoLevelLoopNest &nest,
+                                     cir::ScopeOp scope) {
+  cir::ForOp outerLoop = nest.outer.loop;
+  cir::ForOp innerLoop = nest.inner.loop;
+  Operation *innerInitialOperation =
+      nest.inner.initial.getSource().getDefiningOp();
+  Block *parent = outerLoop->getBlock();
+  Block &outerBody = outerLoop.getBody().front();
+  Block &innerBody = innerLoop.getBody().front();
+
+  nest.inner.induction->moveBefore(outerLoop);
+  innerInitialOperation->moveBefore(outerLoop);
+  nest.inner.initialization->moveBefore(outerLoop);
+  innerLoop->moveBefore(outerLoop);
+  scope.erase();
+
+  outerBody.getOperations().splice(outerBody.begin(), innerBody.getOperations(),
+                                   innerBody.begin(),
+                                   std::prev(innerBody.end()));
+  innerBody.getOperations().splice(innerBody.begin(), parent->getOperations(),
+                                   Block::iterator(outerLoop));
+  nest.outer.initialization->moveBefore(outerLoop);
 }
 
 static LogicalResult
@@ -159,8 +220,6 @@ interchangeCanonicalUpperTriangle(cir::TwoLevelLoopNest &nest) {
 
   auto outerInitialConstant =
       nest.outer.initial.getSource().getDefiningOp<cir::ConstantOp>();
-  auto innerInitialConstant =
-      nest.inner.initial.getSource().getDefiningOp<cir::ConstantOp>();
   Operation *oldInnerBound =
       nest.inner.conditionRHS.getSource().getDefiningOp();
   cir::IntAttr bound = getIntegerConstant(nest.outer.conditionRHS);
@@ -176,25 +235,7 @@ interchangeCanonicalUpperTriangle(cir::TwoLevelLoopNest &nest) {
   if (oldInnerBound->use_empty())
     oldInnerBound->erase();
 
-  cir::ForOp outerLoop = nest.outer.loop;
-  cir::ForOp innerLoop = nest.inner.loop;
-  Block *parent = outerLoop->getBlock();
-  Block &outerBody = outerLoop.getBody().front();
-  Block &innerBody = innerLoop.getBody().front();
-
-  nest.inner.induction->moveBefore(outerLoop);
-  innerInitialConstant->moveBefore(outerLoop);
-  nest.inner.initialization->moveBefore(outerLoop);
-  innerLoop->moveBefore(outerLoop);
-  scope.erase();
-
-  outerBody.getOperations().splice(outerBody.begin(), innerBody.getOperations(),
-                                   innerBody.begin(),
-                                   std::prev(innerBody.end()));
-  innerBody.getOperations().splice(innerBody.begin(), parent->getOperations(),
-                                   Block::iterator(outerLoop));
-
-  nest.outer.initialization->moveBefore(outerLoop);
+  interchangeLoopStructure(nest, scope);
   builder.setInsertionPoint(nest.outer.initialization);
   auto newInnerLoad =
       cast<cir::LoadOp>(builder.clone(*nest.inner.stepLoad.getOperation()));
@@ -207,6 +248,38 @@ interchangeCanonicalUpperTriangle(cir::TwoLevelLoopNest &nest) {
 
   if (outerInitialConstant->use_empty())
     outerInitialConstant.erase();
+  return success();
+}
+
+static LogicalResult
+interchangeCanonicalLowerTriangle(cir::TwoLevelLoopNest &nest) {
+  if (!isCanonicalLowerTriangle(nest))
+    return failure();
+
+  cir::ScopeOp scope = getPerfectNestScope(nest);
+  if (!scope)
+    return failure();
+
+  Operation *oldInnerInitial = nest.inner.initial.getSource().getDefiningOp();
+  Operation *oldOuterBound =
+      nest.outer.conditionRHS.getSource().getDefiningOp();
+
+  nest.inner.initialization->setOperand(cir::StoreOp::odsIndex_value,
+                                        nest.outer.initial.getSource());
+
+  OpBuilder builder(nest.outer.loop.getContext());
+  builder.setInsertionPoint(nest.outer.comparison);
+  auto newInnerBound =
+      cast<cir::LoadOp>(builder.clone(*nest.inner.stepLoad.getOperation()));
+  newInnerBound->setLoc(nest.outer.comparison.getLoc());
+  nest.outer.comparison->setOperand(cir::CmpOp::odsIndex_rhs, newInnerBound);
+  nest.outer.comparison.setKind(cir::CmpOpKind::le);
+
+  interchangeLoopStructure(nest, scope);
+  if (oldInnerInitial->use_empty())
+    oldInnerInitial->erase();
+  if (oldOuterBound->use_empty())
+    oldOuterBound->erase();
   return success();
 }
 
@@ -255,13 +328,18 @@ struct CIRLoopInterchangePass
       if (emitAnalysisRemarks)
         loop.emitRemark(os.str());
 
-      if (!memory.isSafe() || !profitable ||
-          failed(interchangeCanonicalUpperTriangle(*nest)))
+      if (!memory.isSafe() || !profitable)
+        continue;
+
+      LogicalResult transformed = interchangeCanonicalUpperTriangle(*nest);
+      if (failed(transformed))
+        transformed = interchangeCanonicalLowerTriangle(*nest);
+      if (failed(transformed))
         continue;
 
       changed = true;
       if (emitAnalysisRemarks)
-        nest->inner.loop.emitRemark("interchanged canonical upper triangle");
+        nest->inner.loop.emitRemark("interchanged loop nest");
     }
 
     if (!changed)
