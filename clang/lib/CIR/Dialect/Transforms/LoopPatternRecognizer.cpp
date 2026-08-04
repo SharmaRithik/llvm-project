@@ -23,8 +23,8 @@ namespace mlir {
 
 namespace {
 
-// A loop's induction variable is the slot its step region writes back to. The
-// exit test cannot serve here, since some shapes never mention it on its own.
+// The step region identifies the induction variable. The exit test cannot,
+// since a product test never names the variable on its own.
 static Value inductionSlot(ForOp loop) {
   Value slot;
   if (!loop.getStep().hasOneBlock())
@@ -35,7 +35,6 @@ static Value inductionSlot(ForOp loop) {
   return slot;
 }
 
-// The value a slot holds on entry, from the store that precedes the loop.
 static Value initialValue(ForOp loop, Value slot) {
   for (Operation *op = loop->getPrevNode(); op; op = op->getPrevNode())
     if (auto store = dyn_cast<StoreOp>(op); store && store.getAddr() == slot)
@@ -49,7 +48,7 @@ static Value loadedSlot(Value v) {
 }
 
 // A cond region may hold several blocks and is not verified to end in
-// cir.condition, so neither can be assumed here.
+// cir.condition, so neither can be assumed.
 static CmpOp exitTest(ForOp loop) {
   if (!loop.getCond().hasOneBlock())
     return {};
@@ -58,11 +57,8 @@ static CmpOp exitTest(ForOp loop) {
   return condition ? condition.getCondition().getDefiningOp<CmpOp>() : CmpOp();
 }
 
-// The object an address is rooted at, through indexing and casts. A global
-// resolves to its definition, a stack slot to its alloca, and an array reached
-// through a pointer parameter to the slot holding that pointer.
-// Returns null unless the address indexes into something, so a plain scalar
-// slot such as an induction variable is not mistaken for an array access.
+// The object an array access is rooted at. Null unless the address indexes
+// into something, so an induction variable load is not taken for an access.
 static Operation *rootObject(Value addr) {
   bool indexed = false;
   while (addr) {
@@ -72,8 +68,8 @@ static Operation *rootObject(Value addr) {
     if (auto global = addr.getDefiningOp<GetGlobalOp>()) {
       if (!indexed)
         return nullptr;
-      // Resolve to the definition. Two references to one global are separate
-      // operations, so the reference itself is not a stable identity.
+      // Two references to one global are separate operations, so resolve to
+      // the definition to get a stable identity.
       auto mod = global->getParentOfType<mlir::ModuleOp>();
       auto def =
           mod ? mod.lookupSymbol<GlobalOp>(global.getName()) : GlobalOp();
@@ -95,7 +91,6 @@ static Operation *rootObject(Value addr) {
   return nullptr;
 }
 
-// The inner loop's start value.
 struct Start {
   enum Kind {
     Constant,  // j = 0
@@ -107,11 +102,11 @@ struct Start {
   int64_t offset = 0;
 };
 
-// The inner loop's exit bound, described the way the interchange pass in
-// LoopOpt.cpp describes it, so the two agree on what a shape is.
+// Described the way LoopOpt.cpp describes a bound, so the two passes agree on
+// what a shape is.
 struct Bound {
   enum Kind {
-    Invariant, // j < N, a constant or anything the nest does not write
+    Invariant, // j < N, anything the nest does not write
     Affine,    // j < scale * i + offset
     Product,   // j * i < N
     Other,
@@ -119,23 +114,13 @@ struct Bound {
   Kind kind = Other;
   int64_t scale = 0;
   int64_t offset = 0;
-  bool orEqual = false; // the test is <= rather than <
+  bool orEqual = false;
 };
 
 struct Body {
   bool reads = false;
   bool readsWhatItWrites = false;
 };
-
-// The loops directly inside this one.
-static llvm::SmallVector<ForOp> immediateChildLoops(ForOp loop) {
-  llvm::SmallVector<ForOp> children;
-  loop.getBody().walk([&](ForOp inner) {
-    if (inner != loop && inner->getParentOfType<ForOp>() == loop)
-      children.push_back(inner);
-  });
-  return children;
-}
 
 // A parameter reaches its slot through the store the prologue emits.
 static bool isParameterSlot(Value slot) {
@@ -145,8 +130,6 @@ static bool isParameterSlot(Value slot) {
   });
 }
 
-// True when nothing in the nest stores to the slot this value was loaded from,
-// so the value is the same on every iteration.
 static bool isInvariantInNest(Value v, ForOp nest) {
   if (v.getDefiningOp<ConstantOp>())
     return true;
@@ -161,7 +144,6 @@ static bool isInvariantInNest(Value v, ForOp nest) {
   return !written;
 }
 
-// The value of an integer constant, or nothing.
 static std::optional<int64_t> constantValue(Value v) {
   auto konst = v.getDefiningOp<ConstantOp>();
   auto attr = konst ? dyn_cast<cir::IntAttr>(konst.getValue()) : cir::IntAttr();
@@ -197,8 +179,7 @@ static Start classifyStart(Value init, Value outer) {
 }
 
 static Bound classifyBound(CmpOp test, Value inner, Value outer, ForOp nest) {
-  // Split a constant off a binary op, in either operand order, and report the
-  // other side. Returns nothing when neither side is a constant.
+  // Split a constant off, in either operand order, and report the other side.
   auto peel = [&](auto op, Value &rest) -> std::optional<int64_t> {
     if (std::optional<int64_t> k = constantValue(op.getRhs())) {
       rest = op.getLhs();
@@ -215,8 +196,8 @@ static Bound classifyBound(CmpOp test, Value inner, Value outer, ForOp nest) {
   if (test.getKind() != CmpOpKind::lt && !orEqual)
     return {};
 
-  // With the induction variable buried in a product there is no side to read
-  // the limit off, which is the whole difficulty of this shape.
+  // A product names neither variable alone, so there is no side to read a
+  // limit off.
   if (loadedSlot(test.getLhs()) != inner) {
     auto product = test.getLhs().getDefiningOp<MulOp>();
     if (!product)
@@ -252,8 +233,7 @@ static Bound classifyBound(CmpOp test, Value inner, Value outer, ForOp nest) {
   if (loadedSlot(limit) == outer)
     return {Bound::Affine, scale, offset, orEqual};
 
-  // Not the outer variable, so the bound is a fixed limit as long as nothing
-  // in the nest writes it. A parameter such as n qualifies, not just a literal.
+  // A fixed limit, which a parameter such as n satisfies, not only a literal.
   if (isInvariantInNest(test.getRhs(), nest))
     return {Bound::Invariant, 0, 0, orEqual};
   return {};
@@ -275,14 +255,12 @@ static Body classifyBody(ForOp loop) {
           })};
 }
 
-// The shapes, each told apart by the one place it differs. The eight cirBench
-// names are kept as they are, the rest describe the shape.
+// The eight cirBench names are kept as they are, the rest describe the shape.
 static llvm::StringRef patternName(Start start, Bound bound, Body body) {
   if (bound.kind == Bound::Product)
     return start.kind == Start::Constant ? "tri_mul_bound" : llvm::StringRef();
 
-  // A bound that does not name the outer variable makes the triangle, if there
-  // is one, come from the start.
+  // With no outer variable in the bound, any triangle comes from the start.
   if (bound.kind == Bound::Invariant) {
     if (start.kind == Start::Parameter)
       return "tri_arg_start";
@@ -316,25 +294,27 @@ struct LoopPatternRecognizerPass
 } // namespace
 
 void LoopPatternRecognizerPass::runOnOperation() {
-  getOperation()->walk([](ForOp outer) {
-    Value outerSlot = inductionSlot(outer);
-    if (!outerSlot)
+  getOperation()->walk([](ForOp loop) {
+    Value slot = inductionSlot(loop);
+    CmpOp test = exitTest(loop);
+    if (!slot || !test)
       return;
-    // Only the loops directly inside this one. Any deeper descendant is not
-    // paired with this loop, and reporting it would name a shape the pair
-    // does not have.
-    for (ForOp inner : immediateChildLoops(outer)) {
-      Value innerSlot = inductionSlot(inner);
-      CmpOp test = exitTest(inner);
-      if (!innerSlot || !test)
+    // Search outward. A triangular bound can be separated from the loop it
+    // names by other loops, as in for i / for j / for k < i. Stop at the first
+    // enclosing loop that explains the shape, so each loop reports once.
+    for (ForOp outer = loop->getParentOfType<ForOp>(); outer;
+         outer = outer->getParentOfType<ForOp>()) {
+      Value outerSlot = inductionSlot(outer);
+      if (!outerSlot)
         continue;
-      llvm::StringRef name =
-          patternName(classifyStart(initialValue(inner, innerSlot), outerSlot),
-                      classifyBound(test, innerSlot, outerSlot, outer),
-                      classifyBody(inner));
-      if (!name.empty())
-        mlir::emitRemark(inner.getLoc())
+      llvm::StringRef name = patternName(
+          classifyStart(initialValue(loop, slot), outerSlot),
+          classifyBound(test, slot, outerSlot, outer), classifyBody(loop));
+      if (!name.empty()) {
+        mlir::emitRemark(loop.getLoc())
             << "Found " << name << " kernel pattern";
+        return;
+      }
     }
   });
 }

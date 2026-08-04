@@ -723,10 +723,10 @@ static bool stepsByOne(cir::ForOp forOp, mlir::Value ivSlot) {
 // The nest running j from zero to scale times the outer induction variable
 // plus offset.
 struct UpperTriangle {
-  int64_t outerBound; // the outer loop's exclusive bound
+  int64_t outerBound; // exclusive
   int64_t scale;      // C in j < C * i + K
   int64_t offset;     // K in j < C * i + K
-  int64_t outerStart; // the outer loop's start
+  int64_t outerStart;
 };
 
 // Split a constant off a value, in either operand order. Returns the identity
@@ -914,9 +914,9 @@ static bool exitTestLhsIsIv(cir::ForOp forOp, mlir::Value ivSlot) {
 // The nest whose inner exit test compares the product of the two induction
 // variables against a constant.
 struct ProductNest {
-  int64_t limit;      // Q in j * i < Q
-  int64_t outerStart; // the outer loop's start
-  int64_t outerBound; // the outer loop's exclusive bound
+  int64_t limit; // Q in j * i < Q
+  int64_t outerStart;
+  int64_t outerBound; // exclusive
 };
 
 static std::optional<ProductNest> recognizeProductNest(LoopParts outer,
