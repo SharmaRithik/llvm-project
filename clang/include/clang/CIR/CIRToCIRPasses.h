@@ -29,11 +29,13 @@ class ModuleOp;
 namespace cir {
 
 // Run set of cleanup/prepare/etc passes CIR <-> CIR.
-mlir::LogicalResult runCIRToCIRPasses(
-    mlir::ModuleOp theModule, mlir::MLIRContext &mlirCtx,
-    clang::ASTContext &astCtx, bool enableVerifier, bool enableIdiomRecognizer,
-    bool enableCIRSimplify, bool enableLibOpt, llvm::StringRef libOptOptions,
-    bool enableCallConvLowering, bool enableLoopPatternRecognizer);
+mlir::LogicalResult
+runCIRToCIRPasses(mlir::ModuleOp theModule, mlir::MLIRContext &mlirCtx,
+                  clang::ASTContext &astCtx, bool enableVerifier,
+                  bool enableIdiomRecognizer, bool enableCIRSimplify,
+                  bool enableLibOpt, llvm::StringRef libOptOptions,
+                  bool enableCallConvLowering, bool enableLoopPatternRecognizer,
+                  bool enableLoopOpt);
 
 } // namespace cir
 

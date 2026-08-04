@@ -33,8 +33,8 @@ runCIRToCIRPasses(mlir::ModuleOp theModule, mlir::MLIRContext &mlirContext,
                   clang::ASTContext &astContext, bool enableVerifier,
                   bool enableIdiomRecognizer, bool enableCIRSimplify,
                   bool enableLibOpt, llvm::StringRef libOptOptions,
-                  bool enableCallConvLowering,
-                  bool enableLoopPatternRecognizer) {
+                  bool enableCallConvLowering, bool enableLoopPatternRecognizer,
+                  bool enableLoopOpt) {
 
   llvm::TimeTraceScope scope("CIR To CIR Passes");
 
@@ -46,6 +46,10 @@ runCIRToCIRPasses(mlir::ModuleOp theModule, mlir::MLIRContext &mlirContext,
 
   if (enableIdiomRecognizer)
     pm.addPass(mlir::createIdiomRecognizerPass());
+
+  // Loop opts run while cir.for still carries the nest structure.
+  if (enableLoopOpt)
+    pm.addPass(mlir::createLoopOptPass());
 
   if (enableLoopPatternRecognizer)
     pm.addPass(mlir::createLoopPatternRecognizerPass());

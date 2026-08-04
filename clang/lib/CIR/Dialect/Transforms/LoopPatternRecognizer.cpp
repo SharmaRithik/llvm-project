@@ -73,20 +73,36 @@ static llvm::StringRef rootGlobal(Value addr) {
   return {};
 }
 
-enum class Start { Invariant, Outer, Parameter, Other };
-enum class Bound {
-  Invariant,
-  Outer,
-  OuterPlusK,
-  OuterTimesK,
-  OuterProduct,
-  Other
+enum class Start { Constant, Outer, Parameter, Other };
+
+// The inner loop's exit bound, described the way the interchange pass in
+// LoopOpt.cpp describes it, so the two agree on what a shape is.
+struct Bound {
+  enum Kind {
+    Constant, // j < N
+    Affine,   // j < scale * i + offset
+    Product,  // j * i < N
+    Other,
+  };
+  Kind kind = Other;
+  int64_t scale = 0;
+  int64_t offset = 0;
 };
 
 struct Body {
   bool reads = false;
   bool readsWhatItWrites = false;
 };
+
+// The loops directly inside this one.
+static llvm::SmallVector<ForOp> immediateChildLoops(ForOp loop) {
+  llvm::SmallVector<ForOp> children;
+  loop.getBody().walk([&](ForOp inner) {
+    if (inner != loop && inner->getParentOfType<ForOp>() == loop)
+      children.push_back(inner);
+  });
+  return children;
+}
 
 // A parameter reaches its slot through the store the prologue emits.
 static bool isParameterSlot(Value slot) {
@@ -96,11 +112,20 @@ static bool isParameterSlot(Value slot) {
   });
 }
 
+// The value of an integer constant, or nothing.
+static std::optional<int64_t> constantValue(Value v) {
+  auto konst = v.getDefiningOp<ConstantOp>();
+  auto attr = konst ? dyn_cast<cir::IntAttr>(konst.getValue()) : cir::IntAttr();
+  if (!attr)
+    return std::nullopt;
+  return attr.getValue().getSExtValue();
+}
+
 static Start classifyStart(Value init, Value outer) {
   if (!init)
     return Start::Other;
   if (init.getDefiningOp<ConstantOp>())
-    return Start::Invariant;
+    return Start::Constant;
   Value slot = loadedSlot(init);
   if (slot == outer)
     return Start::Outer;
@@ -110,39 +135,62 @@ static Start classifyStart(Value init, Value outer) {
 }
 
 static Bound classifyBound(CmpOp test, Value inner, Value outer) {
-  auto isConstant = [](Value v) { return v.getDefiningOp<ConstantOp>(); };
-  auto isOuterScaled = [&](auto op) {
-    return (loadedSlot(op.getLhs()) == outer && isConstant(op.getRhs())) ||
-           (loadedSlot(op.getRhs()) == outer && isConstant(op.getLhs()));
-  };
-  auto isOuterTimesInner = [&](auto op) {
-    return (loadedSlot(op.getLhs()) == inner &&
-            loadedSlot(op.getRhs()) == outer) ||
-           (loadedSlot(op.getLhs()) == outer &&
-            loadedSlot(op.getRhs()) == inner);
+  // Split a constant off a binary op, in either operand order, and report the
+  // other side. Returns nothing when neither side is a constant.
+  auto peel = [&](auto op, Value &rest) -> std::optional<int64_t> {
+    if (std::optional<int64_t> k = constantValue(op.getRhs())) {
+      rest = op.getLhs();
+      return k;
+    }
+    if (std::optional<int64_t> k = constantValue(op.getLhs())) {
+      rest = op.getRhs();
+      return k;
+    }
+    return std::nullopt;
   };
 
   if (test.getKind() != CmpOpKind::lt)
-    return Bound::Other;
+    return {};
 
   // With the induction variable buried in a product there is no side to read
   // the limit off, which is the whole difficulty of this shape.
   if (loadedSlot(test.getLhs()) != inner) {
     auto product = test.getLhs().getDefiningOp<MulOp>();
-    return product && isOuterTimesInner(product) ? Bound::OuterProduct
-                                                 : Bound::Other;
+    if (!product)
+      return {};
+    bool bothIvs = (loadedSlot(product.getLhs()) == inner &&
+                    loadedSlot(product.getRhs()) == outer) ||
+                   (loadedSlot(product.getLhs()) == outer &&
+                    loadedSlot(product.getRhs()) == inner);
+    return bothIvs ? Bound{Bound::Product} : Bound{};
   }
 
   Value limit = test.getRhs();
-  if (isConstant(limit))
-    return Bound::Invariant;
-  if (loadedSlot(limit) == outer)
-    return Bound::Outer;
-  if (auto add = limit.getDefiningOp<AddOp>(); add && isOuterScaled(add))
-    return Bound::OuterPlusK;
-  if (auto mul = limit.getDefiningOp<MulOp>(); mul && isOuterScaled(mul))
-    return Bound::OuterTimesK;
-  return Bound::Other;
+  if (constantValue(limit))
+    return {Bound::Constant};
+
+  // scale * i + offset, with either factor absent.
+  int64_t offset = 0;
+  if (auto add = limit.getDefiningOp<AddOp>()) {
+    Value rest;
+    std::optional<int64_t> k = peel(add, rest);
+    if (!k)
+      return {};
+    offset = *k;
+    limit = rest;
+  }
+  int64_t scale = 1;
+  if (auto mul = limit.getDefiningOp<MulOp>()) {
+    Value rest;
+    std::optional<int64_t> c = peel(mul, rest);
+    if (!c)
+      return {};
+    scale = *c;
+    limit = rest;
+  }
+  if (loadedSlot(limit) != outer)
+    return {};
+  return {Bound::Affine, scale, offset};
 }
 
 static Body classifyBody(ForOp loop) {
@@ -163,26 +211,23 @@ static Body classifyBody(ForOp loop) {
 
 // The cirBench shapes, each told apart by the one place it differs.
 static llvm::StringRef patternName(Start start, Bound bound, Body body) {
-  if (bound == Bound::Invariant)
+  if (bound.kind == Bound::Constant)
     return start == Start::Outer       ? "tri_lower_start"
            : start == Start::Parameter ? "tri_arg_start"
                                        : llvm::StringRef();
-  if (start != Start::Invariant)
+  if (start != Start::Constant)
     return {};
-  switch (bound) {
-  case Bound::Outer:
-    return !body.reads              ? "tri_fill"
-           : body.readsWhatItWrites ? "tri_ldlt_update"
-                                    : "tri_upper_bound";
-  case Bound::OuterPlusK:
-    return "tri_addk_bound";
-  case Bound::OuterTimesK:
-    return "tri_variant_2i";
-  case Bound::OuterProduct:
+  if (bound.kind == Bound::Product)
     return "tri_mul_bound";
-  default:
+  if (bound.kind != Bound::Affine)
     return {};
-  }
+  if (bound.scale != 1)
+    return bound.offset == 0 ? "tri_variant_2i" : llvm::StringRef();
+  if (bound.offset != 0)
+    return "tri_addk_bound";
+  return !body.reads              ? "tri_fill"
+         : body.readsWhatItWrites ? "tri_ldlt_update"
+                                  : "tri_upper_bound";
 }
 
 struct LoopPatternRecognizerPass
@@ -197,17 +242,20 @@ void LoopPatternRecognizerPass::runOnOperation() {
     Value outerSlot = inductionSlot(outer);
     if (!outerSlot)
       return;
-    outer.getBody().walk([&](ForOp inner) {
+    // Only the loops directly inside this one. Any deeper descendant is not
+    // paired with this loop, and reporting it would name a shape the pair
+    // does not have.
+    for (ForOp inner : immediateChildLoops(outer)) {
       Value innerSlot = inductionSlot(inner);
       CmpOp test = exitTest(inner);
       if (!innerSlot || !test)
-        return;
+        continue;
       llvm::StringRef name = patternName(
           classifyStart(initialValue(inner, innerSlot), outerSlot),
           classifyBound(test, innerSlot, outerSlot), classifyBody(inner));
       if (!name.empty())
-        llvm::errs() << "[CIR Debug]: Found " << name << " kernel pattern!\n";
-    });
+        inner.emitRemark() << "Found " << name << " kernel pattern";
+    }
   });
 }
 

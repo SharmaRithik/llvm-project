@@ -196,11 +196,28 @@ def IdiomRecognizer : Pass<"cir-idiom-recognizer", "mlir::ModuleOp"> {
 }
 
 def LoopOpt : Pass<"cir-loop-opt"> {
-  let summary = "High level loop optimizations on structured CIR";
+  let summary = "Interchange loop nests on structured CIR";
   let description = [{
-    Loop transforms on structured CIR while cir.for and cir.get_element are
-    visible. This step recognizes canonical counted loop nests. A test only
-    option annotates the recognized nest depth with no effect on codegen.
+    Interchanges the innermost perfectly nested pair of a `cir.for` nest when
+    the swap is provably legal and profitable. It runs while `cir.for` regions
+    and `cir.get_element` subscripts are still present, which is what makes the
+    loop bounds and the array subscripts readable.
+
+    Four exit bound forms are handled. A bound invariant in the other loop is
+    swapped as it stands. A bound of `scale * i + offset`, a start of `i`, and
+    an exit test comparing `i * j` are each rebuilt, since copying such a
+    region to the other loop would name an induction variable that is no
+    longer in scope.
+
+    Legality requires that every subscript be a bare induction variable, a
+    constant, or a value invariant in the nest, that distinct base objects not
+    alias, and that every written base vary with one of the two induction
+    variables. A local scalar accumulated under a non saturating integer add
+    or multiply is the one exception, and its wrap flags are dropped because a
+    reordered partial result may overflow where the original could not.
+
+    The `test-annotate` option records the recognized nest depth on each loop
+    and performs no transform.
   }];
   let constructor = "mlir::createLoopOptPass()";
   let dependentDialects = ["cir::CIRDialect"];
@@ -215,10 +232,13 @@ def LoopPatternRecognizer
     : Pass<"cir-loop-pattern-recognizer", "mlir::ModuleOp"> {
   let summary = "Name the loop nest shapes LLVM declines to interchange";
   let description = [{
-    This pass classifies two deep loop nests by the start value and the exit
-    bound of the inner loop, and by what the inner body reads and writes, and
-    reports each shape it recognizes by name. It only reports, it transforms
-    nothing.
+    Classifies a `cir.for` and the loops directly inside it by the start value
+    and the exit bound of the inner loop, and by what the inner body reads and
+    writes, then reports each recognized shape by name as a remark. It reports
+    only and transforms nothing.
+
+    The bound is described as `scale * i + offset`, the same terms
+    `cir-loop-opt` uses, so the two passes agree on what a shape is.
   }];
   let constructor = "mlir::createLoopPatternRecognizerPass()";
   let dependentDialects = ["cir::CIRDialect"];

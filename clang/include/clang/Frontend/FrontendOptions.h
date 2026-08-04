@@ -151,11 +151,7 @@ enum ActionKind {
 class InputKind {
 public:
   /// The input file format.
-  enum Format {
-    Source,
-    ModuleMap,
-    Precompiled
-  };
+  enum Format { Source, ModuleMap, Precompiled };
 
   // If we are building a header unit, what kind it is; this affects whether
   // we look for the file in the user or system include search paths before
@@ -423,6 +419,10 @@ public:
   LLVM_PREFERRED_TYPE(bool)
   unsigned ClangIREnableIdiomRecognizer : 1;
 
+  /// Enable Clang IR (CIR) loop interchange
+  LLVM_PREFERRED_TYPE(bool)
+  unsigned ClangIREnableLoopOpt : 1;
+
   /// Enable Clang IR (CIR) loop pattern recognizer
   LLVM_PREFERRED_TYPE(bool)
   unsigned ClangIREnableLoopPatternRecognizer : 1;
@@ -573,7 +573,7 @@ public:
         EmitPrettySymbolGraphs(false), GenReducedBMI(false),
         UseClangIRPipeline(false), ClangIRDisablePasses(false),
         ClangIRDisableCIRVerifier(false), ClangIREnableIdiomRecognizer(false),
-        ClangIREnableLoopPatternRecognizer(false),
+        ClangIREnableLoopOpt(false), ClangIREnableLoopPatternRecognizer(false),
         ClangIREnableCallConvLowering(false), ClangIRLibOptEnabled(false),
         TimeTraceGranularity(500), TimeTraceVerbose(false) {}
 

@@ -100,14 +100,23 @@ RUNNING IT
   cir-opt --cir-loop-opt k.cir -o k.opt.cir
   cir-translate --cir-to-llvmir k.opt.cir -o k.ll
 
-There is no driver flag for cir-loop-opt, cir-opt is the only entry point. The
-detection column comes from a separate pass, cir-loop-pattern-recognizer, which
-names the shape without transforming it and has the driver flag
--Xclang -clangir-enable-loop-pattern-recognizer.
+Or through the driver with -Xclang -clangir-enable-loop-opt. The -Xclang is
+mandatory, the driver accepts the bare spelling and then discards it.
+
+The detection column comes from a separate pass, cir-loop-pattern-recognizer,
+which names the shape without transforming it. It reports through a remark, so
+run it with cir-opt. Its own driver flag exists but prints nothing, because
+MLIR diagnostics are not wired to clang's diagnostic engine on the -fclangir
+path.
 
 
 STATE
 
-No lit tests yet for either pass. Verification so far is the cirBench suite,
-a 150 case differential enumeration over the four bound forms with zero
-mismatches, and the upstream CIR lit suite at 888 pass and 0 fail.
+No lit tests yet for either pass, they come in a later commit. Verification so
+far is the cirBench suite, a 150 case differential enumeration over the four
+bound forms with zero mismatches, and the upstream CIR lit suite at 888 pass
+and 0 fail.
+
+Sixteen defects were found and fixed by review before this state, including
+five in the reduction handling alone. Reproducers for all of them are outside
+the tree, which is what the lit tests are meant to replace.

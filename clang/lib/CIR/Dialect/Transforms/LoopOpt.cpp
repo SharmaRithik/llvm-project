@@ -22,6 +22,7 @@
 #include "llvm/ADT/SmallPtrSet.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/StringRef.h"
+#include "llvm/Support/MathExtras.h"
 #include "llvm/Support/TimeProfiler.h"
 #include <optional>
 
@@ -44,6 +45,9 @@ struct CountedLoop {
   mlir::Value ivSlot;
 };
 
+// Defined below. The comparison a counted loop exits on, or null.
+static cir::CmpOp getExitCmp(cir::ForOp forOp);
+
 // Defined below. True if a region has an op the dependence analysis cannot
 // model. allowAnyStore lets the body write any array. When false only a store
 // to ivSlot is allowed, which is all a swappable control region may contain.
@@ -51,17 +55,10 @@ static bool regionHasUnmodeledEffect(mlir::Region &region, mlir::Value ivSlot,
                                      bool allowAnyStore);
 
 // Recognize the canonical counted loop idiom.
-// Returns nullopt for anything non canonical so the pass leaves it untouched.
+// Returns nullopt for anything non-canonical so the pass leaves it untouched.
 static std::optional<CountedLoop> recognizeCountedLoop(cir::ForOp forOp) {
   mlir::Region &cond = forOp.getCond();
-  if (!cond.hasOneBlock())
-    return std::nullopt;
-  auto condOp =
-      mlir::dyn_cast_or_null<cir::ConditionOp>(cond.front().getTerminator());
-  if (!condOp)
-    return std::nullopt;
-  auto cmp = condOp.getCondition().getDefiningOp<cir::CmpOp>();
-  if (!cmp)
+  if (!getExitCmp(forOp))
     return std::nullopt;
 
   // The induction variable is the slot the step region writes back to. Reading
@@ -73,7 +70,7 @@ static std::optional<CountedLoop> recognizeCountedLoop(cir::ForOp forOp) {
   mlir::Value ivSlot;
   for (auto store : step.front().getOps<cir::StoreOp>()) {
     if (ivSlot)
-      return std::nullopt; // more than one candidate so bail
+      return std::nullopt;
     ivSlot = store.getAddr();
   }
   if (!ivSlot || !ivSlot.getDefiningOp<cir::AllocaOp>())
@@ -85,6 +82,11 @@ static std::optional<CountedLoop> recognizeCountedLoop(cir::ForOp forOp) {
   // slot. Anything else would be relocated and change behavior.
   if (regionHasUnmodeledEffect(cond, /*ivSlot=*/{}, /*allowAnyStore=*/false) ||
       regionHasUnmodeledEffect(step, ivSlot, /*allowAnyStore=*/false))
+    return std::nullopt;
+
+  // A cleanup region runs on every per iteration exit edge. The swap does not
+  // move it, so it would end up guarding a loop with a different trip count.
+  if (forOp.maybeGetCleanup())
     return std::nullopt;
 
   bool bodyWritesIv = false;
@@ -209,15 +211,11 @@ static mlir::Operation *baseObjectId(mlir::Value base) {
   return nullptr;
 }
 
-// A local scalar the body only accumulates into, under an operation whose
-// result cannot depend on the order of the iterations. cir.add and cir.mul are
-// integer only, so this never accepts a floating point reduction, where a swap
-// would change the result.
-// Returns the combining op so the caller can drop its wrap flags once the swap
-// is committed, since a reordered partial sum may overflow where the original
-// order could not.
+// A local scalar the body only accumulates into, under an operation the
+// iteration order cannot affect. Returns that operation so the caller can drop
+// its wrap flags, which a reordered partial sum can no longer promise.
 static mlir::Operation *orderFreeReduction(mlir::Operation *slotOp,
-                                           mlir::Region &body) {
+                                           cir::ForOp nest) {
   auto alloca = mlir::dyn_cast<cir::AllocaOp>(slotOp);
   if (!alloca)
     return nullptr;
@@ -227,9 +225,12 @@ static mlir::Operation *orderFreeReduction(mlir::Operation *slotOp,
     if (!mlir::isa<cir::LoadOp, cir::StoreOp>(user))
       return nullptr;
 
+  // Count over the whole nest, not just the innermost body. A cond or step
+  // region that reads the accumulator would make the swap change the iteration
+  // space itself.
   cir::StoreOp store;
   unsigned loads = 0, stores = 0;
-  body.walk([&](mlir::Operation *op) {
+  nest->walk([&](mlir::Operation *op) {
     if (auto l = mlir::dyn_cast<cir::LoadOp>(op)) {
       if (l.getAddr() == slot)
         ++loads;
@@ -246,6 +247,14 @@ static mlir::Operation *orderFreeReduction(mlir::Operation *slotOp,
   // The stored value must combine the loaded value with something else.
   mlir::Operation *combine = store.getValue().getDefiningOp();
   if (!mlir::isa_and_nonnull<cir::AddOp, cir::MulOp>(combine))
+    return nullptr;
+  // The combined value may not escape. Storing it anywhere else makes that
+  // location carry a partial sum, whose value depends on the order.
+  if (!combine->hasOneUse() || *combine->user_begin() != store.getOperation())
+    return nullptr;
+  // Saturating addition is commutative but not associative, so a reordered
+  // partial sum can clamp where the original did not.
+  if (auto add = mlir::dyn_cast<cir::AddOp>(combine); add && add.getSaturated())
     return nullptr;
   bool accumulates = llvm::any_of(combine->getOperands(), [&](mlir::Value v) {
     auto load = v.getDefiningOp<cir::LoadOp>();
@@ -267,7 +276,7 @@ static void relaxWrapFlags(llvm::ArrayRef<mlir::Operation *> reductions) {
   }
 }
 
-// True if op is a non region leaf whose effect the dependence analysis cannot
+// True if op is a non-region leaf whose effect the dependence analysis cannot
 // model. Escapes, calls, inline asm, memory intrinsics and memcpy are rejected
 // by name because some report no queryable memory effect. A store is allowed
 // only when the body may write any array, or when it targets the induction slot
@@ -318,6 +327,7 @@ static bool hasUnmodeledEffect(mlir::Region &body) {
 // reversed by the swap.
 static bool
 isInterchangeLegal(mlir::Value p, mlir::Value q, mlir::Region &innerBody,
+                   cir::ForOp nest,
                    llvm::SmallVectorImpl<mlir::Operation *> &reductions) {
   // Bail on any op the dependence analysis cannot model.
   if (hasUnmodeledEffect(innerBody))
@@ -372,7 +382,7 @@ isInterchangeLegal(mlir::Value p, mlir::Value q, mlir::Region &innerBody,
   if (bail)
     return false;
 
-  // Every written base must vary with P or Q, or be an order free reduction.
+  // Every written base must vary with P or Q, or be an order-free reduction.
   for (auto &kv : bases) {
     const BaseInfo &info = kv.second;
     if (!info.written)
@@ -382,7 +392,7 @@ isInterchangeLegal(mlir::Value p, mlir::Value q, mlir::Region &innerBody,
       if (t == IdxTag::P || t == IdxTag::Q)
         usesPQ = true;
     if (!usesPQ) {
-      mlir::Operation *combine = orderFreeReduction(kv.first, innerBody);
+      mlir::Operation *combine = orderFreeReduction(kv.first, nest);
       if (!combine)
         return false;
       reductions.push_back(combine);
@@ -392,7 +402,7 @@ isInterchangeLegal(mlir::Value p, mlir::Value q, mlir::Region &innerBody,
 }
 
 // Count array accesses that gather under each candidate inner loop in one walk.
-// An access gathers when the inner IV indexes a non contiguous dimension.
+// An access gathers when the inner IV indexes a non-contiguous dimension.
 // pGathers is what a p inner loop would gather, qGathers what a q inner loop
 // would gather.
 static void gatherCounts(mlir::Value p, mlir::Value q, mlir::Region &body,
@@ -438,7 +448,7 @@ struct LoopParts {
   mlir::Value ivSlot;
   cir::AllocaOp alloca;
   cir::StoreOp init;
-  mlir::Operation *initVal;
+  mlir::Operation *initDef;
 };
 
 static std::optional<LoopParts> getLoopParts(const CountedLoop &cl) {
@@ -462,23 +472,27 @@ static std::optional<LoopParts> getLoopParts(const CountedLoop &cl) {
   }
   if (!init)
     return std::nullopt;
-  mlir::Operation *initVal = init.getValue().getDefiningOp();
+  mlir::Operation *initDef = init.getValue().getDefiningOp();
   // The init value moves with the store. A constant always survives that. A
   // load does only while its slot holds the same value, which the caller
   // checks against the whole nest.
-  if (!initVal || !mlir::isa<cir::ConstantOp, cir::LoadOp>(initVal) ||
-      !initVal->hasOneUse())
+  if (!initDef || !mlir::isa<cir::ConstantOp, cir::LoadOp>(initDef) ||
+      !initDef->hasOneUse())
     return std::nullopt;
-  if (initVal->getBlock() != block)
+  if (initDef->getBlock() != block)
     return std::nullopt;
-  return LoopParts{cl.forOp, cl.ivSlot, alloca, init, initVal};
+  return LoopParts{cl.forOp, cl.ivSlot, alloca, init, initDef};
 }
 
 // True when the init value reads the same thing from its new position.
 static bool initSurvivesMove(const LoopParts &lp, cir::ForOp nest) {
-  auto load = mlir::dyn_cast<cir::LoadOp>(lp.initVal);
+  auto load = mlir::dyn_cast<cir::LoadOp>(lp.initDef);
   if (!load)
     return true;
+  // Moving a volatile or atomic read across a loop boundary changes how many
+  // times it runs, which is observable.
+  if (load.getIsVolatile() || load.getMemOrder())
+    return false;
   bool written = false;
   nest.walk([&](cir::StoreOp store) {
     if (store.getAddr() == load.getAddr())
@@ -499,7 +513,7 @@ static void swapRegions(mlir::Region &a, mlir::Region &b) {
 // Keeps the order alloca then init value then store.
 static void moveIvControlBefore(LoopParts lp, mlir::Operation *target) {
   lp.alloca->moveBefore(target);
-  lp.initVal->moveBefore(target);
+  lp.initDef->moveBefore(target);
   lp.init->moveBefore(target);
 }
 
@@ -527,7 +541,7 @@ static bool isPerfectPair(cir::ForOp outerFor, LoopParts inner) {
           return mlir::WalkResult::skip(); // the inner loop subtree is expected
         if (mlir::isa<cir::ScopeOp, cir::YieldOp, cir::ConditionOp>(op))
           return mlir::WalkResult::advance(); // structural only
-        if (op == inner.alloca.getOperation() || op == inner.initVal ||
+        if (op == inner.alloca.getOperation() || op == inner.initDef ||
             op == inner.init.getOperation())
           return mlir::WalkResult::advance(); // inner IV setup
         ok = false; // some other op lives around the loops
@@ -536,7 +550,7 @@ static bool isPerfectPair(cir::ForOp outerFor, LoopParts inner) {
   return ok;
 }
 
-// Does v transitively read slot. Used to reject non rectangular bounds. The
+// Does v transitively read slot. Used to reject non-rectangular bounds. The
 // seen set keeps a shared definition from being revisited on a value DAG.
 static bool valueDependsOnSlot(mlir::Value v, mlir::Value slot,
                                llvm::SmallPtrSetImpl<mlir::Operation *> &seen) {
@@ -557,26 +571,29 @@ static bool valueDependsOnSlot(mlir::Value v, mlir::Value slot) {
 }
 
 // The upper bound value tested in a counted loop cond region.
-static mlir::Value getLoopBoundRHS(cir::ForOp forOp) {
-  auto condOp = mlir::dyn_cast_or_null<cir::ConditionOp>(
-      forOp.getCond().front().getTerminator());
+// The comparison a counted loop exits on, or null when the cond region does
+// not have that shape. Every consumer of the exit test goes through here.
+static cir::CmpOp getExitCmp(cir::ForOp forOp) {
+  mlir::Region &cond = forOp.getCond();
+  if (!cond.hasOneBlock())
+    return {};
+  auto condOp =
+      mlir::dyn_cast_or_null<cir::ConditionOp>(cond.front().getTerminator());
   if (!condOp)
-    return nullptr;
-  auto cmp = condOp.getCondition().getDefiningOp<cir::CmpOp>();
-  if (!cmp)
-    return nullptr;
-  return cmp.getRhs();
+    return {};
+  return condOp.getCondition().getDefiningOp<cir::CmpOp>();
+}
+
+static mlir::Value getLoopBoundRHS(cir::ForOp forOp) {
+  cir::CmpOp cmp = getExitCmp(forOp);
+  return cmp ? cmp.getRhs() : mlir::Value();
 }
 
 // True when the loop exits on a strict less than test. The rebuilt triangle
 // below is derived from that test, so any other comparison is a different
 // iteration space.
 static bool exitsOnLessThan(cir::ForOp forOp) {
-  auto condOp = mlir::dyn_cast_or_null<cir::ConditionOp>(
-      forOp.getCond().front().getTerminator());
-  if (!condOp)
-    return false;
-  auto cmp = condOp.getCondition().getDefiningOp<cir::CmpOp>();
+  cir::CmpOp cmp = getExitCmp(forOp);
   return cmp && cmp.getKind() == cir::CmpOpKind::lt;
 }
 
@@ -598,15 +615,15 @@ static std::optional<int64_t> foldConstant(mlir::Value value,
   mlir::Operation *op = value.getDefiningOp();
   if (!op || depth > 4)
     return std::nullopt;
-  if (auto konst = mlir::dyn_cast<cir::ConstantOp>(op)) {
-    auto attr = mlir::dyn_cast<cir::IntAttr>(konst.getValue());
+  if (auto cst = mlir::dyn_cast<cir::ConstantOp>(op)) {
+    auto attr = mlir::dyn_cast<cir::IntAttr>(cst.getValue());
     auto intType =
         attr ? mlir::dyn_cast<cir::IntType>(attr.getType()) : cir::IntType();
     if (!intType)
       return std::nullopt;
     int64_t folded = intType.isSigned()
                          ? attr.getValue().getSExtValue()
-                         : (int64_t)attr.getValue().getZExtValue();
+                         : static_cast<int64_t>(attr.getValue().getZExtValue());
     return isEmittable(intType, folded) ? std::optional<int64_t>(folded)
                                         : std::nullopt;
   }
@@ -626,29 +643,54 @@ static std::optional<int64_t> foldConstant(mlir::Value value,
   }
   if (!lhs || !rhs)
     return std::nullopt;
-  if (mlir::isa<cir::AddOp>(op))
-    return *lhs + *rhs;
-  if (mlir::isa<cir::SubOp>(op))
-    return *lhs - *rhs;
-  if (mlir::isa<cir::MulOp>(op))
-    return *lhs * *rhs;
-  if (mlir::isa<cir::DivOp>(op) && *rhs != 0)
-    return *lhs / *rhs;
-  return std::nullopt;
+  int64_t folded;
+  if (mlir::isa<cir::AddOp>(op)) {
+    if (llvm::AddOverflow(*lhs, *rhs, folded))
+      return std::nullopt;
+  } else if (mlir::isa<cir::SubOp>(op)) {
+    if (llvm::SubOverflow(*lhs, *rhs, folded))
+      return std::nullopt;
+  } else if (mlir::isa<cir::MulOp>(op)) {
+    if (llvm::MulOverflow(*lhs, *rhs, folded))
+      return std::nullopt;
+  } else if (mlir::isa<cir::DivOp>(op) && *rhs != 0) {
+    folded = *lhs / *rhs;
+  } else {
+    return std::nullopt;
+  }
+  // Check every step, not just the leaves. Otherwise a wrapping unsigned
+  // subtraction reaches the callers as a negative value they compare as
+  // signed, and a nested product leaves the range the leaf check assumed.
+  return isEmittable(op->getResult(0).getType(), folded)
+             ? std::optional<int64_t>(folded)
+             : std::nullopt;
 }
 
-// Erase a dead value and any operands it was the last user of. The operands are
-// deduplicated first, since an op naming one value twice would otherwise be
-// followed into freed memory on the second visit.
+// Erase a dead value and everything that dies with it. Operations are collected
+// before any erase, since a value reachable twice through the operand graph
+// would otherwise be visited again after its definition was freed.
 static void eraseIfDead(mlir::Value value) {
-  mlir::Operation *op = value.getDefiningOp();
-  if (!op || !op->use_empty())
-    return;
-  llvm::SmallSetVector<mlir::Value, 4> operands(op->operand_begin(),
-                                                op->operand_end());
-  op->erase();
-  for (mlir::Value operand : operands)
-    eraseIfDead(operand);
+  llvm::SmallVector<mlir::Operation *> worklist, order;
+  llvm::SmallPtrSet<mlir::Operation *, 8> dead;
+  if (mlir::Operation *def = value.getDefiningOp())
+    worklist.push_back(def);
+  while (!worklist.empty()) {
+    mlir::Operation *op = worklist.pop_back_val();
+    // An operation dies only once every user of it is already dying.
+    if (dead.contains(op) ||
+        !llvm::all_of(op->getUsers(), [&](mlir::Operation *user) {
+          return dead.contains(user);
+        }))
+      continue;
+    dead.insert(op);
+    order.push_back(op);
+    for (mlir::Value operand : op->getOperands())
+      if (mlir::Operation *def = operand.getDefiningOp())
+        worklist.push_back(def);
+  }
+  // Users come before their operands in this order, so each erase is safe.
+  for (mlir::Operation *op : order)
+    op->erase();
 }
 
 // True when the loop advances its induction variable by exactly one. A rebuilt
@@ -680,11 +722,11 @@ static bool stepsByOne(cir::ForOp forOp, mlir::Value ivSlot) {
 
 // The nest running j from zero to scale times the outer induction variable
 // plus offset.
-struct Triangle {
-  int64_t bound;  // the outer loop's exclusive bound
-  int64_t scale;  // C in j < C * i + K
-  int64_t offset; // K in j < C * i + K
-  int64_t start;  // the outer loop's start
+struct UpperTriangle {
+  int64_t outerBound; // the outer loop's exclusive bound
+  int64_t scale;      // C in j < C * i + K
+  int64_t offset;     // K in j < C * i + K
+  int64_t outerStart; // the outer loop's start
 };
 
 // Split a constant off a value, in either operand order. Returns the identity
@@ -696,13 +738,13 @@ static std::optional<int64_t> peelConstant(mlir::Value &value,
   auto op = value.getDefiningOp<OpTy>();
   if (!op)
     return identity;
-  if (std::optional<int64_t> konst = foldConstant(op.getRhs())) {
+  if (std::optional<int64_t> cst = foldConstant(op.getRhs())) {
     value = op.getLhs();
-    return konst;
+    return cst;
   }
-  if (std::optional<int64_t> konst = foldConstant(op.getLhs())) {
+  if (std::optional<int64_t> cst = foldConstant(op.getLhs())) {
     value = op.getRhs();
-    return konst;
+    return cst;
   }
   return std::nullopt;
 }
@@ -710,9 +752,10 @@ static std::optional<int64_t> peelConstant(mlir::Value &value,
 // Recognize the triangle the swap has to rebuild rather than copy. The inner
 // loop must run from zero to a constant multiple of the outer induction
 // variable plus a constant, and the outer bound and start must both be known.
-static std::optional<Triangle> upperTriangle(LoopParts outer, LoopParts inner,
-                                             mlir::Value pBound,
-                                             mlir::Value qBound) {
+static std::optional<UpperTriangle> recognizeUpperTriangle(LoopParts outer,
+                                                           LoopParts inner,
+                                                           mlir::Value pBound,
+                                                           mlir::Value qBound) {
   if (!exitsOnLessThan(outer.forOp) || !exitsOnLessThan(inner.forOp))
     return std::nullopt;
   // The rebuilt inner start rides the outer loop's own stride.
@@ -738,7 +781,7 @@ static std::optional<Triangle> upperTriangle(LoopParts outer, LoopParts inner,
     return std::nullopt;
   // Above a unit scale the new start needs a division, and the truncation cir
   // division performs only matches the floor the inversion wants while the
-  // numerator stays non negative, which an offset would break.
+  // numerator stays non-negative, which an offset would break.
   if (*scale > 1 && *offset != 0)
     return std::nullopt;
   mlir::Type type = qBound.getType();
@@ -746,27 +789,24 @@ static std::optional<Triangle> upperTriangle(LoopParts outer, LoopParts inner,
       !isEmittable(type, 1 - *offset) || !isEmittable(type, *scale) ||
       !isEmittable(type, *start))
     return std::nullopt;
-  return Triangle{*bound, *scale, *offset, *start};
+  return UpperTriangle{*bound, *scale, *offset, *start};
 }
 
-// After the swap the outer loop still tests against the old inner bound and
-// the inner loop still starts at zero. Retarget both so the nest walks the
-// same triangle. j runs below bound plus offset minus one, and the outer
-// variable starts at j plus one minus offset, held at its original start
-// wherever that expression can fall below it.
+// Rebuild the bounds so the swapped nest walks the same triangle. j stops
+// below scale times bound minus one plus offset, and the outer variable starts
+// at j plus one minus offset, held at its original start where that falls
+// below it. The swap leaves both loops carrying the other one's test.
 static void rewriteUpperTriangle(LoopParts outer, LoopParts inner,
-                                 const Triangle &tri) {
-  auto condOp = mlir::cast<cir::ConditionOp>(
-      outer.forOp.getCond().front().getTerminator());
-  auto cmp = mlir::cast<cir::CmpOp>(condOp.getCondition().getDefiningOp());
-  mlir::Value stale = cmp.getRhs();
-  mlir::Type type = stale.getType();
+                                 const UpperTriangle &tri) {
+  cir::CmpOp cmp = getExitCmp(outer.forOp);
+  mlir::Value oldBoundValue = cmp.getRhs();
+  mlir::Type type = oldBoundValue.getType();
 
   mlir::OpBuilder builder(cmp);
   cmp.getRhsMutable().assign(cir::ConstantOp::create(
       builder, cmp.getLoc(),
-      cir::IntAttr::get(type, tri.scale * (tri.bound - 1) + tri.offset)));
-  eraseIfDead(stale);
+      cir::IntAttr::get(type, tri.scale * (tri.outerBound - 1) + tri.offset)));
+  eraseIfDead(oldBoundValue);
 
   mlir::Location loc = outer.init.getLoc();
   builder.setInsertionPoint(outer.init);
@@ -791,31 +831,32 @@ static void rewriteUpperTriangle(LoopParts outer, LoopParts inner,
   }
   // The expression is smallest at j equal to zero, so that is where it can
   // reach below the start the outer loop originally had.
-  if (lowest < tri.start) {
+  if (lowest < tri.outerStart) {
     mlir::Value floorValue = cir::ConstantOp::create(
-        builder, loc, cir::IntAttr::get(type, tri.start));
+        builder, loc, cir::IntAttr::get(type, tri.outerStart));
     mlir::Value below =
         cir::CmpOp::create(builder, loc, cir::CmpOpKind::lt, begin, floorValue);
     begin = cir::SelectOp::create(builder, loc, type, below, floorValue, begin);
   }
-  mlir::Value staleInit = outer.init.getValue();
+  mlir::Value oldInit = outer.init.getValue();
   outer.init.getValueMutable().assign(begin);
-  eraseIfDead(staleInit);
+  eraseIfDead(oldInit);
 }
 
 // The nest running j from the outer induction variable to a constant, the
 // triangle written on the start rather than on the bound.
 struct LowerTriangle {
-  int64_t start; // the outer loop's start, which the swapped outer loop takes
+  // The outer loop's start, which the swapped outer loop takes.
+  int64_t outerStart;
 };
 
 // Recognize that form. The inner bound may not exceed the outer bound, so that
 // after the swap stopping just past j also respects the bound the outer loop
 // originally had.
-static std::optional<LowerTriangle> lowerTriangle(LoopParts outer,
-                                                  LoopParts inner,
-                                                  mlir::Value pBound,
-                                                  mlir::Value qBound) {
+static std::optional<LowerTriangle> recognizeLowerTriangle(LoopParts outer,
+                                                           LoopParts inner,
+                                                           mlir::Value pBound,
+                                                           mlir::Value qBound) {
   if (!exitsOnLessThan(outer.forOp) || !exitsOnLessThan(inner.forOp))
     return std::nullopt;
   // The rebuilt outer start rides the inner loop's own stride.
@@ -834,23 +875,20 @@ static std::optional<LowerTriangle> lowerTriangle(LoopParts outer,
   return LowerTriangle{*start};
 }
 
-// After the swap the outer loop starts at the old inner start, which named the
-// other induction variable, and the inner loop still stops at the old outer
-// bound. Retarget both. j starts where the outer loop did, and the outer
-// variable stops just past j.
+// Rebuild the bounds for the start side triangle. j starts where the outer
+// loop did, and the outer variable stops just past j. The swap leaves j
+// starting at a variable that is no longer in scope.
 static void rewriteLowerTriangle(LoopParts outer, LoopParts inner,
                                  const LowerTriangle &tri) {
   mlir::Type type = inner.init.getValue().getType();
-  mlir::Value staleStart = inner.init.getValue();
+  mlir::Value oldStart = inner.init.getValue();
   mlir::OpBuilder builder(inner.init);
   inner.init.getValueMutable().assign(cir::ConstantOp::create(
-      builder, inner.init.getLoc(), cir::IntAttr::get(type, tri.start)));
-  eraseIfDead(staleStart);
+      builder, inner.init.getLoc(), cir::IntAttr::get(type, tri.outerStart)));
+  eraseIfDead(oldStart);
 
-  auto condOp = mlir::cast<cir::ConditionOp>(
-      inner.forOp.getCond().front().getTerminator());
-  auto cmp = mlir::cast<cir::CmpOp>(condOp.getCondition().getDefiningOp());
-  mlir::Value staleBound = cmp.getRhs();
+  cir::CmpOp cmp = getExitCmp(inner.forOp);
+  mlir::Value oldBound = cmp.getRhs();
   builder.setInsertionPoint(cmp);
   mlir::Value index =
       cir::LoadOp::create(builder, cmp.getLoc(), {inner.ivSlot});
@@ -858,18 +896,15 @@ static void rewriteLowerTriangle(LoopParts outer, LoopParts inner,
                                             cir::IntAttr::get(type, 1));
   cmp.getRhsMutable().assign(
       cir::AddOp::create(builder, cmp.getLoc(), type, index, one));
-  eraseIfDead(staleBound);
+  eraseIfDead(oldBound);
 }
 
-// True when the exit test compares the induction variable itself on the left.
-// Copying a cond region over to the other loop relies on that, since anything
-// else in the test may name the variable the swap moves out of scope.
-static bool exitTestNamesIvAlone(cir::ForOp forOp, mlir::Value ivSlot) {
-  auto condOp = mlir::dyn_cast_or_null<cir::ConditionOp>(
-      forOp.getCond().front().getTerminator());
-  if (!condOp)
-    return false;
-  auto cmp = condOp.getCondition().getDefiningOp<cir::CmpOp>();
+// True when the exit test has a bare load of this loop's induction variable on
+// its left, which is what makes cmp.getRhs() the whole bound. It says nothing
+// about the right hand side, which the triangle paths expect to name the other
+// variable.
+static bool exitTestLhsIsIv(cir::ForOp forOp, mlir::Value ivSlot) {
+  cir::CmpOp cmp = getExitCmp(forOp);
   if (!cmp)
     return false;
   auto load = cmp.getLhs().getDefiningOp<cir::LoadOp>();
@@ -879,21 +914,20 @@ static bool exitTestNamesIvAlone(cir::ForOp forOp, mlir::Value ivSlot) {
 // The nest whose inner exit test compares the product of the two induction
 // variables against a constant.
 struct ProductNest {
-  int64_t limit; // Q in j * i < Q
-  int64_t start; // the outer loop's start
-  int64_t bound; // the outer loop's exclusive bound
+  int64_t limit;      // Q in j * i < Q
+  int64_t outerStart; // the outer loop's start
+  int64_t outerBound; // the outer loop's exclusive bound
 };
 
-static std::optional<ProductNest> productNest(LoopParts outer, LoopParts inner,
-                                              mlir::Value pBound,
-                                              mlir::Value qBound) {
+static std::optional<ProductNest> recognizeProductNest(LoopParts outer,
+                                                       LoopParts inner,
+                                                       mlir::Value pBound,
+                                                       mlir::Value qBound) {
   if (!exitsOnLessThan(outer.forOp) || !exitsOnLessThan(inner.forOp))
     return std::nullopt;
-  if (!exitTestNamesIvAlone(outer.forOp, outer.ivSlot))
+  if (!exitTestLhsIsIv(outer.forOp, outer.ivSlot))
     return std::nullopt;
-  auto condOp = mlir::cast<cir::ConditionOp>(
-      inner.forOp.getCond().front().getTerminator());
-  auto cmp = mlir::cast<cir::CmpOp>(condOp.getCondition().getDefiningOp());
+  cir::CmpOp cmp = getExitCmp(inner.forOp);
   auto product = cmp.getLhs().getDefiningOp<cir::MulOp>();
   if (!product)
     return std::nullopt;
@@ -911,7 +945,7 @@ static std::optional<ProductNest> productNest(LoopParts outer, LoopParts inner,
   std::optional<int64_t> innerStart = foldConstant(inner.init.getValue());
   if (!limit || !bound || !start || !innerStart)
     return std::nullopt;
-  // A non positive outer start leaves the product stuck and the inner loop
+  // A non-positive outer start leaves the product stuck and the inner loop
   // never ending. Keeping the limit within the outer bound lets the rebuilt
   // inner bound stop without a second clamp.
   if (*innerStart != 0 || *start < 1 || *limit < 1 || *limit > *bound)
@@ -923,34 +957,27 @@ static std::optional<ProductNest> productNest(LoopParts outer, LoopParts inner,
   return ProductNest{*limit, *start, *bound};
 }
 
-// After the swap the outer loop tests the product, which named both variables,
-// and the inner loop still stops at the old outer bound. j now runs while it
-// leaves room for the smallest outer value, and the outer variable stops one
-// past the limit divided by j.
+// Rebuild the bounds for the product test. j runs while it leaves room for the
+// smallest outer value, and the outer variable stops one past the limit
+// divided by j. The swap leaves the outer loop testing a product.
 static void rewriteProductNest(LoopParts outer, LoopParts inner,
                                const ProductNest &nest) {
-  auto outerCond = mlir::cast<cir::ConditionOp>(
-      outer.forOp.getCond().front().getTerminator());
-  auto outerCmp =
-      mlir::cast<cir::CmpOp>(outerCond.getCondition().getDefiningOp());
+  cir::CmpOp outerCmp = getExitCmp(outer.forOp);
   mlir::Type type = outerCmp.getRhs().getType();
-  mlir::Value staleProduct = outerCmp.getLhs();
-  mlir::Value staleLimit = outerCmp.getRhs();
+  mlir::Value oldProduct = outerCmp.getLhs();
+  mlir::Value oldLimit = outerCmp.getRhs();
 
   mlir::OpBuilder builder(outerCmp);
   outerCmp.getLhsMutable().assign(
       cir::LoadOp::create(builder, outerCmp.getLoc(), {inner.ivSlot}));
   outerCmp.getRhsMutable().assign(cir::ConstantOp::create(
       builder, outerCmp.getLoc(),
-      cir::IntAttr::get(type, (nest.limit - 1) / nest.start + 1)));
-  eraseIfDead(staleProduct);
-  eraseIfDead(staleLimit);
+      cir::IntAttr::get(type, (nest.limit - 1) / nest.outerStart + 1)));
+  eraseIfDead(oldProduct);
+  eraseIfDead(oldLimit);
 
-  auto innerCond = mlir::cast<cir::ConditionOp>(
-      inner.forOp.getCond().front().getTerminator());
-  auto innerCmp =
-      mlir::cast<cir::CmpOp>(innerCond.getCondition().getDefiningOp());
-  mlir::Value staleBound = innerCmp.getRhs();
+  cir::CmpOp innerCmp = getExitCmp(inner.forOp);
+  mlir::Value oldBound = innerCmp.getRhs();
   mlir::Location loc = innerCmp.getLoc();
   builder.setInsertionPoint(innerCmp);
   mlir::Value index = cir::LoadOp::create(builder, loc, {inner.ivSlot});
@@ -969,10 +996,10 @@ static void rewriteProductNest(LoopParts outer, LoopParts inner,
       builder, loc, type, cir::DivOp::create(builder, loc, type, top, divisor),
       one);
   mlir::Value whole = cir::ConstantOp::create(
-      builder, loc, cir::IntAttr::get(type, nest.bound));
+      builder, loc, cir::IntAttr::get(type, nest.outerBound));
   innerCmp.getRhsMutable().assign(
       cir::SelectOp::create(builder, loc, type, first, whole, quotient));
-  eraseIfDead(staleBound);
+  eraseIfDead(oldBound);
 }
 
 // Interchange the innermost pair of a nest when legal and profitable.
@@ -1005,18 +1032,18 @@ static bool tryInterchangePair(CountedLoop outerCL, CountedLoop innerCL) {
   if (!pBound || !qBound)
     return false;
   std::optional<ProductNest> product =
-      productNest(*outer, *inner, pBound, qBound);
-  std::optional<Triangle> triangle;
+      recognizeProductNest(*outer, *inner, pBound, qBound);
+  std::optional<UpperTriangle> triangle;
   std::optional<LowerTriangle> lower;
   if (!product) {
     // Every other path copies the cond regions across, so each exit test has
     // to name only its own induction variable.
-    if (!exitTestNamesIvAlone(outerCL.forOp, outerCL.ivSlot) ||
-        !exitTestNamesIvAlone(innerCL.forOp, innerCL.ivSlot))
+    if (!exitTestLhsIsIv(outerCL.forOp, outerCL.ivSlot) ||
+        !exitTestLhsIsIv(innerCL.forOp, innerCL.ivSlot))
       return false;
-    triangle = upperTriangle(*outer, *inner, pBound, qBound);
+    triangle = recognizeUpperTriangle(*outer, *inner, pBound, qBound);
     if (!triangle)
-      lower = lowerTriangle(*outer, *inner, pBound, qBound);
+      lower = recognizeLowerTriangle(*outer, *inner, pBound, qBound);
     if (!triangle && !lower &&
         (valueDependsOnSlot(pBound, innerCL.ivSlot) ||
          valueDependsOnSlot(qBound, outerCL.ivSlot)))
@@ -1031,7 +1058,7 @@ static bool tryInterchangePair(CountedLoop outerCL, CountedLoop innerCL) {
 
   llvm::SmallVector<mlir::Operation *, 2> reductions;
   if (!isInterchangeLegal(outerCL.ivSlot, innerCL.ivSlot, innerBody,
-                          reductions))
+                          outerCL.forOp, reductions))
     return false;
   if (!isInterchangeProfitable(outerCL.ivSlot, innerCL.ivSlot, innerBody))
     return false;

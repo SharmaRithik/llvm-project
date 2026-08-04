@@ -146,7 +146,8 @@ public:
               FEOptions.ClangIREnableIdiomRecognizer, CGO.OptimizationLevel > 0,
               EnableLibOpt, LibOptOptions,
               FEOptions.ClangIREnableCallConvLowering,
-              FEOptions.ClangIREnableLoopPatternRecognizer)
+              FEOptions.ClangIREnableLoopPatternRecognizer,
+              FEOptions.ClangIREnableLoopOpt)
               .failed()) {
         CI.getDiagnostics().Report(diag::err_cir_to_cir_transform_failed);
         return;

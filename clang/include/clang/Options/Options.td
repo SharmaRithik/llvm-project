@@ -3458,6 +3458,11 @@ def clangir_enable_idiom_recognizer : Flag<["-"], "clangir-enable-idiom-recogniz
   HelpText<"ClangIR: Enable Idiom Recognizer pass">,
   MarshallingInfoFlag<FrontendOpts<"ClangIREnableIdiomRecognizer">>;
 
+def clangir_enable_loop_opt : Flag<["-"], "clangir-enable-loop-opt">,
+  Visibility<[ClangOption, CC1Option]>,
+  HelpText<"ClangIR: Enable the loop interchange pass">,
+  MarshallingInfoFlag<FrontendOpts<"ClangIREnableLoopOpt">>;
+
 def clangir_enable_loop_pattern_recognizer : Flag<["-"], "clangir-enable-loop-pattern-recognizer">,
   Visibility<[ClangOption, CC1Option]>,
   HelpText<"ClangIR: Enable Loop Pattern Recognizer pass">,
