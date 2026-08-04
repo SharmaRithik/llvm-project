@@ -58,35 +58,68 @@ static CmpOp exitTest(ForOp loop) {
   return condition ? condition.getCondition().getDefiningOp<CmpOp>() : CmpOp();
 }
 
-// The global an address is rooted at, through indexing and casts.
-static llvm::StringRef rootGlobal(Value addr) {
+// The object an address is rooted at, through indexing and casts. A global
+// resolves to its definition, a stack slot to its alloca, and an array reached
+// through a pointer parameter to the slot holding that pointer.
+// Returns null unless the address indexes into something, so a plain scalar
+// slot such as an induction variable is not mistaken for an array access.
+static Operation *rootObject(Value addr) {
+  bool indexed = false;
   while (addr) {
-    if (auto global = addr.getDefiningOp<GetGlobalOp>())
-      return global.getName();
+    if (!indexed && (addr.getDefiningOp<GetElementOp>() ||
+                     addr.getDefiningOp<PtrStrideOp>()))
+      indexed = true;
+    if (auto global = addr.getDefiningOp<GetGlobalOp>()) {
+      if (!indexed)
+        return nullptr;
+      // Resolve to the definition. Two references to one global are separate
+      // operations, so the reference itself is not a stable identity.
+      auto mod = global->getParentOfType<mlir::ModuleOp>();
+      auto def =
+          mod ? mod.lookupSymbol<GlobalOp>(global.getName()) : GlobalOp();
+      return def ? def.getOperation() : nullptr;
+    }
+    if (auto alloca = addr.getDefiningOp<AllocaOp>())
+      return indexed ? alloca.getOperation() : nullptr;
     if (auto element = addr.getDefiningOp<GetElementOp>())
       addr = element.getBase();
+    else if (auto stride = addr.getDefiningOp<PtrStrideOp>())
+      addr = stride.getBase();
     else if (auto cast = addr.getDefiningOp<CastOp>())
       addr = cast.getSrc();
+    else if (auto load = addr.getDefiningOp<LoadOp>())
+      addr = load.getAddr(); // an array handle held in a slot
     else
-      return {};
+      return nullptr;
   }
-  return {};
+  return nullptr;
 }
 
-enum class Start { Constant, Outer, Parameter, Other };
+// The inner loop's start value.
+struct Start {
+  enum Kind {
+    Constant,  // j = 0
+    Outer,     // j = i + offset
+    Parameter, // j = lo, a function argument
+    Other,
+  };
+  Kind kind = Other;
+  int64_t offset = 0;
+};
 
 // The inner loop's exit bound, described the way the interchange pass in
 // LoopOpt.cpp describes it, so the two agree on what a shape is.
 struct Bound {
   enum Kind {
-    Constant, // j < N
-    Affine,   // j < scale * i + offset
-    Product,  // j * i < N
+    Invariant, // j < N, a constant or anything the nest does not write
+    Affine,    // j < scale * i + offset
+    Product,   // j * i < N
     Other,
   };
   Kind kind = Other;
   int64_t scale = 0;
   int64_t offset = 0;
+  bool orEqual = false; // the test is <= rather than <
 };
 
 struct Body {
@@ -112,6 +145,22 @@ static bool isParameterSlot(Value slot) {
   });
 }
 
+// True when nothing in the nest stores to the slot this value was loaded from,
+// so the value is the same on every iteration.
+static bool isInvariantInNest(Value v, ForOp nest) {
+  if (v.getDefiningOp<ConstantOp>())
+    return true;
+  Value slot = loadedSlot(v);
+  if (!slot || !slot.getDefiningOp<AllocaOp>())
+    return false;
+  bool written = false;
+  nest->walk([&](StoreOp store) {
+    if (store.getAddr() == slot)
+      written = true;
+  });
+  return !written;
+}
+
 // The value of an integer constant, or nothing.
 static std::optional<int64_t> constantValue(Value v) {
   auto konst = v.getDefiningOp<ConstantOp>();
@@ -123,18 +172,31 @@ static std::optional<int64_t> constantValue(Value v) {
 
 static Start classifyStart(Value init, Value outer) {
   if (!init)
-    return Start::Other;
+    return {};
   if (init.getDefiningOp<ConstantOp>())
-    return Start::Constant;
+    return {Start::Constant};
+  // j = i + offset, in either operand order.
+  int64_t offset = 0;
+  if (auto add = init.getDefiningOp<AddOp>()) {
+    if (std::optional<int64_t> k = constantValue(add.getRhs())) {
+      offset = *k;
+      init = add.getLhs();
+    } else if (std::optional<int64_t> k = constantValue(add.getLhs())) {
+      offset = *k;
+      init = add.getRhs();
+    } else {
+      return {};
+    }
+  }
   Value slot = loadedSlot(init);
   if (slot == outer)
-    return Start::Outer;
-  if (slot && isParameterSlot(slot))
-    return Start::Parameter;
-  return Start::Other;
+    return {Start::Outer, offset};
+  if (slot && offset == 0 && isParameterSlot(slot))
+    return {Start::Parameter};
+  return {};
 }
 
-static Bound classifyBound(CmpOp test, Value inner, Value outer) {
+static Bound classifyBound(CmpOp test, Value inner, Value outer, ForOp nest) {
   // Split a constant off a binary op, in either operand order, and report the
   // other side. Returns nothing when neither side is a constant.
   auto peel = [&](auto op, Value &rest) -> std::optional<int64_t> {
@@ -149,7 +211,8 @@ static Bound classifyBound(CmpOp test, Value inner, Value outer) {
     return std::nullopt;
   };
 
-  if (test.getKind() != CmpOpKind::lt)
+  bool orEqual = test.getKind() == CmpOpKind::le;
+  if (test.getKind() != CmpOpKind::lt && !orEqual)
     return {};
 
   // With the induction variable buried in a product there is no side to read
@@ -162,65 +225,80 @@ static Bound classifyBound(CmpOp test, Value inner, Value outer) {
                     loadedSlot(product.getRhs()) == outer) ||
                    (loadedSlot(product.getLhs()) == outer &&
                     loadedSlot(product.getRhs()) == inner);
-    return bothIvs ? Bound{Bound::Product} : Bound{};
+    return bothIvs ? Bound{Bound::Product, 0, 0, orEqual} : Bound{};
   }
 
   Value limit = test.getRhs();
-  if (constantValue(limit))
-    return {Bound::Constant};
 
   // scale * i + offset, with either factor absent.
   int64_t offset = 0;
   if (auto add = limit.getDefiningOp<AddOp>()) {
     Value rest;
     std::optional<int64_t> k = peel(add, rest);
-    if (!k)
-      return {};
-    offset = *k;
-    limit = rest;
+    if (k) {
+      offset = *k;
+      limit = rest;
+    }
   }
   int64_t scale = 1;
   if (auto mul = limit.getDefiningOp<MulOp>()) {
     Value rest;
     std::optional<int64_t> c = peel(mul, rest);
-    if (!c)
-      return {};
-    scale = *c;
-    limit = rest;
+    if (c) {
+      scale = *c;
+      limit = rest;
+    }
   }
-  if (loadedSlot(limit) != outer)
-    return {};
-  return {Bound::Affine, scale, offset};
+  if (loadedSlot(limit) == outer)
+    return {Bound::Affine, scale, offset, orEqual};
+
+  // Not the outer variable, so the bound is a fixed limit as long as nothing
+  // in the nest writes it. A parameter such as n qualifies, not just a literal.
+  if (isInvariantInNest(test.getRhs(), nest))
+    return {Bound::Invariant, 0, 0, orEqual};
+  return {};
 }
 
 static Body classifyBody(ForOp loop) {
-  llvm::SmallVector<llvm::StringRef> read, written;
+  llvm::SmallVector<Operation *> read, written;
   loop.getBody().walk([&](Operation *op) {
     if (auto load = dyn_cast<LoadOp>(op)) {
-      if (llvm::StringRef global = rootGlobal(load.getAddr()); !global.empty())
-        read.push_back(global);
+      if (Operation *base = rootObject(load.getAddr()))
+        read.push_back(base);
     } else if (auto store = dyn_cast<StoreOp>(op)) {
-      if (llvm::StringRef global = rootGlobal(store.getAddr()); !global.empty())
-        written.push_back(global);
+      if (Operation *base = rootObject(store.getAddr()))
+        written.push_back(base);
     }
   });
-  return {!read.empty(), llvm::any_of(written, [&](llvm::StringRef global) {
-            return llvm::is_contained(read, global);
+  return {!read.empty(), llvm::any_of(written, [&](Operation *base) {
+            return llvm::is_contained(read, base);
           })};
 }
 
-// The cirBench shapes, each told apart by the one place it differs.
+// The shapes, each told apart by the one place it differs. The eight cirBench
+// names are kept as they are, the rest describe the shape.
 static llvm::StringRef patternName(Start start, Bound bound, Body body) {
-  if (bound.kind == Bound::Constant)
-    return start == Start::Outer       ? "tri_lower_start"
-           : start == Start::Parameter ? "tri_arg_start"
-                                       : llvm::StringRef();
-  if (start != Start::Constant)
-    return {};
   if (bound.kind == Bound::Product)
-    return "tri_mul_bound";
+    return start.kind == Start::Constant ? "tri_mul_bound" : llvm::StringRef();
+
+  // A bound that does not name the outer variable makes the triangle, if there
+  // is one, come from the start.
+  if (bound.kind == Bound::Invariant) {
+    if (start.kind == Start::Parameter)
+      return "tri_arg_start";
+    if (start.kind != Start::Outer)
+      return {};
+    return start.offset == 0 ? "tri_lower_start" : "tri_offset_start";
+  }
+
   if (bound.kind != Bound::Affine)
     return {};
+  // A start that also names the outer variable is a band, not a triangle.
+  if (start.kind != Start::Constant)
+    return {};
+  if (bound.orEqual)
+    return bound.scale == 1 && bound.offset == 0 ? "tri_upper_bound_le"
+                                                 : llvm::StringRef();
   if (bound.scale != 1)
     return bound.offset == 0 ? "tri_variant_2i" : llvm::StringRef();
   if (bound.offset != 0)
@@ -250,11 +328,13 @@ void LoopPatternRecognizerPass::runOnOperation() {
       CmpOp test = exitTest(inner);
       if (!innerSlot || !test)
         continue;
-      llvm::StringRef name = patternName(
-          classifyStart(initialValue(inner, innerSlot), outerSlot),
-          classifyBound(test, innerSlot, outerSlot), classifyBody(inner));
+      llvm::StringRef name =
+          patternName(classifyStart(initialValue(inner, innerSlot), outerSlot),
+                      classifyBound(test, innerSlot, outerSlot, outer),
+                      classifyBody(inner));
       if (!name.empty())
-        inner.emitRemark() << "Found " << name << " kernel pattern";
+        mlir::emitRemark(inner.getLoc())
+            << "Found " << name << " kernel pattern";
     }
   });
 }

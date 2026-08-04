@@ -47,12 +47,13 @@ runCIRToCIRPasses(mlir::ModuleOp theModule, mlir::MLIRContext &mlirContext,
   if (enableIdiomRecognizer)
     pm.addPass(mlir::createIdiomRecognizerPass());
 
-  // Loop opts run while cir.for still carries the nest structure.
-  if (enableLoopOpt)
-    pm.addPass(mlir::createLoopOptPass());
-
+  // Loop opts run while cir.for still carries the nest structure. Recognition
+  // goes first, since it reports the shapes the interchange then rewrites.
   if (enableLoopPatternRecognizer)
     pm.addPass(mlir::createLoopPatternRecognizerPass());
+
+  if (enableLoopOpt)
+    pm.addPass(mlir::createLoopOptPass());
 
   if (enableLibOpt) {
     auto libOptPass = mlir::createLibOptPass();
