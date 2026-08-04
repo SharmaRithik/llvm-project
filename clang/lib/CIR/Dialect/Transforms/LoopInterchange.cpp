@@ -12,6 +12,7 @@
 #include "clang/CIR/Dialect/IR/CIRDialect.h"
 #include "clang/CIR/Dialect/Passes.h"
 #include "llvm/ADT/APInt.h"
+#include "llvm/ADT/SmallPtrSet.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/Support/raw_ostream.h"
 
@@ -129,20 +130,95 @@ static bool isCanonicalLowerTriangle(cir::TwoLevelLoopNest &nest) {
              nest.inner.stepLoad.getResult().getType();
 }
 
+static cir::IntAttr getAddedConstant(const cir::LoopDomainExpr &expression,
+                                     cir::AllocaOp induction) {
+  if (expression.getKind() != cir::LoopDomainExpr::Kind::Add)
+    return {};
+
+  const cir::LoopDomainExpr *lhs = expression.getLHS();
+  const cir::LoopDomainExpr *rhs = expression.getRHS();
+  if (lhs->getKind() == cir::LoopDomainExpr::Kind::Induction &&
+      lhs->getInduction() == induction)
+    return getIntegerConstant(*rhs);
+  if (rhs->getKind() == cir::LoopDomainExpr::Kind::Induction &&
+      rhs->getInduction() == induction)
+    return getIntegerConstant(*lhs);
+  return {};
+}
+
+static bool isAffineOffsetUpperTriangle(cir::TwoLevelLoopNest &nest) {
+  if (nest.outer.comparison.getKind() != cir::CmpOpKind::lt ||
+      nest.inner.comparison.getKind() != cir::CmpOpKind::lt ||
+      !isConstantZero(nest.outer.initial) ||
+      !isConstantZero(nest.inner.initial) ||
+      nest.outer.conditionLHS.getKind() !=
+          cir::LoopDomainExpr::Kind::Induction ||
+      nest.outer.conditionLHS.getInduction() != nest.outer.induction ||
+      nest.inner.conditionLHS.getKind() !=
+          cir::LoopDomainExpr::Kind::Induction ||
+      nest.inner.conditionLHS.getInduction() != nest.inner.induction)
+    return false;
+
+  const cir::LoopDomainExpr &outerBound = nest.outer.conditionRHS;
+  if (outerBound.getKind() != cir::LoopDomainExpr::Kind::Sub)
+    return false;
+  cir::IntAttr extent = getIntegerConstant(*outerBound.getLHS());
+  cir::IntAttr outerOffset = getIntegerConstant(*outerBound.getRHS());
+  cir::IntAttr innerOffset =
+      getAddedConstant(nest.inner.conditionRHS, nest.outer.induction);
+  if (!extent || !outerOffset || !innerOffset || outerOffset != innerOffset ||
+      extent.getType() != outerOffset.getType())
+    return false;
+
+  auto type = dyn_cast<cir::IntType>(extent.getType());
+  if (!type || !type.isSigned() ||
+      nest.outer.stepLoad.getResult().getType() != type ||
+      nest.inner.stepLoad.getResult().getType() != type)
+    return false;
+
+  const llvm::APInt &extentValue = extent.getValue();
+  const llvm::APInt &offsetValue = outerOffset.getValue();
+  return offsetValue.isStrictlyPositive() && extentValue.sgt(offsetValue);
+}
+
+static bool
+collectConditionOperations(const cir::LoopDomainExpr &expression,
+                           Block &condition,
+                           llvm::SmallPtrSetImpl<Operation *> &operations) {
+  Operation *operation = expression.getSource().getDefiningOp();
+  if (!operation || operation->getBlock() != &condition)
+    return false;
+  operations.insert(operation);
+
+  if (expression.getLHS() &&
+      !collectConditionOperations(*expression.getLHS(), condition, operations))
+    return false;
+  return !expression.getRHS() ||
+         collectConditionOperations(*expression.getRHS(), condition,
+                                    operations);
+}
+
 static bool hasCanonicalConditionLayout(cir::LoopDomain &domain) {
   Block &condition = domain.loop.getCond().front();
-  if (condition.getOperations().size() != 4)
+  if (domain.comparison->getBlock() != &condition ||
+      domain.comparison->getNextNode() != condition.getTerminator() ||
+      !isa<cir::ConditionOp>(condition.getTerminator()))
     return false;
 
-  Operation *lhs = domain.conditionLHS.getSource().getDefiningOp();
-  Operation *rhs = domain.conditionRHS.getSource().getDefiningOp();
-  if (!lhs || !rhs)
+  llvm::SmallPtrSet<Operation *, 8> expressionOperations;
+  if (!collectConditionOperations(domain.conditionLHS, condition,
+                                  expressionOperations) ||
+      !collectConditionOperations(domain.conditionRHS, condition,
+                                  expressionOperations))
     return false;
 
-  auto operation = condition.begin();
-  return &*operation++ == lhs && &*operation++ == rhs &&
-         &*operation++ == domain.comparison.getOperation() &&
-         isa<cir::ConditionOp>(&*operation);
+  for (Operation &operation : condition.without_terminator()) {
+    if (&operation == domain.comparison.getOperation())
+      break;
+    if (!expressionOperations.erase(&operation))
+      return false;
+  }
+  return expressionOperations.empty();
 }
 
 static cir::ScopeOp getPerfectNestScope(cir::TwoLevelLoopNest &nest) {
@@ -207,6 +283,18 @@ static void interchangeLoopStructure(cir::TwoLevelLoopNest &nest,
   innerBody.getOperations().splice(innerBody.begin(), parent->getOperations(),
                                    Block::iterator(outerLoop));
   nest.outer.initialization->moveBefore(outerLoop);
+}
+
+static void eraseDeadDomainExpression(const cir::LoopDomainExpr &expression) {
+  Operation *operation = expression.getSource().getDefiningOp();
+  if (!operation || !operation->use_empty())
+    return;
+
+  operation->erase();
+  if (expression.getLHS())
+    eraseDeadDomainExpression(*expression.getLHS());
+  if (expression.getRHS())
+    eraseDeadDomainExpression(*expression.getRHS());
 }
 
 static LogicalResult
@@ -283,6 +371,49 @@ interchangeCanonicalLowerTriangle(cir::TwoLevelLoopNest &nest) {
   return success();
 }
 
+static LogicalResult
+interchangeAffineOffsetUpperTriangle(cir::TwoLevelLoopNest &nest) {
+  if (!isAffineOffsetUpperTriangle(nest))
+    return failure();
+
+  cir::ScopeOp scope = getPerfectNestScope(nest);
+  if (!scope)
+    return failure();
+
+  cir::IntAttr extent = getIntegerConstant(*nest.outer.conditionRHS.getLHS());
+  cir::IntAttr offset = getIntegerConstant(*nest.outer.conditionRHS.getRHS());
+  auto type = cast<cir::IntType>(extent.getType());
+
+  OpBuilder builder(nest.outer.loop.getContext());
+  builder.setInsertionPoint(nest.inner.comparison);
+  llvm::APInt one(extent.getValue().getBitWidth(), 1);
+  auto newOuterBound =
+      cir::ConstantOp::create(builder, nest.inner.comparison.getLoc(),
+                              cir::IntAttr::get(type, extent.getValue() - one));
+  nest.inner.comparison->setOperand(cir::CmpOp::odsIndex_rhs, newOuterBound);
+  eraseDeadDomainExpression(nest.inner.conditionRHS);
+
+  interchangeLoopStructure(nest, scope);
+  builder.setInsertionPoint(nest.outer.initialization);
+  Location location = nest.outer.initialization.getLoc();
+  auto newOuterValue =
+      cast<cir::LoadOp>(builder.clone(*nest.inner.stepLoad.getOperation()));
+  newOuterValue->setLoc(location);
+  auto offsetValue = cir::ConstantOp::create(builder, location, offset);
+  auto beforeOffset = cir::CmpOp::create(builder, location, cir::CmpOpKind::lt,
+                                         newOuterValue, offsetValue);
+  auto difference =
+      cir::SubOp::create(builder, location, type, newOuterValue, offsetValue);
+  auto adjusted = cir::IncOp::create(builder, location, difference,
+                                     /*noSignedWrap=*/false);
+  auto newInnerInitial =
+      cir::SelectOp::create(builder, location, type, beforeOffset,
+                            nest.outer.initial.getSource(), adjusted);
+  nest.outer.initialization->setOperand(cir::StoreOp::odsIndex_value,
+                                        newInnerInitial);
+  return success();
+}
+
 struct CIRLoopInterchangePass
     : public impl::CIRLoopInterchangeBase<CIRLoopInterchangePass> {
   using CIRLoopInterchangeBase::CIRLoopInterchangeBase;
@@ -334,6 +465,8 @@ struct CIRLoopInterchangePass
       LogicalResult transformed = interchangeCanonicalUpperTriangle(*nest);
       if (failed(transformed))
         transformed = interchangeCanonicalLowerTriangle(*nest);
+      if (failed(transformed))
+        transformed = interchangeAffineOffsetUpperTriangle(*nest);
       if (failed(transformed))
         continue;
 

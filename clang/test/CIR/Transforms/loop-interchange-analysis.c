@@ -57,6 +57,13 @@ void tri_addk(void) {
       B[j][i] = A[j][i];
 }
 
+// CHECK-DAG: recognized loop nest in @tri_mismatched_offset {{.*}} memory safe profitability profitable
+void tri_mismatched_offset(void) {
+  for (int i = 0; i < N - K; ++i)
+    for (int j = 0; j < i + K + 1; ++j)
+      B[j][i] = A[j][i];
+}
+
 // CHECK-DAG: recognized loop nest in @tri_variant outer init constant condition induction lt div(constant,constant) inner init constant condition induction lt mul(constant,induction) memory safe
 void tri_variant(void) {
   for (int i = 1; i < N / 2; ++i)
@@ -157,6 +164,30 @@ void rejected_volatile(void) {
 // INTERCHANGE-NEXT: [[LOWERICOND:%[0-9]+]] = cir.load{{.*}} [[LOWERI]]
 // INTERCHANGE-NEXT: [[LOWERJVALUE:%[0-9]+]] = cir.load{{.*}} [[LOWERJ]]
 // INTERCHANGE-NEXT: [[LOWERICMP:%[0-9]+]] = cir.cmp le [[LOWERICOND]], [[LOWERJVALUE]]
+
+// INTERCHANGE-LABEL: cir.func dso_local @tri_addk()
+// INTERCHANGE: [[ADDKI:%[0-9]+]] = cir.alloca "i"
+// INTERCHANGE-NEXT: [[ADDKIZERO:%[0-9]+]] = cir.const #cir.int<0>
+// INTERCHANGE-NEXT: [[ADDKJ:%[0-9]+]] = cir.alloca "j"
+// INTERCHANGE-NEXT: [[ADDKJZERO:%[0-9]+]] = cir.const #cir.int<0>
+// INTERCHANGE-NEXT: cir.store{{.*}} [[ADDKJZERO]], [[ADDKJ]]
+// INTERCHANGE-NEXT: cir.for : cond {
+// INTERCHANGE-NEXT: [[ADDKJCOND:%[0-9]+]] = cir.load{{.*}} [[ADDKJ]]
+// INTERCHANGE-NEXT: [[ADDKJBOUND:%[0-9]+]] = cir.const #cir.int<127>
+// INTERCHANGE-NEXT: [[ADDKJCMP:%[0-9]+]] = cir.cmp lt [[ADDKJCOND]], [[ADDKJBOUND]]
+// INTERCHANGE: } body {
+// INTERCHANGE-NEXT: [[ADDKJVALUE:%[0-9]+]] = cir.load{{.*}} [[ADDKJ]]
+// INTERCHANGE-NEXT: [[ADDKK:%[0-9]+]] = cir.const #cir.int<8>
+// INTERCHANGE-NEXT: [[ADDKBELOW:%[0-9]+]] = cir.cmp lt [[ADDKJVALUE]], [[ADDKK]]
+// INTERCHANGE-NEXT: [[ADDKDIFF:%[0-9]+]] = cir.sub [[ADDKJVALUE]], [[ADDKK]]
+// INTERCHANGE-NEXT: [[ADDKADJUST:%[0-9]+]] = cir.inc [[ADDKDIFF]]
+// INTERCHANGE-NEXT: [[ADDKSTART:%[0-9]+]] = cir.select if [[ADDKBELOW]] then [[ADDKIZERO]] else [[ADDKADJUST]]
+// INTERCHANGE-NEXT: cir.store{{.*}} [[ADDKSTART]], [[ADDKI]]
+
+// INTERCHANGE-LABEL: cir.func dso_local @tri_mismatched_offset()
+// INTERCHANGE: [[MISMATCHI:%[0-9]+]] = cir.alloca "i"
+// INTERCHANGE-NEXT: [[MISMATCHZERO:%[0-9]+]] = cir.const #cir.int<0>
+// INTERCHANGE-NEXT: cir.store{{.*}} [[MISMATCHZERO]], [[MISMATCHI]]
 
 // INTERCHANGE-LABEL: cir.func dso_local @shifted_dependence()
 // INTERCHANGE: [[SHIFTI:%[0-9]+]] = cir.alloca "i"
