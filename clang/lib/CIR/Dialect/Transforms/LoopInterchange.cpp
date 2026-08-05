@@ -146,6 +146,22 @@ static cir::IntAttr getAddedConstant(const cir::LoopDomainExpr &expression,
   return {};
 }
 
+static cir::IntAttr getMultipliedConstant(const cir::LoopDomainExpr &expression,
+                                          cir::AllocaOp induction) {
+  if (expression.getKind() != cir::LoopDomainExpr::Kind::Mul)
+    return {};
+
+  const cir::LoopDomainExpr *lhs = expression.getLHS();
+  const cir::LoopDomainExpr *rhs = expression.getRHS();
+  if (lhs->getKind() == cir::LoopDomainExpr::Kind::Induction &&
+      lhs->getInduction() == induction)
+    return getIntegerConstant(*rhs);
+  if (rhs->getKind() == cir::LoopDomainExpr::Kind::Induction &&
+      rhs->getInduction() == induction)
+    return getIntegerConstant(*lhs);
+  return {};
+}
+
 static bool isAffineOffsetUpperTriangle(cir::TwoLevelLoopNest &nest) {
   if (nest.outer.comparison.getKind() != cir::CmpOpKind::lt ||
       nest.inner.comparison.getKind() != cir::CmpOpKind::lt ||
@@ -179,6 +195,54 @@ static bool isAffineOffsetUpperTriangle(cir::TwoLevelLoopNest &nest) {
   const llvm::APInt &extentValue = extent.getValue();
   const llvm::APInt &offsetValue = outerOffset.getValue();
   return offsetValue.isStrictlyPositive() && extentValue.sgt(offsetValue);
+}
+
+static bool isScaledUpperTriangle(cir::TwoLevelLoopNest &nest) {
+  if (nest.outer.comparison.getKind() != cir::CmpOpKind::lt ||
+      nest.inner.comparison.getKind() != cir::CmpOpKind::lt ||
+      !isConstantOne(nest.outer.initial) ||
+      !isConstantZero(nest.inner.initial) ||
+      nest.outer.conditionLHS.getKind() !=
+          cir::LoopDomainExpr::Kind::Induction ||
+      nest.outer.conditionLHS.getInduction() != nest.outer.induction ||
+      nest.inner.conditionLHS.getKind() !=
+          cir::LoopDomainExpr::Kind::Induction ||
+      nest.inner.conditionLHS.getInduction() != nest.inner.induction)
+    return false;
+
+  const cir::LoopDomainExpr &outerBound = nest.outer.conditionRHS;
+  if (outerBound.getKind() != cir::LoopDomainExpr::Kind::Div)
+    return false;
+  cir::IntAttr numerator = getIntegerConstant(*outerBound.getLHS());
+  cir::IntAttr divisor = getIntegerConstant(*outerBound.getRHS());
+  cir::IntAttr coefficient =
+      getMultipliedConstant(nest.inner.conditionRHS, nest.outer.induction);
+  if (!numerator || !divisor || !coefficient ||
+      numerator.getType() != divisor.getType() ||
+      numerator.getType() != coefficient.getType())
+    return false;
+
+  auto type = dyn_cast<cir::IntType>(numerator.getType());
+  if (!type || !type.isSigned() ||
+      nest.outer.stepLoad.getResult().getType() != type ||
+      nest.inner.stepLoad.getResult().getType() != type)
+    return false;
+
+  const llvm::APInt &numeratorValue = numerator.getValue();
+  const llvm::APInt &divisorValue = divisor.getValue();
+  const llvm::APInt &coefficientValue = coefficient.getValue();
+  if (!numeratorValue.isStrictlyPositive() ||
+      !divisorValue.isStrictlyPositive() ||
+      !coefficientValue.isStrictlyPositive())
+    return false;
+
+  llvm::APInt upperBound = numeratorValue.sdiv(divisorValue);
+  llvm::APInt one(upperBound.getBitWidth(), 1);
+  if (!upperBound.sgt(one))
+    return false;
+  bool overflow = false;
+  (void)(upperBound - one).smul_ov(coefficientValue, overflow);
+  return !overflow;
 }
 
 static bool
@@ -414,6 +478,54 @@ interchangeAffineOffsetUpperTriangle(cir::TwoLevelLoopNest &nest) {
   return success();
 }
 
+static LogicalResult
+interchangeScaledUpperTriangle(cir::TwoLevelLoopNest &nest) {
+  if (!isScaledUpperTriangle(nest))
+    return failure();
+
+  cir::ScopeOp scope = getPerfectNestScope(nest);
+  if (!scope)
+    return failure();
+
+  auto oldOuterInitial =
+      nest.outer.initial.getSource().getDefiningOp<cir::ConstantOp>();
+  const cir::LoopDomainExpr &outerBound = nest.outer.conditionRHS;
+  cir::IntAttr numerator = getIntegerConstant(*outerBound.getLHS());
+  cir::IntAttr divisor = getIntegerConstant(*outerBound.getRHS());
+  cir::IntAttr coefficient =
+      getMultipliedConstant(nest.inner.conditionRHS, nest.outer.induction);
+  auto type = cast<cir::IntType>(numerator.getType());
+  llvm::APInt one(numerator.getValue().getBitWidth(), 1);
+  llvm::APInt upperBound = numerator.getValue().sdiv(divisor.getValue());
+  llvm::APInt newOuterBoundValue = (upperBound - one) * coefficient.getValue();
+
+  OpBuilder builder(nest.outer.loop.getContext());
+  builder.setInsertionPoint(nest.inner.comparison);
+  auto newOuterBound =
+      cir::ConstantOp::create(builder, nest.inner.comparison.getLoc(),
+                              cir::IntAttr::get(type, newOuterBoundValue));
+  nest.inner.comparison->setOperand(cir::CmpOp::odsIndex_rhs, newOuterBound);
+  eraseDeadDomainExpression(nest.inner.conditionRHS);
+
+  interchangeLoopStructure(nest, scope);
+  builder.setInsertionPoint(nest.outer.initialization);
+  Location location = nest.outer.initialization.getLoc();
+  auto newOuterValue =
+      cast<cir::LoadOp>(builder.clone(*nest.inner.stepLoad.getOperation()));
+  newOuterValue->setLoc(location);
+  auto coefficientValue =
+      cir::ConstantOp::create(builder, location, coefficient);
+  auto quotient = cir::DivOp::create(builder, location, type, newOuterValue,
+                                     coefficientValue);
+  auto newInnerInitial = cir::IncOp::create(builder, location, quotient,
+                                            /*noSignedWrap=*/false);
+  nest.outer.initialization->setOperand(cir::StoreOp::odsIndex_value,
+                                        newInnerInitial);
+  if (oldOuterInitial->use_empty())
+    oldOuterInitial.erase();
+  return success();
+}
+
 struct CIRLoopInterchangePass
     : public impl::CIRLoopInterchangeBase<CIRLoopInterchangePass> {
   using CIRLoopInterchangeBase::CIRLoopInterchangeBase;
@@ -467,6 +579,8 @@ struct CIRLoopInterchangePass
         transformed = interchangeCanonicalLowerTriangle(*nest);
       if (failed(transformed))
         transformed = interchangeAffineOffsetUpperTriangle(*nest);
+      if (failed(transformed))
+        transformed = interchangeScaledUpperTriangle(*nest);
       if (failed(transformed))
         continue;
 

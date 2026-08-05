@@ -71,6 +71,12 @@ void tri_variant(void) {
       B[j][i] = A[j][i];
 }
 
+void unsigned_scaled(void) {
+  for (unsigned i = 1; i < N / 2; ++i)
+    for (unsigned j = 0; j < 2 * i; ++j)
+      B[j][i] = A[j][i];
+}
+
 // CHECK-DAG: recognized loop nest in @tri_mul outer init constant condition induction lt constant inner init constant condition mul(induction,induction) lt constant memory safe
 void tri_mul(void) {
   for (int i = 1; i < N; ++i)
@@ -188,6 +194,27 @@ void rejected_volatile(void) {
 // INTERCHANGE: [[MISMATCHI:%[0-9]+]] = cir.alloca "i"
 // INTERCHANGE-NEXT: [[MISMATCHZERO:%[0-9]+]] = cir.const #cir.int<0>
 // INTERCHANGE-NEXT: cir.store{{.*}} [[MISMATCHZERO]], [[MISMATCHI]]
+
+// INTERCHANGE-LABEL: cir.func dso_local @tri_variant()
+// INTERCHANGE: [[VARIANTI:%[0-9]+]] = cir.alloca "i"
+// INTERCHANGE-NEXT: [[VARIANTJ:%[0-9]+]] = cir.alloca "j"
+// INTERCHANGE-NEXT: [[VARIANTZERO:%[0-9]+]] = cir.const #cir.int<0>
+// INTERCHANGE-NEXT: cir.store{{.*}} [[VARIANTZERO]], [[VARIANTJ]]
+// INTERCHANGE-NEXT: cir.for : cond {
+// INTERCHANGE-NEXT: [[VARIANTJCOND:%[0-9]+]] = cir.load{{.*}} [[VARIANTJ]]
+// INTERCHANGE-NEXT: [[VARIANTJBOUND:%[0-9]+]] = cir.const #cir.int<126>
+// INTERCHANGE-NEXT: [[VARIANTJCMP:%[0-9]+]] = cir.cmp lt [[VARIANTJCOND]], [[VARIANTJBOUND]]
+// INTERCHANGE: } body {
+// INTERCHANGE-NEXT: [[VARIANTJVALUE:%[0-9]+]] = cir.load{{.*}} [[VARIANTJ]]
+// INTERCHANGE-NEXT: [[VARIANTCOEFF:%[0-9]+]] = cir.const #cir.int<2>
+// INTERCHANGE-NEXT: [[VARIANTQUOT:%[0-9]+]] = cir.div [[VARIANTJVALUE]], [[VARIANTCOEFF]]
+// INTERCHANGE-NEXT: [[VARIANTSTART:%[0-9]+]] = cir.inc [[VARIANTQUOT]]
+// INTERCHANGE-NEXT: cir.store{{.*}} [[VARIANTSTART]], [[VARIANTI]]
+
+// INTERCHANGE-LABEL: cir.func dso_local @unsigned_scaled()
+// INTERCHANGE: [[UNSIGNEDI:%[0-9]+]] = cir.alloca "i"
+// INTERCHANGE-NEXT: [[UNSIGNEDONE:%[0-9]+]] = cir.const #cir.int<1>
+// INTERCHANGE-NEXT: cir.store{{.*}} [[UNSIGNEDONE]], [[UNSIGNEDI]]
 
 // INTERCHANGE-LABEL: cir.func dso_local @shifted_dependence()
 // INTERCHANGE: [[SHIFTI:%[0-9]+]] = cir.alloca "i"
