@@ -218,13 +218,19 @@ def LoopOpt : Pass<"cir-loop-opt"> {
 
     The `test-annotate` option records the recognized nest depth on each loop
     and performs no transform.
+
+    The `report` option emits a remark for every candidate pair saying whether
+    the swap was applied and, when it was not, which condition stopped it.
   }];
   let constructor = "mlir::createLoopOptPass()";
   let dependentDialects = ["cir::CIRDialect"];
   let options = [
     Option<"testAnnotate", "test-annotate", "bool", /*default=*/"false",
            "Attach a cir.loopopt.nest_depth attribute to each recognized "
-           "counted loop nest for testing only with no effect on codegen.">
+           "counted loop nest for testing only with no effect on codegen.">,
+    Option<"report", "report", "bool", /*default=*/"false",
+           "Emit a remark per candidate pair saying whether interchange was "
+           "applied and otherwise which condition declined it.">
   ];
 }
 
