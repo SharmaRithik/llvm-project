@@ -245,6 +245,57 @@ static bool isScaledUpperTriangle(cir::TwoLevelLoopNest &nest) {
   return !overflow;
 }
 
+static bool isInductionProduct(const cir::LoopDomainExpr &expression,
+                               cir::AllocaOp lhsInduction,
+                               cir::AllocaOp rhsInduction) {
+  if (expression.getKind() != cir::LoopDomainExpr::Kind::Mul)
+    return false;
+  const cir::LoopDomainExpr *lhs = expression.getLHS();
+  const cir::LoopDomainExpr *rhs = expression.getRHS();
+  if (lhs->getKind() != cir::LoopDomainExpr::Kind::Induction ||
+      rhs->getKind() != cir::LoopDomainExpr::Kind::Induction)
+    return false;
+  return (lhs->getInduction() == lhsInduction &&
+          rhs->getInduction() == rhsInduction) ||
+         (lhs->getInduction() == rhsInduction &&
+          rhs->getInduction() == lhsInduction);
+}
+
+static bool isProductBoundTriangle(cir::TwoLevelLoopNest &nest) {
+  if (nest.outer.comparison.getKind() != cir::CmpOpKind::lt ||
+      nest.inner.comparison.getKind() != cir::CmpOpKind::lt ||
+      !isConstantOne(nest.outer.initial) ||
+      !isConstantZero(nest.inner.initial) ||
+      nest.outer.conditionLHS.getKind() !=
+          cir::LoopDomainExpr::Kind::Induction ||
+      nest.outer.conditionLHS.getInduction() != nest.outer.induction ||
+      !isInductionProduct(nest.inner.conditionLHS, nest.outer.induction,
+                          nest.inner.induction) ||
+      nest.outer.conditionRHS.getKind() !=
+          cir::LoopDomainExpr::Kind::Constant ||
+      nest.inner.conditionRHS.getKind() !=
+          cir::LoopDomainExpr::Kind::Constant ||
+      !nest.outer.conditionRHS.isStructurallyEqual(nest.inner.conditionRHS))
+    return false;
+
+  cir::IntAttr extent = getIntegerConstant(nest.outer.conditionRHS);
+  if (!extent)
+    return false;
+  auto type = dyn_cast<cir::IntType>(extent.getType());
+  if (!type || !type.isSigned() ||
+      nest.outer.stepLoad.getResult().getType() != type ||
+      nest.inner.stepLoad.getResult().getType() != type)
+    return false;
+
+  llvm::APInt one(extent.getValue().getBitWidth(), 1);
+  if (!extent.getValue().sgt(one))
+    return false;
+  llvm::APInt two(extent.getValue().getBitWidth(), 2);
+  bool overflow = false;
+  (void)(extent.getValue() - one).smul_ov(two, overflow);
+  return !overflow;
+}
+
 static bool
 collectConditionOperations(const cir::LoopDomainExpr &expression,
                            Block &condition,
@@ -526,6 +577,58 @@ interchangeScaledUpperTriangle(cir::TwoLevelLoopNest &nest) {
   return success();
 }
 
+static LogicalResult
+interchangeProductBoundTriangle(cir::TwoLevelLoopNest &nest) {
+  if (!isProductBoundTriangle(nest))
+    return failure();
+
+  cir::ScopeOp scope = getPerfectNestScope(nest);
+  if (!scope)
+    return failure();
+
+  cir::IntAttr extent = getIntegerConstant(nest.outer.conditionRHS);
+  auto type = cast<cir::IntType>(extent.getType());
+  const cir::LoopDomainExpr *productLHS = nest.inner.conditionLHS.getLHS();
+  const cir::LoopDomainExpr *productRHS = nest.inner.conditionLHS.getRHS();
+  const cir::LoopDomainExpr *innerInduction =
+      productLHS->getInduction() == nest.inner.induction ? productLHS
+                                                         : productRHS;
+  Operation *oldOuterBound =
+      nest.outer.conditionRHS.getSource().getDefiningOp();
+
+  nest.inner.comparison->setOperand(cir::CmpOp::odsIndex_lhs,
+                                    innerInduction->getSource());
+  eraseDeadDomainExpression(nest.inner.conditionLHS);
+
+  interchangeLoopStructure(nest, scope);
+  OpBuilder builder(nest.outer.loop.getContext());
+  builder.setInsertionPoint(nest.outer.comparison);
+  Location location = nest.outer.comparison.getLoc();
+  auto newOuterValue =
+      cast<cir::LoadOp>(builder.clone(*nest.inner.stepLoad.getOperation()));
+  newOuterValue->setLoc(location);
+  llvm::APInt zeroValue(extent.getValue().getBitWidth(), 0);
+  llvm::APInt oneValue(extent.getValue().getBitWidth(), 1);
+  auto zero = cir::ConstantOp::create(builder, location,
+                                      cir::IntAttr::get(type, zeroValue));
+  auto isZero = cir::CmpOp::create(builder, location, cir::CmpOpKind::eq,
+                                   newOuterValue, zero);
+  auto one = cir::ConstantOp::create(builder, location,
+                                     cir::IntAttr::get(type, oneValue));
+  auto safeDivisor = cir::SelectOp::create(builder, location, type, isZero, one,
+                                           newOuterValue);
+  auto reducedExtent = cir::ConstantOp::create(
+      builder, location, cir::IntAttr::get(type, extent.getValue() - oneValue));
+  auto quotient =
+      cir::DivOp::create(builder, location, type, reducedExtent, safeDivisor);
+  auto newInnerBound = cir::IncOp::create(builder, location, quotient,
+                                          /*noSignedWrap=*/false);
+  nest.outer.comparison->setOperand(cir::CmpOp::odsIndex_rhs, newInnerBound);
+  if (oldOuterBound->use_empty())
+    oldOuterBound->erase();
+  return success();
+}
+
 struct CIRLoopInterchangePass
     : public impl::CIRLoopInterchangeBase<CIRLoopInterchangePass> {
   using CIRLoopInterchangeBase::CIRLoopInterchangeBase;
@@ -581,6 +684,8 @@ struct CIRLoopInterchangePass
         transformed = interchangeAffineOffsetUpperTriangle(*nest);
       if (failed(transformed))
         transformed = interchangeScaledUpperTriangle(*nest);
+      if (failed(transformed))
+        transformed = interchangeProductBoundTriangle(*nest);
       if (failed(transformed))
         continue;
 

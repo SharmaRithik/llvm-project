@@ -84,6 +84,13 @@ void tri_mul(void) {
       B[j][i] = A[j][i];
 }
 
+// CHECK-DAG: recognized loop nest in @tri_mul_mismatched_extent {{.*}} memory safe profitability profitable
+void tri_mul_mismatched_extent(void) {
+  for (int i = 1; i < N; ++i)
+    for (int j = 0; j * i < 127; ++j)
+      B[j][i] = A[j][i];
+}
+
 // CHECK-DAG: recognized loop nest in @tri_arg outer init constant condition induction lt constant inner init symbol condition induction lt constant memory unsupported address
 long tri_arg(long lo) {
   long sum = 0;
@@ -215,6 +222,35 @@ void rejected_volatile(void) {
 // INTERCHANGE: [[UNSIGNEDI:%[0-9]+]] = cir.alloca "i"
 // INTERCHANGE-NEXT: [[UNSIGNEDONE:%[0-9]+]] = cir.const #cir.int<1>
 // INTERCHANGE-NEXT: cir.store{{.*}} [[UNSIGNEDONE]], [[UNSIGNEDI]]
+
+// INTERCHANGE-LABEL: cir.func dso_local @tri_mul()
+// INTERCHANGE: [[MULI:%[0-9]+]] = cir.alloca "i"
+// INTERCHANGE-NEXT: [[MULIONE:%[0-9]+]] = cir.const #cir.int<1>
+// INTERCHANGE-NEXT: [[MULJ:%[0-9]+]] = cir.alloca "j"
+// INTERCHANGE-NEXT: [[MULJZERO:%[0-9]+]] = cir.const #cir.int<0>
+// INTERCHANGE-NEXT: cir.store{{.*}} [[MULJZERO]], [[MULJ]]
+// INTERCHANGE-NEXT: cir.for : cond {
+// INTERCHANGE-NEXT: [[MULJCOND:%[0-9]+]] = cir.load{{.*}} [[MULJ]]
+// INTERCHANGE-NEXT: [[MULJBOUND:%[0-9]+]] = cir.const #cir.int<128>
+// INTERCHANGE-NEXT: [[MULJCMP:%[0-9]+]] = cir.cmp lt [[MULJCOND]], [[MULJBOUND]]
+// INTERCHANGE: } body {
+// INTERCHANGE-NEXT: cir.store{{.*}} [[MULIONE]], [[MULI]]
+// INTERCHANGE-NEXT: cir.for : cond {
+// INTERCHANGE-NEXT: [[MULICOND:%[0-9]+]] = cir.load{{.*}} [[MULI]]
+// INTERCHANGE-NEXT: [[MULJVALUE:%[0-9]+]] = cir.load{{.*}} [[MULJ]]
+// INTERCHANGE-NEXT: [[MULZERO:%[0-9]+]] = cir.const #cir.int<0>
+// INTERCHANGE-NEXT: [[MULISZERO:%[0-9]+]] = cir.cmp eq [[MULJVALUE]], [[MULZERO]]
+// INTERCHANGE-NEXT: [[MULONE:%[0-9]+]] = cir.const #cir.int<1>
+// INTERCHANGE-NEXT: [[MULDIVISOR:%[0-9]+]] = cir.select if [[MULISZERO]] then [[MULONE]] else [[MULJVALUE]]
+// INTERCHANGE-NEXT: [[MULREDUCED:%[0-9]+]] = cir.const #cir.int<127>
+// INTERCHANGE-NEXT: [[MULQUOT:%[0-9]+]] = cir.div [[MULREDUCED]], [[MULDIVISOR]]
+// INTERCHANGE-NEXT: [[MULBOUND:%[0-9]+]] = cir.inc [[MULQUOT]]
+// INTERCHANGE-NEXT: [[MULICMP:%[0-9]+]] = cir.cmp lt [[MULICOND]], [[MULBOUND]]
+
+// INTERCHANGE-LABEL: cir.func dso_local @tri_mul_mismatched_extent()
+// INTERCHANGE: [[MULMISMATCHI:%[0-9]+]] = cir.alloca "i"
+// INTERCHANGE-NEXT: [[MULMISMATCHONE:%[0-9]+]] = cir.const #cir.int<1>
+// INTERCHANGE-NEXT: cir.store{{.*}} [[MULMISMATCHONE]], [[MULMISMATCHI]]
 
 // INTERCHANGE-LABEL: cir.func dso_local @shifted_dependence()
 // INTERCHANGE: [[SHIFTI:%[0-9]+]] = cir.alloca "i"
