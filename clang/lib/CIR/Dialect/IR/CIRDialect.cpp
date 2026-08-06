@@ -639,6 +639,14 @@ OpFoldResult cir::ConstantOp::fold(FoldAdaptor /*adaptor*/) {
 }
 
 //===----------------------------------------------------------------------===//
+// ViewLikeOpInterface, an address derived by a subscript views its base
+//===----------------------------------------------------------------------===//
+
+mlir::Value cir::PtrStrideOp::getViewSource() { return getBase(); }
+
+mlir::Value cir::GetElementOp::getViewSource() { return getBase(); }
+
+//===----------------------------------------------------------------------===//
 // CastOp
 //===----------------------------------------------------------------------===//
 

@@ -32,6 +32,7 @@ include "mlir/Interfaces/InferTypeOpInterface.td"
 include "mlir/Interfaces/LoopLikeInterface.td"
 include "mlir/Interfaces/MemorySlotInterfaces.td"
 include "mlir/Interfaces/SideEffectInterfaces.td"
+include "mlir/Interfaces/ViewLikeInterface.td"
 
 //===----------------------------------------------------------------------===//
 // CIR Ops
@@ -427,7 +428,8 @@ def CIR_DynamicCastOp : CIR_Op<"dyn_cast"> {
 //===----------------------------------------------------------------------===//
 
 def CIR_PtrStrideOp : CIR_Op<"ptr_stride", [
-  Pure, AllTypesMatch<["base", "result"]>
+  Pure, AllTypesMatch<["base", "result"]>,
+  DeclareOpInterfaceMethods<ViewLikeOpInterface>
 ]> {
   let summary = "Pointer access with stride";
   let description = [{
@@ -3919,7 +3921,8 @@ def CIR_GetElementOp : CIR_Op<"get_element", [
       "type of 'result' matches element type of 'base'", "base", "result",
       "cir::PointerType::get("
       "mlir::cast<cir::ArrayType>(mlir::cast<cir::PointerType>($_self).getPointee()).getElementType(), "
-      "mlir::cast<cir::PointerType>($_self).getAddrSpace())">
+      "mlir::cast<cir::PointerType>($_self).getAddrSpace())">,
+  DeclareOpInterfaceMethods<ViewLikeOpInterface>
 ]> {
   let summary = "Get the address of an array element";
 
