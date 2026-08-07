@@ -339,8 +339,63 @@ static bool isInjectiveOverNest(const LoopMemoryAccess &access,
   return foundOuter && foundInner;
 }
 
+static FailureOr<LoopReduction> analyzePrivateAddReduction(
+    cir::AllocaOp variable, ArrayRef<cir::LoadOp> privateLoads,
+    ArrayRef<cir::StoreOp> privateStores, const TwoLevelLoopNest &nest) {
+  if (nest.outer.loop->isAncestor(variable.getOperation()))
+    return failure();
+
+  SmallVector<cir::LoadOp, 2> loads;
+  SmallVector<cir::StoreOp, 2> stores;
+  for (cir::LoadOp load : privateLoads)
+    if (load.getAddr() == variable.getAddr())
+      loads.push_back(load);
+  for (cir::StoreOp store : privateStores)
+    if (store.getAddr() == variable.getAddr())
+      stores.push_back(store);
+  if (loads.size() != 1 || stores.size() != 1)
+    return failure();
+
+  cir::LoadOp load = loads.front();
+  cir::StoreOp store = stores.front();
+  if (load->getBlock() != store->getBlock() || !load.getResult().hasOneUse())
+    return failure();
+
+  auto addition = store.getValue().getDefiningOp<cir::AddOp>();
+  if (!addition || addition->getBlock() != load->getBlock() ||
+      !addition.getResult().hasOneUse() || addition.getSaturated() ||
+      !isa<cir::IntType>(addition.getResult().getType()) ||
+      (addition.getLhs() != load.getResult() &&
+       addition.getRhs() != load.getResult()))
+    return failure();
+
+  for (OpOperand &use : variable.getAddr().getUses()) {
+    Operation *user = use.getOwner();
+    if (auto candidate = dyn_cast<cir::LoadOp>(user)) {
+      if (use.getOperandNumber() != cir::LoadOp::odsIndex_addr ||
+          candidate.getIsVolatile() || candidate.getMemOrder())
+        return failure();
+    } else if (auto candidate = dyn_cast<cir::StoreOp>(user)) {
+      if (use.getOperandNumber() != cir::StoreOp::odsIndex_addr ||
+          candidate.getIsVolatile() || candidate.getMemOrder())
+        return failure();
+    } else {
+      return failure();
+    }
+
+    if (nest.outer.loop->isAncestor(user) && user != load.getOperation() &&
+        user != store.getOperation())
+      return failure();
+  }
+
+  return LoopReduction{variable, load, addition, store};
+}
+
 LoopMemoryAnalysis analyzeLoopMemory(const TwoLevelLoopNest &nest) {
   SmallVector<LoopMemoryAccess, 8> accesses;
+  SmallVector<cir::LoadOp, 2> privateLoads;
+  SmallVector<cir::StoreOp, 2> privateStores;
+  SmallVector<cir::AllocaOp, 2> privateVariables;
   LoopMemoryLegality result = LoopMemoryLegality::Safe;
   cir::ForOp innerLoop = nest.inner.loop;
   cir::AllocaOp outerInduction = nest.outer.induction;
@@ -359,6 +414,12 @@ LoopMemoryAnalysis analyzeLoopMemory(const TwoLevelLoopNest &nest) {
       if (load.getAddr() == outerInductionAddress ||
           load.getAddr() == innerInductionAddress)
         return WalkResult::advance();
+      if (auto variable = load.getAddr().getDefiningOp<cir::AllocaOp>()) {
+        privateLoads.push_back(load);
+        if (!llvm::is_contained(privateVariables, variable))
+          privateVariables.push_back(variable);
+        return WalkResult::advance();
+      }
       FailureOr<LoopMemoryAccess> access =
           analyzeMemoryAccess(operation, load.getAddr(), false, inductions);
       if (failed(access)) {
@@ -373,6 +434,12 @@ LoopMemoryAnalysis analyzeLoopMemory(const TwoLevelLoopNest &nest) {
       if (store.getIsVolatile() || store.getMemOrder()) {
         result = LoopMemoryLegality::UnsupportedOperation;
         return WalkResult::interrupt();
+      }
+      if (auto variable = store.getAddr().getDefiningOp<cir::AllocaOp>()) {
+        privateStores.push_back(store);
+        if (!llvm::is_contained(privateVariables, variable))
+          privateVariables.push_back(variable);
+        return WalkResult::advance();
       }
       FailureOr<LoopMemoryAccess> access =
           analyzeMemoryAccess(operation, store.getAddr(), true, inductions);
@@ -398,12 +465,22 @@ LoopMemoryAnalysis analyzeLoopMemory(const TwoLevelLoopNest &nest) {
   });
 
   if (walkResult.wasInterrupted())
-    return LoopMemoryAnalysis{result, std::move(accesses)};
+    return LoopMemoryAnalysis{result, std::move(accesses), {}};
+
+  SmallVector<LoopReduction, 2> reductions;
+  for (cir::AllocaOp variable : privateVariables) {
+    FailureOr<LoopReduction> reduction =
+        analyzePrivateAddReduction(variable, privateLoads, privateStores, nest);
+    if (failed(reduction))
+      return LoopMemoryAnalysis{
+          LoopMemoryLegality::UnsupportedAddress, std::move(accesses), {}};
+    reductions.push_back(*reduction);
+  }
 
   for (const LoopMemoryAccess &access : accesses) {
     if (access.isWrite && !isInjectiveOverNest(access, nest))
-      return LoopMemoryAnalysis{LoopMemoryLegality::PotentialDependence,
-                                std::move(accesses)};
+      return LoopMemoryAnalysis{
+          LoopMemoryLegality::PotentialDependence, std::move(accesses), {}};
   }
 
   for (auto lhs = accesses.begin(), end = accesses.end(); lhs != end; ++lhs) {
@@ -411,12 +488,13 @@ LoopMemoryAnalysis analyzeLoopMemory(const TwoLevelLoopNest &nest) {
       if ((!lhs->isWrite && !rhs->isWrite) || lhs->base != rhs->base)
         continue;
       if (!hasIdenticalSubscripts(*lhs, *rhs))
-        return LoopMemoryAnalysis{LoopMemoryLegality::PotentialDependence,
-                                  std::move(accesses)};
+        return LoopMemoryAnalysis{
+            LoopMemoryLegality::PotentialDependence, std::move(accesses), {}};
     }
   }
 
-  return LoopMemoryAnalysis{LoopMemoryLegality::Safe, std::move(accesses)};
+  return LoopMemoryAnalysis{LoopMemoryLegality::Safe, std::move(accesses),
+                            std::move(reductions)};
 }
 
 } // namespace cir

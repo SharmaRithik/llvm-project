@@ -91,12 +91,30 @@ void tri_mul_mismatched_extent(void) {
       B[j][i] = A[j][i];
 }
 
-// CHECK-DAG: recognized loop nest in @tri_arg outer init constant condition induction lt constant inner init symbol condition induction lt constant memory unsupported address
+// CHECK-DAG: recognized loop nest in @tri_arg outer init constant condition induction lt constant inner init symbol condition induction lt constant memory safe profitability profitable
 long tri_arg(long lo) {
   long sum = 0;
   for (long i = 0; i < N; ++i)
     for (long j = lo; j < N; ++j)
       sum += L[j][i];
+  return sum;
+}
+
+// CHECK-DAG: recognized loop nest in @floating_reduction {{.*}} memory unsupported address
+double floating_reduction(int lo) {
+  double sum = 0.0;
+  for (int i = 0; i < N; ++i)
+    for (int j = lo; j < N; ++j)
+      sum += A[j][i];
+  return sum;
+}
+
+// CHECK-DAG: recognized loop nest in @subtract_reduction {{.*}} memory unsupported address
+long subtract_reduction(long lo) {
+  long sum = 0;
+  for (long i = 0; i < N; ++i)
+    for (long j = lo; j < N; ++j)
+      sum -= L[j][i];
   return sum;
 }
 
@@ -251,6 +269,33 @@ void rejected_volatile(void) {
 // INTERCHANGE: [[MULMISMATCHI:%[0-9]+]] = cir.alloca "i"
 // INTERCHANGE-NEXT: [[MULMISMATCHONE:%[0-9]+]] = cir.const #cir.int<1>
 // INTERCHANGE-NEXT: cir.store{{.*}} [[MULMISMATCHONE]], [[MULMISMATCHI]]
+
+// INTERCHANGE-LABEL: cir.func dso_local @tri_arg(
+// INTERCHANGE: [[ARGLO:%[0-9]+]] = cir.alloca "lo"
+// INTERCHANGE: [[ARGSUM:%[0-9]+]] = cir.alloca "sum"
+// INTERCHANGE: [[ARGI:%[0-9]+]] = cir.alloca "i"
+// INTERCHANGE-NEXT: [[ARGIZERO:%[0-9]+]] = cir.const #cir.int<0>
+// INTERCHANGE-NEXT: [[ARGJ:%[0-9]+]] = cir.alloca "j"
+// INTERCHANGE-NEXT: [[ARGJSTART:%[0-9]+]] = cir.load{{.*}} [[ARGLO]]
+// INTERCHANGE-NEXT: cir.store{{.*}} [[ARGJSTART]], [[ARGJ]]
+// INTERCHANGE-NEXT: cir.for : cond {
+// INTERCHANGE-NEXT: [[ARGJCOND:%[0-9]+]] = cir.load{{.*}} [[ARGJ]]
+// INTERCHANGE-NEXT: [[ARGJBOUND:%[0-9]+]] = cir.const #cir.int<128>
+// INTERCHANGE-NEXT: [[ARGJCMP:%[0-9]+]] = cir.cmp lt [[ARGJCOND]], [[ARGJBOUND]]
+// INTERCHANGE: } body {
+// INTERCHANGE-NEXT: cir.store{{.*}} [[ARGIZERO]], [[ARGI]]
+// INTERCHANGE-NEXT: cir.for : cond {
+// INTERCHANGE: [[ARGREDUCE:%[0-9]+]] = cir.add {{%[0-9]+}}, {{%[0-9]+}} : !s64i
+
+// INTERCHANGE-LABEL: cir.func dso_local @floating_reduction(
+// INTERCHANGE: [[FLOATI:%[0-9]+]] = cir.alloca "i"
+// INTERCHANGE-NEXT: [[FLOATZERO:%[0-9]+]] = cir.const #cir.int<0>
+// INTERCHANGE-NEXT: cir.store{{.*}} [[FLOATZERO]], [[FLOATI]]
+
+// INTERCHANGE-LABEL: cir.func dso_local @subtract_reduction(
+// INTERCHANGE: [[SUBI:%[0-9]+]] = cir.alloca "i"
+// INTERCHANGE-NEXT: [[SUBZERO:%[0-9]+]] = cir.const #cir.int<0>
+// INTERCHANGE-NEXT: cir.store{{.*}} [[SUBZERO]], [[SUBI]]
 
 // INTERCHANGE-LABEL: cir.func dso_local @shifted_dependence()
 // INTERCHANGE: [[SHIFTI:%[0-9]+]] = cir.alloca "i"

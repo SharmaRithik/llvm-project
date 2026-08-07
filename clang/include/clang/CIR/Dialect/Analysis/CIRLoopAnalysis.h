@@ -98,9 +98,18 @@ struct LoopMemoryAccess {
   bool isWrite;
 };
 
+/// Nonescaping private integer addition updated once per iteration
+struct LoopReduction {
+  cir::AllocaOp variable;
+  cir::LoadOp load;
+  cir::AddOp operation;
+  cir::StoreOp store;
+};
+
 struct LoopMemoryAnalysis {
   LoopMemoryLegality result;
   llvm::SmallVector<LoopMemoryAccess, 8> accesses;
+  llvm::SmallVector<LoopReduction, 2> reductions;
 
   bool isSafe() const { return result == LoopMemoryLegality::Safe; }
 };

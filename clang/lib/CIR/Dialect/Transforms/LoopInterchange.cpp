@@ -296,6 +296,62 @@ static bool isProductBoundTriangle(cir::TwoLevelLoopNest &nest) {
   return !overflow;
 }
 
+static bool isInvariantSymbol(const cir::LoopDomainExpr &expression,
+                              cir::ForOp outerLoop) {
+  if (expression.getKind() != cir::LoopDomainExpr::Kind::Symbol)
+    return false;
+  if (isa<BlockArgument>(expression.getSource()))
+    return true;
+
+  auto load = expression.getSource().getDefiningOp<cir::LoadOp>();
+  if (!load || load.getIsVolatile() || load.getMemOrder())
+    return false;
+  auto variable = load.getAddr().getDefiningOp<cir::AllocaOp>();
+  if (!variable || outerLoop->isAncestor(variable.getOperation()))
+    return false;
+
+  for (OpOperand &use : variable.getAddr().getUses()) {
+    Operation *user = use.getOwner();
+    if (auto candidate = dyn_cast<cir::LoadOp>(user)) {
+      if (use.getOperandNumber() != cir::LoadOp::odsIndex_addr ||
+          candidate.getIsVolatile() || candidate.getMemOrder())
+        return false;
+      continue;
+    }
+    if (auto candidate = dyn_cast<cir::StoreOp>(user)) {
+      if (use.getOperandNumber() != cir::StoreOp::odsIndex_addr ||
+          candidate.getIsVolatile() || candidate.getMemOrder() ||
+          outerLoop->isAncestor(user))
+        return false;
+      continue;
+    }
+    return false;
+  }
+  return true;
+}
+
+static bool isRectangularSymbolStart(cir::TwoLevelLoopNest &nest) {
+  if (nest.outer.comparison.getKind() != cir::CmpOpKind::lt ||
+      nest.inner.comparison.getKind() != cir::CmpOpKind::lt ||
+      !isConstantZero(nest.outer.initial) ||
+      !isInvariantSymbol(nest.inner.initial, nest.outer.loop) ||
+      nest.outer.conditionLHS.getKind() !=
+          cir::LoopDomainExpr::Kind::Induction ||
+      nest.outer.conditionLHS.getInduction() != nest.outer.induction ||
+      nest.inner.conditionLHS.getKind() !=
+          cir::LoopDomainExpr::Kind::Induction ||
+      nest.inner.conditionLHS.getInduction() != nest.inner.induction ||
+      nest.outer.conditionRHS.getKind() !=
+          cir::LoopDomainExpr::Kind::Constant ||
+      !nest.outer.conditionRHS.isStructurallyEqual(nest.inner.conditionRHS))
+    return false;
+
+  return nest.outer.stepLoad.getResult().getType() ==
+             nest.inner.stepLoad.getResult().getType() &&
+         nest.inner.initial.getSource().getType() ==
+             nest.inner.stepLoad.getResult().getType();
+}
+
 static bool
 collectConditionOperations(const cir::LoopDomainExpr &expression,
                            Block &condition,
@@ -356,15 +412,14 @@ static cir::ScopeOp getPerfectNestScope(cir::TwoLevelLoopNest &nest) {
     return {};
 
   Block &scopeBody = scope.getScopeRegion().front();
-  if (scopeBody.getOperations().size() != 5)
+  Operation *innerInitialOperation =
+      nest.inner.initial.getSource().getDefiningOp();
+  if (scopeBody.getOperations().size() != (innerInitialOperation ? 5u : 4u))
     return {};
 
   auto operation = scopeBody.begin();
-  if (&*operation++ != nest.inner.induction.getOperation())
-    return {};
-  Operation *innerInitialOperation =
-      nest.inner.initial.getSource().getDefiningOp();
-  if (!innerInitialOperation || &*operation++ != innerInitialOperation ||
+  if (&*operation++ != nest.inner.induction.getOperation() ||
+      (innerInitialOperation && &*operation++ != innerInitialOperation) ||
       &*operation++ != nest.inner.initialization.getOperation() ||
       &*operation++ != innerLoop.getOperation() ||
       !isa<cir::YieldOp>(&*operation))
@@ -387,7 +442,8 @@ static void interchangeLoopStructure(cir::TwoLevelLoopNest &nest,
   Block &innerBody = innerLoop.getBody().front();
 
   nest.inner.induction->moveBefore(outerLoop);
-  innerInitialOperation->moveBefore(outerLoop);
+  if (innerInitialOperation)
+    innerInitialOperation->moveBefore(outerLoop);
   nest.inner.initialization->moveBefore(outerLoop);
   innerLoop->moveBefore(outerLoop);
   scope.erase();
@@ -629,6 +685,18 @@ interchangeProductBoundTriangle(cir::TwoLevelLoopNest &nest) {
   return success();
 }
 
+static LogicalResult
+interchangeRectangularSymbolStart(cir::TwoLevelLoopNest &nest) {
+  if (!isRectangularSymbolStart(nest))
+    return failure();
+
+  cir::ScopeOp scope = getPerfectNestScope(nest);
+  if (!scope)
+    return failure();
+  interchangeLoopStructure(nest, scope);
+  return success();
+}
+
 struct CIRLoopInterchangePass
     : public impl::CIRLoopInterchangeBase<CIRLoopInterchangePass> {
   using CIRLoopInterchangeBase::CIRLoopInterchangeBase;
@@ -687,7 +755,14 @@ struct CIRLoopInterchangePass
       if (failed(transformed))
         transformed = interchangeProductBoundTriangle(*nest);
       if (failed(transformed))
+        transformed = interchangeRectangularSymbolStart(*nest);
+      if (failed(transformed))
         continue;
+
+      for (cir::LoopReduction &reduction : memory.reductions) {
+        reduction.operation.setNoSignedWrap(false);
+        reduction.operation.setNoUnsignedWrap(false);
+      }
 
       changed = true;
       if (emitAnalysisRemarks)
