@@ -3,9 +3,9 @@
 // RUN: cir-opt %t.cir \
 // RUN:   "--cir-loop-interchange=emit-analysis-remarks=true" \
 // RUN:   -o /dev/null 2>&1 | FileCheck %s
-// RUN: cir-opt %t.cir \
-// RUN:   --cir-loop-interchange \
-// RUN:   | FileCheck %s --check-prefix=INTERCHANGE
+// RUN: cir-opt %t.cir --cir-loop-interchange -o %t.once.cir
+// RUN: cir-opt %t.once.cir --cir-loop-interchange -o %t.twice.cir
+// RUN: diff %t.once.cir %t.twice.cir && FileCheck %s --check-prefix=INTERCHANGE < %t.once.cir
 // RUN: %clang_cc1 -triple x86_64-unknown-linux-gnu -fclangir -O3 \
 // RUN:   -floop-interchange -emit-cir %s -o - \
 // RUN:   | FileCheck %s --check-prefix=INTERCHANGE
@@ -179,6 +179,34 @@ void rejected_volatile(void) {
 // INTERCHANGE-NEXT: [[ICOND:%[0-9]+]] = cir.load{{.*}} [[I]]
 // INTERCHANGE-NEXT: [[IBOUND:%[0-9]+]] = cir.const #cir.int<128>
 // INTERCHANGE-NEXT: [[ICMP:%[0-9]+]] = cir.cmp lt [[ICOND]], [[IBOUND]]
+
+// INTERCHANGE-LABEL: cir.func dso_local @tri_fill()
+// INTERCHANGE: [[FILLI:%[0-9]+]] = cir.alloca "i"
+// INTERCHANGE-NEXT: [[FILLJ:%[0-9]+]] = cir.alloca "j"
+// INTERCHANGE-NEXT: [[FILLZERO:%[0-9]+]] = cir.const #cir.int<0>
+// INTERCHANGE-NEXT: cir.store{{.*}} [[FILLZERO]], [[FILLJ]]
+// INTERCHANGE-NEXT: cir.for : cond {
+// INTERCHANGE-NEXT: [[FILLJCOND:%[0-9]+]] = cir.load{{.*}} [[FILLJ]]
+// INTERCHANGE-NEXT: [[FILLJBOUND:%[0-9]+]] = cir.const #cir.int<127>
+// INTERCHANGE-NEXT: [[FILLJCMP:%[0-9]+]] = cir.cmp lt [[FILLJCOND]], [[FILLJBOUND]]
+// INTERCHANGE: } body {
+// INTERCHANGE-NEXT: [[FILLJVALUE:%[0-9]+]] = cir.load{{.*}} [[FILLJ]]
+// INTERCHANGE-NEXT: [[FILLISTART:%[0-9]+]] = cir.inc nsw [[FILLJVALUE]]
+// INTERCHANGE-NEXT: cir.store{{.*}} [[FILLISTART]], [[FILLI]]
+
+// INTERCHANGE-LABEL: cir.func dso_local @tri_ldlt()
+// INTERCHANGE: [[LDLTI:%[0-9]+]] = cir.alloca "i"
+// INTERCHANGE-NEXT: [[LDLTJ:%[0-9]+]] = cir.alloca "j"
+// INTERCHANGE-NEXT: [[LDLTZERO:%[0-9]+]] = cir.const #cir.int<0>
+// INTERCHANGE-NEXT: cir.store{{.*}} [[LDLTZERO]], [[LDLTJ]]
+// INTERCHANGE-NEXT: cir.for : cond {
+// INTERCHANGE-NEXT: [[LDLTJCOND:%[0-9]+]] = cir.load{{.*}} [[LDLTJ]]
+// INTERCHANGE-NEXT: [[LDLTJBOUND:%[0-9]+]] = cir.const #cir.int<127>
+// INTERCHANGE-NEXT: [[LDLTJCMP:%[0-9]+]] = cir.cmp lt [[LDLTJCOND]], [[LDLTJBOUND]]
+// INTERCHANGE: } body {
+// INTERCHANGE-NEXT: [[LDLTJVALUE:%[0-9]+]] = cir.load{{.*}} [[LDLTJ]]
+// INTERCHANGE-NEXT: [[LDLTISTART:%[0-9]+]] = cir.inc nsw [[LDLTJVALUE]]
+// INTERCHANGE-NEXT: cir.store{{.*}} [[LDLTISTART]], [[LDLTI]]
 
 // INTERCHANGE-LABEL: cir.func dso_local @tri_lower()
 // INTERCHANGE: [[LOWERI:%[0-9]+]] = cir.alloca "i"
