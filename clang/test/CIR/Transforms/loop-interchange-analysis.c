@@ -36,6 +36,28 @@ void tri_fill(void) {
       B[j][i] = 0.0;
 }
 
+// CHECK-DAG: recognized loop nest in @reused_induction_storage outer init constant condition induction lt constant inner init constant condition induction lt induction memory safe profitability profitable
+void reused_induction_storage(void) {
+  int i, j;
+  for (i = 1; i < N; ++i)
+    for (j = 0; j < i; ++j)
+      B[j][i] = A[j][i];
+  for (i = 0; i < N; ++i)
+    for (j = 0; j < N; ++j)
+      D[i][j] = C[i][j];
+}
+
+// CHECK-NOT: recognized loop nest in @mutated_induction_storage
+void mutated_induction_storage(void) {
+  int i, j;
+  for (i = 1; i < N; ++i)
+    for (j = 0; j < i; ++j) {
+      B[j][i] = A[j][i];
+      if (B[j][i] == 0.0)
+        i = N;
+    }
+}
+
 // CHECK-DAG: recognized loop nest in @tri_ldlt outer init constant condition induction lt constant inner init constant condition induction lt induction memory safe
 void tri_ldlt(void) {
   for (int i = 1; i < N; ++i)

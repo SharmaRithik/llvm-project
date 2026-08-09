@@ -168,7 +168,8 @@ analyzeLoopDomainImpl(cir::ForOp loop,
     }
     if (auto store = dyn_cast<cir::StoreOp>(user)) {
       if (use.getOperandNumber() != cir::StoreOp::odsIndex_addr ||
-          (store != initialization && store != stepStore))
+          (store != initialization && store != stepStore &&
+           loop->isAncestor(store)))
         return failure();
       continue;
     }
