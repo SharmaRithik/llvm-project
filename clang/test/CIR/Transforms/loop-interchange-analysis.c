@@ -154,6 +154,37 @@ void pointer_access(double *p) {
       p[j * N + i] = 0.0;
 }
 
+// CHECK-DAG: recognized loop nest in @restricted_pointer_access {{.*}} memory safe profitability profitable
+void restricted_pointer_access(double (*restrict a)[N],
+                               double (*restrict b)[N]) {
+  for (int i = 1; i < N; ++i)
+    for (int j = 0; j < i; ++j)
+      b[j][i] = a[j][i];
+}
+
+// CHECK-DAG: recognized loop nest in @unrestricted_pointer_access {{.*}} memory unsupported address
+void unrestricted_pointer_access(double (*a)[N], double (*b)[N]) {
+  for (int i = 1; i < N; ++i)
+    for (int j = 0; j < i; ++j)
+      b[j][i] = a[j][i];
+}
+
+// CHECK-DAG: recognized loop nest in @restricted_shifted_access {{.*}} memory potential dependence
+void restricted_shifted_access(double (*restrict a)[N]) {
+  for (int i = 1; i < N; ++i)
+    for (int j = 0; j < i; ++j)
+      a[j][i] = a[j][i - 1];
+}
+
+// CHECK-DAG: recognized loop nest in @reassigned_restricted_pointer {{.*}} memory unsupported address
+void reassigned_restricted_pointer(double (*restrict a)[N],
+                                   double (*restrict b)[N]) {
+  a = b;
+  for (int i = 1; i < N; ++i)
+    for (int j = 0; j < i; ++j)
+      a[j][i] = 0.0;
+}
+
 extern void opaque(void);
 
 // CHECK-DAG: recognized loop nest in @unknown_call {{.*}} memory unsupported operation
@@ -351,6 +382,31 @@ void rejected_volatile(void) {
 // INTERCHANGE: [[SHIFTI:%[0-9]+]] = cir.alloca "i"
 // INTERCHANGE-NEXT: [[SHIFTONE:%[0-9]+]] = cir.const #cir.int<1>
 // INTERCHANGE-NEXT: cir.store{{.*}} [[SHIFTONE]], [[SHIFTI]]
+
+// INTERCHANGE-LABEL: cir.func dso_local @restricted_pointer_access(
+// INTERCHANGE: [[RESTRICTI:%[0-9]+]] = cir.alloca "i"
+// INTERCHANGE-NEXT: [[RESTRICTJ:%[0-9]+]] = cir.alloca "j"
+// INTERCHANGE-NEXT: [[RESTRICTZERO:%[0-9]+]] = cir.const #cir.int<0>
+// INTERCHANGE-NEXT: cir.store{{.*}} [[RESTRICTZERO]], [[RESTRICTJ]]
+// INTERCHANGE-NEXT: cir.for : cond {
+// INTERCHANGE: } body {
+// INTERCHANGE: cir.store{{.*}}, [[RESTRICTI]]
+// INTERCHANGE-NEXT: cir.for : cond {
+
+// INTERCHANGE-LABEL: cir.func dso_local @unrestricted_pointer_access(
+// INTERCHANGE: [[UNRESTRICTI:%[0-9]+]] = cir.alloca "i"
+// INTERCHANGE-NEXT: [[UNRESTRICTONE:%[0-9]+]] = cir.const #cir.int<1>
+// INTERCHANGE-NEXT: cir.store{{.*}} [[UNRESTRICTONE]], [[UNRESTRICTI]]
+
+// INTERCHANGE-LABEL: cir.func dso_local @restricted_shifted_access(
+// INTERCHANGE: [[RESTRICTSHIFTI:%[0-9]+]] = cir.alloca "i"
+// INTERCHANGE-NEXT: [[RESTRICTSHIFTONE:%[0-9]+]] = cir.const #cir.int<1>
+// INTERCHANGE-NEXT: cir.store{{.*}} [[RESTRICTSHIFTONE]], [[RESTRICTSHIFTI]]
+
+// INTERCHANGE-LABEL: cir.func dso_local @reassigned_restricted_pointer(
+// INTERCHANGE: [[REASSIGNI:%[0-9]+]] = cir.alloca "i"
+// INTERCHANGE-NEXT: [[REASSIGNONE:%[0-9]+]] = cir.const #cir.int<1>
+// INTERCHANGE-NEXT: cir.store{{.*}} [[REASSIGNONE]], [[REASSIGNI]]
 
 // INTERCHANGE-LABEL: cir.func dso_local @already_contiguous()
 // INTERCHANGE: [[CONTIGI:%[0-9]+]] = cir.alloca "i"

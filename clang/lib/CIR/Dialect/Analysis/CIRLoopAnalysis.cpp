@@ -267,25 +267,90 @@ static FailureOr<Value> stripIndexCast(Value value) {
   return value;
 }
 
+static bool isNoAliasFunctionArgument(BlockArgument argument) {
+  auto function =
+      dyn_cast_or_null<cir::FuncOp>(argument.getOwner()->getParentOp());
+  return function && argument.getOwner() == &function.getBody().front() &&
+         function.getArgAttr(argument.getArgNumber(), "llvm.noalias");
+}
+
+static FailureOr<BlockArgument> resolveNoAliasArgument(Value value) {
+  if (auto argument = dyn_cast<BlockArgument>(value)) {
+    if (isNoAliasFunctionArgument(argument))
+      return argument;
+    return failure();
+  }
+
+  auto load = value.getDefiningOp<cir::LoadOp>();
+  if (!load || load.getIsVolatile() || load.getMemOrder())
+    return failure();
+  auto slot = load.getAddr().getDefiningOp<cir::AllocaOp>();
+  if (!slot)
+    return failure();
+
+  cir::StoreOp definingStore;
+  for (OpOperand &use : slot.getAddr().getUses()) {
+    Operation *user = use.getOwner();
+    if (auto candidate = dyn_cast<cir::LoadOp>(user)) {
+      if (use.getOperandNumber() != cir::LoadOp::odsIndex_addr ||
+          candidate.getIsVolatile() || candidate.getMemOrder())
+        return failure();
+      continue;
+    }
+    if (auto candidate = dyn_cast<cir::StoreOp>(user)) {
+      if (use.getOperandNumber() != cir::StoreOp::odsIndex_addr ||
+          candidate.getIsVolatile() || candidate.getMemOrder() || definingStore)
+        return failure();
+      definingStore = candidate;
+      continue;
+    }
+    return failure();
+  }
+
+  if (!definingStore)
+    return failure();
+  auto argument = dyn_cast<BlockArgument>(definingStore.getValue());
+  if (!argument || !isNoAliasFunctionArgument(argument))
+    return failure();
+  return argument;
+}
+
 static FailureOr<LoopMemoryAccess>
 analyzeMemoryAccess(Operation *operation, Value address, bool isWrite,
                     ArrayRef<cir::AllocaOp> inductions) {
   SmallVector<Value, 2> indices;
   Value current = address;
-  while (auto element = current.getDefiningOp<cir::GetElementOp>()) {
-    indices.insert(indices.begin(), element.getIndex());
-    current = element.getBase();
+  while (true) {
+    if (auto element = current.getDefiningOp<cir::GetElementOp>()) {
+      indices.insert(indices.begin(), element.getIndex());
+      current = element.getBase();
+      continue;
+    }
+    if (auto stride = current.getDefiningOp<cir::PtrStrideOp>()) {
+      indices.insert(indices.begin(), stride.getStride());
+      current = stride.getBase();
+      continue;
+    }
+    break;
   }
 
   auto getGlobal = current.getDefiningOp<cir::GetGlobalOp>();
-  if (!getGlobal || getGlobal.getTls())
-    return failure();
-
-  auto base = SymbolTable::lookupNearestSymbolFrom<cir::GlobalOp>(
-      getGlobal, getGlobal.getNameAttr());
-  if (!base || base.isDeclaration() || base.getAliasee() ||
-      !cir::isLocalLinkage(base.getLinkage()))
-    return failure();
+  LoopMemoryBase base;
+  if (getGlobal) {
+    if (getGlobal.getTls())
+      return failure();
+    base.global = SymbolTable::lookupNearestSymbolFrom<cir::GlobalOp>(
+        getGlobal, getGlobal.getNameAttr());
+    if (!base.global || base.global.isDeclaration() ||
+        base.global.getAliasee() ||
+        !cir::isLocalLinkage(base.global.getLinkage()))
+      return failure();
+  } else {
+    FailureOr<BlockArgument> argument = resolveNoAliasArgument(current);
+    if (failed(argument))
+      return failure();
+    base.argument = *argument;
+  }
 
   SmallVector<LoopDomainExpr, 2> subscripts;
   for (Value index : indices) {
@@ -414,6 +479,8 @@ LoopMemoryAnalysis analyzeLoopMemory(const TwoLevelLoopNest &nest) {
       }
       if (load.getAddr() == outerInductionAddress ||
           load.getAddr() == innerInductionAddress)
+        return WalkResult::advance();
+      if (succeeded(resolveNoAliasArgument(load.getResult())))
         return WalkResult::advance();
       if (auto variable = load.getAddr().getDefiningOp<cir::AllocaOp>()) {
         privateLoads.push_back(load);

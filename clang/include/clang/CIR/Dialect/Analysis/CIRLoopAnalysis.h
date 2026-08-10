@@ -91,9 +91,21 @@ enum class LoopMemoryLegality {
 
 llvm::StringRef stringifyLoopMemoryLegality(LoopMemoryLegality result);
 
+struct LoopMemoryBase {
+  cir::GlobalOp global;
+  mlir::BlockArgument argument;
+
+  bool operator==(const LoopMemoryBase &other) const {
+    return global == other.global && argument == other.argument;
+  }
+  bool operator!=(const LoopMemoryBase &other) const {
+    return !(*this == other);
+  }
+};
+
 struct LoopMemoryAccess {
   mlir::Operation *operation;
-  cir::GlobalOp base;
+  LoopMemoryBase base;
   llvm::SmallVector<LoopDomainExpr, 2> subscripts;
   bool isWrite;
 };
