@@ -778,6 +778,20 @@ struct CIRLoopInterchangePass
     });
 
     for (cir::ForOp loop : outerLoops) {
+      FailureOr<cir::ThreeLevelLoopBand> band =
+          cir::analyzeThreeLevelLoopBand(loop);
+      if (succeeded(band) && emitAnalysisRemarks) {
+        std::string message;
+        llvm::raw_string_ostream os(message);
+        os << "recognized anchored loop band";
+        if (auto function = loop->getParentOfType<cir::FuncOp>())
+          os << " in @" << function.getSymName();
+        os << " outer init ";
+        band->outer.initial.print(os);
+        os << " inner candidates " << band->innerCandidates.size();
+        loop.emitRemark(os.str());
+      }
+
       FailureOr<cir::TwoLevelLoopNest> nest =
           cir::analyzeTwoLevelLoopNest(loop);
       if (failed(nest))

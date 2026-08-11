@@ -215,16 +215,22 @@ analyzeLoopDomain(cir::ForOp loop,
   return analyzeLoopDomainImpl(loop, enclosingInductions);
 }
 
+static SmallVector<cir::ForOp, 2> collectImmediateNestedLoops(cir::ForOp loop) {
+  SmallVector<cir::ForOp, 2> nestedLoops;
+  loop.getBody().walk([&](cir::ForOp candidate) {
+    if (candidate->getParentOfType<cir::ForOp>() == loop)
+      nestedLoops.push_back(candidate);
+  });
+  return nestedLoops;
+}
+
 FailureOr<TwoLevelLoopNest> analyzeTwoLevelLoopNest(cir::ForOp outerLoop) {
   FailureOr<LoopDomain> outer = analyzeLoopDomain(outerLoop);
   if (failed(outer))
     return failure();
 
-  SmallVector<cir::ForOp, 2> immediateNestedLoops;
-  outerLoop.getBody().walk([&](cir::ForOp candidate) {
-    if (candidate->getParentOfType<cir::ForOp>() == outerLoop)
-      immediateNestedLoops.push_back(candidate);
-  });
+  SmallVector<cir::ForOp, 2> immediateNestedLoops =
+      collectImmediateNestedLoops(outerLoop);
   if (immediateNestedLoops.size() != 1)
     return failure();
 
@@ -235,6 +241,39 @@ FailureOr<TwoLevelLoopNest> analyzeTwoLevelLoopNest(cir::ForOp outerLoop) {
     return failure();
 
   return TwoLevelLoopNest{std::move(*outer), std::move(*inner)};
+}
+
+FailureOr<ThreeLevelLoopBand> analyzeThreeLevelLoopBand(cir::ForOp anchorLoop) {
+  FailureOr<LoopDomain> anchor = analyzeLoopDomain(anchorLoop);
+  if (failed(anchor))
+    return failure();
+
+  SmallVector<cir::ForOp, 2> outerCandidates;
+  for (cir::ForOp loop : collectImmediateNestedLoops(anchorLoop))
+    if (!collectImmediateNestedLoops(loop).empty())
+      outerCandidates.push_back(loop);
+  if (outerCandidates.size() != 1)
+    return failure();
+
+  FailureOr<LoopDomain> outer =
+      analyzeLoopDomain(outerCandidates.front(), anchor->induction);
+  if (failed(outer))
+    return failure();
+
+  SmallVector<cir::AllocaOp, 2> enclosingInductions = {anchor->induction,
+                                                       outer->induction};
+  SmallVector<LoopDomain, 2> innerCandidates;
+  for (cir::ForOp loop : collectImmediateNestedLoops(outer->loop)) {
+    FailureOr<LoopDomain> inner = analyzeLoopDomain(loop, enclosingInductions);
+    if (failed(inner))
+      return failure();
+    innerCandidates.push_back(std::move(*inner));
+  }
+  if (innerCandidates.empty())
+    return failure();
+
+  return ThreeLevelLoopBand{std::move(*anchor), std::move(*outer),
+                            std::move(innerCandidates)};
 }
 
 StringRef stringifyLoopMemoryLegality(LoopMemoryLegality result) {

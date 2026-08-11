@@ -82,6 +82,13 @@ struct TwoLevelLoopNest {
   LoopDomain inner;
 };
 
+/// Anchor loop and nested candidate loop pairs
+struct ThreeLevelLoopBand {
+  LoopDomain anchor;
+  LoopDomain outer;
+  llvm::SmallVector<LoopDomain, 2> innerCandidates;
+};
+
 enum class LoopMemoryLegality {
   Safe,
   UnsupportedOperation,
@@ -133,6 +140,9 @@ analyzeLoopDomain(cir::ForOp loop,
 
 /// Two level loop nest with transparent CIR scopes
 mlir::FailureOr<TwoLevelLoopNest> analyzeTwoLevelLoopNest(cir::ForOp outerLoop);
+
+mlir::FailureOr<ThreeLevelLoopBand>
+analyzeThreeLevelLoopBand(cir::ForOp anchorLoop);
 
 /// Restricted memory independence for pointwise array nests
 LoopMemoryAnalysis analyzeLoopMemory(const TwoLevelLoopNest &nest);

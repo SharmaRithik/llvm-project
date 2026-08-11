@@ -185,6 +185,29 @@ void reassigned_restricted_pointer(double (*restrict a)[N],
       a[j][i] = 0.0;
 }
 
+// CHECK-DAG: recognized anchored loop band in @anchored_single_phase outer init add(induction,constant) inner candidates 1
+void anchored_single_phase(void) {
+  for (int i = 0; i < N; ++i)
+    for (int j = i + 1; j < N; ++j) {
+      B[i][j] = 0.0;
+      for (int k = 0; k < N; ++k)
+        B[i][j] += A[k][i] * A[k][j];
+      C[j][i] = B[i][j];
+    }
+}
+
+// CHECK-DAG: recognized anchored loop band in @anchored_multiple_phases outer init add(induction,constant) inner candidates 2
+void anchored_multiple_phases(void) {
+  for (int k = 0; k < N; ++k)
+    for (int j = k + 1; j < N; ++j) {
+      B[k][j] = 0.0;
+      for (int i = 0; i < N; ++i)
+        B[k][j] += A[i][k] * A[i][j];
+      for (int i = 0; i < N; ++i)
+        C[i][j] = A[i][j] - B[k][j];
+    }
+}
+
 extern void opaque(void);
 
 // CHECK-DAG: recognized loop nest in @unknown_call {{.*}} memory unsupported operation
