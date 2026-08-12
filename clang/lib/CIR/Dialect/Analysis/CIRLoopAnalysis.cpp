@@ -14,6 +14,8 @@
 #include "mlir/Interfaces/SideEffectInterfaces.h"
 #include "llvm/ADT/STLExtras.h"
 
+#include <utility>
+
 using namespace mlir;
 
 namespace cir {
@@ -417,31 +419,102 @@ static bool hasIdenticalSubscripts(const LoopMemoryAccess &lhs,
   return true;
 }
 
-static bool isInjectiveOverNest(const LoopMemoryAccess &access,
-                                const TwoLevelLoopNest &nest) {
-  if (access.subscripts.size() != 2)
+static bool isInjectiveOverInductions(const LoopMemoryAccess &access,
+                                      ArrayRef<cir::AllocaOp> inductions) {
+  if (access.subscripts.size() != inductions.size())
     return false;
 
-  bool foundOuter = false;
-  bool foundInner = false;
+  SmallVector<cir::AllocaOp, 3> found;
   for (const LoopDomainExpr &subscript : access.subscripts) {
     if (subscript.getKind() != LoopDomainExpr::Kind::Induction)
       return false;
-    if (subscript.getInduction() == nest.outer.induction) {
-      if (foundOuter)
-        return false;
-      foundOuter = true;
-      continue;
-    }
-    if (subscript.getInduction() == nest.inner.induction) {
-      if (foundInner)
-        return false;
-      foundInner = true;
-      continue;
-    }
-    return false;
+    cir::AllocaOp induction = subscript.getInduction();
+    if (!llvm::is_contained(inductions, induction) ||
+        llvm::is_contained(found, induction))
+      return false;
+    found.push_back(induction);
   }
-  return foundOuter && foundInner;
+  return found.size() == inductions.size();
+}
+
+static bool isInjectiveOverNest(const LoopMemoryAccess &access,
+                                const TwoLevelLoopNest &nest) {
+  SmallVector<cir::AllocaOp, 2> inductions = {nest.outer.induction,
+                                              nest.inner.induction};
+  return isInjectiveOverInductions(access, inductions);
+}
+
+static std::pair<cir::LoadOp, Operation *>
+matchElementRecurrence(cir::StoreOp store) {
+  if (store.getIsVolatile() || store.getMemOrder() ||
+      !isa<cir::FPTypeInterface>(store.getValue().getType()))
+    return {};
+
+  if (auto addition = store.getValue().getDefiningOp<cir::FAddOp>()) {
+    if (addition.getFenv())
+      return {};
+    cir::LoadOp load;
+    auto lhs = addition.getLhs().getDefiningOp<cir::LoadOp>();
+    auto rhs = addition.getRhs().getDefiningOp<cir::LoadOp>();
+    if (lhs && lhs.getAddr() == store.getAddr())
+      load = lhs;
+    if (rhs && rhs.getAddr() == store.getAddr()) {
+      if (load)
+        return {};
+      load = rhs;
+    }
+    if (!load)
+      return {};
+    return {load, addition.getOperation()};
+  }
+
+  if (auto multiplyAdd = store.getValue().getDefiningOp<cir::FMulAddOp>()) {
+    if (multiplyAdd.getFenv())
+      return {};
+    auto load = multiplyAdd.getC().getDefiningOp<cir::LoadOp>();
+    if (!load || load.getAddr() != store.getAddr())
+      return {};
+    return {load, multiplyAdd.getOperation()};
+  }
+
+  return {};
+}
+
+SmallVector<LoopElementRecurrence, 2>
+analyzeLoopElementRecurrences(const ThreeLevelLoopBand &band,
+                              const LoopDomain &inner) {
+  SmallVector<LoopElementRecurrence, 2> recurrences;
+  cir::ForOp innerLoop = inner.loop;
+  if (!innerLoop.getBody().hasOneBlock() ||
+      llvm::none_of(band.innerCandidates, [&](const LoopDomain &candidate) {
+        return candidate.loop == inner.loop;
+      }))
+    return recurrences;
+
+  Block &body = innerLoop.getBody().front();
+  SmallVector<cir::AllocaOp, 3> inductions = {
+      band.anchor.induction, band.outer.induction, inner.induction};
+  SmallVector<cir::AllocaOp, 2> targetInductions = {band.anchor.induction,
+                                                    band.outer.induction};
+
+  for (Operation &operation : body.without_terminator()) {
+    auto store = dyn_cast<cir::StoreOp>(operation);
+    if (!store)
+      continue;
+    auto [load, combiner] = matchElementRecurrence(store);
+    if (!load || load.getIsVolatile() || load.getMemOrder() ||
+        load->getBlock() != &body || combiner->getBlock() != &body ||
+        !load.getResult().hasOneUse() || !combiner->getResult(0).hasOneUse())
+      continue;
+
+    FailureOr<LoopMemoryAccess> target =
+        analyzeMemoryAccess(store, store.getAddr(), true, inductions);
+    if (failed(target) || !isInjectiveOverInductions(*target, targetInductions))
+      continue;
+    recurrences.push_back(
+        LoopElementRecurrence{std::move(*target), load, combiner, store});
+  }
+  return recurrences;
 }
 
 static FailureOr<LoopReduction> analyzePrivateAddReduction(

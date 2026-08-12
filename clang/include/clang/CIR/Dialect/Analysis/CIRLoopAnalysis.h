@@ -117,6 +117,14 @@ struct LoopMemoryAccess {
   bool isWrite;
 };
 
+/// Floating point array element update
+struct LoopElementRecurrence {
+  LoopMemoryAccess target;
+  cir::LoadOp load;
+  mlir::Operation *combiner;
+  cir::StoreOp store;
+};
+
 /// Nonescaping private integer addition updated once per iteration
 struct LoopReduction {
   cir::AllocaOp variable;
@@ -143,6 +151,10 @@ mlir::FailureOr<TwoLevelLoopNest> analyzeTwoLevelLoopNest(cir::ForOp outerLoop);
 
 mlir::FailureOr<ThreeLevelLoopBand>
 analyzeThreeLevelLoopBand(cir::ForOp anchorLoop);
+
+llvm::SmallVector<LoopElementRecurrence, 2>
+analyzeLoopElementRecurrences(const ThreeLevelLoopBand &band,
+                              const LoopDomain &inner);
 
 /// Restricted memory independence for pointwise array nests
 LoopMemoryAnalysis analyzeLoopMemory(const TwoLevelLoopNest &nest);

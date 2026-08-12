@@ -185,7 +185,7 @@ void reassigned_restricted_pointer(double (*restrict a)[N],
       a[j][i] = 0.0;
 }
 
-// CHECK-DAG: recognized anchored loop band in @anchored_single_phase outer init add(induction,constant) inner candidates 1
+// CHECK-DAG: recognized anchored loop band in @anchored_single_phase outer init add(induction,constant) inner candidates 1 floating recurrences 1
 void anchored_single_phase(void) {
   for (int i = 0; i < N; ++i)
     for (int j = i + 1; j < N; ++j) {
@@ -196,7 +196,7 @@ void anchored_single_phase(void) {
     }
 }
 
-// CHECK-DAG: recognized anchored loop band in @anchored_multiple_phases outer init add(induction,constant) inner candidates 2
+// CHECK-DAG: recognized anchored loop band in @anchored_multiple_phases outer init add(induction,constant) inner candidates 2 floating recurrences 1
 void anchored_multiple_phases(void) {
   for (int k = 0; k < N; ++k)
     for (int j = k + 1; j < N; ++j) {
@@ -206,6 +206,22 @@ void anchored_multiple_phases(void) {
       for (int i = 0; i < N; ++i)
         C[i][j] = A[i][j] - B[k][j];
     }
+}
+
+// CHECK-DAG: recognized anchored loop band in @anchored_fadd_recurrence {{.*}} floating recurrences 1
+void anchored_fadd_recurrence(void) {
+  for (int i = 0; i < N; ++i)
+    for (int j = i + 1; j < N; ++j)
+      for (int k = 0; k < N; ++k)
+        B[i][j] += A[k][j];
+}
+
+// CHECK-DAG: recognized anchored loop band in @inner_varying_update {{.*}} floating recurrences 0
+void inner_varying_update(void) {
+  for (int i = 0; i < N; ++i)
+    for (int j = i + 1; j < N; ++j)
+      for (int k = 0; k < N; ++k)
+        B[k][j] += A[i][j];
 }
 
 extern void opaque(void);
