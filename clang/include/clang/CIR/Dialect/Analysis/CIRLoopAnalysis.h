@@ -141,6 +141,14 @@ struct LoopMemoryAnalysis {
   bool isSafe() const { return result == LoopMemoryLegality::Safe; }
 };
 
+struct LoopBandMemoryAnalysis {
+  LoopMemoryLegality result;
+  llvm::SmallVector<LoopMemoryAccess, 16> accesses;
+  llvm::SmallVector<LoopElementRecurrence, 2> recurrences;
+
+  bool isSafe() const { return result == LoopMemoryLegality::Safe; }
+};
+
 /// Canonical unit step induction variable and loop domain
 mlir::FailureOr<LoopDomain>
 analyzeLoopDomain(cir::ForOp loop,
@@ -155,6 +163,8 @@ analyzeThreeLevelLoopBand(cir::ForOp anchorLoop);
 llvm::SmallVector<LoopElementRecurrence, 2>
 analyzeLoopElementRecurrences(const ThreeLevelLoopBand &band,
                               const LoopDomain &inner);
+
+LoopBandMemoryAnalysis analyzeLoopBandMemory(const ThreeLevelLoopBand &band);
 
 /// Restricted memory independence for pointwise array nests
 LoopMemoryAnalysis analyzeLoopMemory(const TwoLevelLoopNest &nest);

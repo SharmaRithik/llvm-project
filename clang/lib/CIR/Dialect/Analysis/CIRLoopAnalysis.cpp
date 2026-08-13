@@ -517,6 +517,251 @@ analyzeLoopElementRecurrences(const ThreeLevelLoopBand &band,
   return recurrences;
 }
 
+static bool isInvariantLoad(cir::LoadOp load, cir::ForOp anchorLoop) {
+  auto variable = load.getAddr().getDefiningOp<cir::AllocaOp>();
+  if (!variable || anchorLoop->isAncestor(variable.getOperation()))
+    return false;
+
+  for (OpOperand &use : variable.getAddr().getUses()) {
+    Operation *user = use.getOwner();
+    if (auto candidate = dyn_cast<cir::LoadOp>(user)) {
+      if (use.getOperandNumber() != cir::LoadOp::odsIndex_addr ||
+          candidate.getIsVolatile() || candidate.getMemOrder())
+        return false;
+      continue;
+    }
+    if (auto candidate = dyn_cast<cir::StoreOp>(user)) {
+      if (use.getOperandNumber() != cir::StoreOp::odsIndex_addr ||
+          candidate.getIsVolatile() || candidate.getMemOrder() ||
+          anchorLoop->isAncestor(user))
+        return false;
+      continue;
+    }
+    return false;
+  }
+  return true;
+}
+
+static const LoopDomain *getContainingInner(const ThreeLevelLoopBand &band,
+                                            Operation *operation) {
+  for (const LoopDomain &inner : band.innerCandidates)
+    if (inner.loop->isAncestor(operation))
+      return &inner;
+  return nullptr;
+}
+
+static bool isRecurrenceStore(Operation *operation,
+                              ArrayRef<LoopElementRecurrence> recurrences) {
+  return llvm::any_of(recurrences,
+                      [&](const LoopElementRecurrence &recurrence) {
+                        cir::StoreOp store = recurrence.store;
+                        return store.getOperation() == operation;
+                      });
+}
+
+static bool isBandWriteMapSafe(const LoopMemoryAccess &access,
+                               const ThreeLevelLoopBand &band,
+                               ArrayRef<LoopElementRecurrence> recurrences) {
+  if (isRecurrenceStore(access.operation, recurrences))
+    return true;
+
+  if (const LoopDomain *inner = getContainingInner(band, access.operation)) {
+    SmallVector<cir::AllocaOp, 2> inductions = {inner->induction,
+                                                band.outer.induction};
+    return isInjectiveOverInductions(access, inductions);
+  }
+
+  SmallVector<cir::AllocaOp, 2> inductions = {band.anchor.induction,
+                                              band.outer.induction};
+  return isInjectiveOverInductions(access, inductions);
+}
+
+static bool isPositiveOffsetFromAnchor(const LoopDomain &inner,
+                                       cir::AllocaOp anchor) {
+  const LoopDomainExpr &initial = inner.initial;
+  if (initial.getKind() != LoopDomainExpr::Kind::Add)
+    return false;
+
+  const LoopDomainExpr *constant = nullptr;
+  if (initial.getLHS()->getKind() == LoopDomainExpr::Kind::Induction &&
+      initial.getLHS()->getInduction() == anchor)
+    constant = initial.getRHS();
+  else if (initial.getRHS()->getKind() == LoopDomainExpr::Kind::Induction &&
+           initial.getRHS()->getInduction() == anchor)
+    constant = initial.getLHS();
+  if (!constant || constant->getKind() != LoopDomainExpr::Kind::Constant)
+    return false;
+
+  auto constantOp = constant->getSource().getDefiningOp<cir::ConstantOp>();
+  auto value = constantOp ? dyn_cast<cir::IntAttr>(constantOp.getValue())
+                          : cir::IntAttr{};
+  auto type = value ? dyn_cast<cir::IntType>(value.getType()) : cir::IntType{};
+  auto addition = initial.getSource().getDefiningOp<cir::AddOp>();
+  cir::IncOp increment = inner.increment;
+  return type && type.isSigned() && value.getValue().isStrictlyPositive() &&
+         addition && addition.getNoSignedWrap() && increment.getNoSignedWrap();
+}
+
+static bool areBandAccessesIndependent(const LoopMemoryAccess &lhs,
+                                       const LoopMemoryAccess &rhs,
+                                       const ThreeLevelLoopBand &band) {
+  if ((!lhs.isWrite && !rhs.isWrite) || lhs.base != rhs.base)
+    return true;
+  if (hasIdenticalSubscripts(lhs, rhs))
+    return true;
+
+  SmallVector<cir::AllocaOp, 2> outerInductions = {band.anchor.induction,
+                                                   band.outer.induction};
+  if (isInjectiveOverInductions(lhs, outerInductions) &&
+      isInjectiveOverInductions(rhs, outerInductions))
+    return true;
+
+  if (lhs.subscripts.size() != rhs.subscripts.size())
+    return false;
+
+  bool foundDifference = false;
+  for (auto [lhsSubscript, rhsSubscript] :
+       llvm::zip(lhs.subscripts, rhs.subscripts)) {
+    if (lhsSubscript.isStructurallyEqual(rhsSubscript))
+      continue;
+    if (lhsSubscript.getKind() != LoopDomainExpr::Kind::Induction ||
+        rhsSubscript.getKind() != LoopDomainExpr::Kind::Induction)
+      return false;
+
+    cir::AllocaOp lhsInduction = lhsSubscript.getInduction();
+    cir::AllocaOp rhsInduction = rhsSubscript.getInduction();
+    cir::AllocaOp innerInduction =
+        lhsInduction == band.anchor.induction ? rhsInduction : lhsInduction;
+    if (lhsInduction != band.anchor.induction &&
+        rhsInduction != band.anchor.induction)
+      return false;
+
+    auto inner =
+        llvm::find_if(band.innerCandidates, [&](const LoopDomain &candidate) {
+          return candidate.induction == innerInduction;
+        });
+    if (inner == band.innerCandidates.end() ||
+        !isPositiveOffsetFromAnchor(*inner, band.anchor.induction))
+      return false;
+    foundDifference = true;
+  }
+  return foundDifference;
+}
+
+LoopBandMemoryAnalysis analyzeLoopBandMemory(const ThreeLevelLoopBand &band) {
+  SmallVector<LoopMemoryAccess, 16> accesses;
+  SmallVector<LoopElementRecurrence, 2> recurrences;
+  for (const LoopDomain &inner : band.innerCandidates) {
+    SmallVector<LoopElementRecurrence, 2> innerRecurrences =
+        analyzeLoopElementRecurrences(band, inner);
+    for (LoopElementRecurrence &recurrence : innerRecurrences)
+      recurrences.push_back(std::move(recurrence));
+  }
+
+  SmallVector<cir::AllocaOp, 4> inductions = {band.anchor.induction,
+                                              band.outer.induction};
+  for (const LoopDomain &inner : band.innerCandidates)
+    if (!llvm::is_contained(inductions, inner.induction))
+      inductions.push_back(inner.induction);
+
+  LoopMemoryLegality result = LoopMemoryLegality::Safe;
+  cir::ForOp outerLoop = band.outer.loop;
+  cir::ForOp anchorLoop = band.anchor.loop;
+  WalkResult walkResult = outerLoop.getBody().walk([&](Operation *operation)
+                                                       -> WalkResult {
+    if (auto load = dyn_cast<cir::LoadOp>(operation)) {
+      if (load.getIsVolatile() || load.getMemOrder()) {
+        result = LoopMemoryLegality::UnsupportedOperation;
+        return WalkResult::interrupt();
+      }
+      if (llvm::any_of(inductions,
+                       [&](cir::AllocaOp induction) {
+                         return load.getAddr() == induction.getAddr();
+                       }) ||
+          succeeded(resolveNoAliasArgument(load.getResult())) ||
+          isInvariantLoad(load, anchorLoop))
+        return WalkResult::advance();
+
+      FailureOr<LoopMemoryAccess> access =
+          analyzeMemoryAccess(operation, load.getAddr(), false, inductions);
+      if (failed(access)) {
+        result = LoopMemoryLegality::UnsupportedAddress;
+        return WalkResult::interrupt();
+      }
+      accesses.push_back(std::move(*access));
+      return WalkResult::advance();
+    }
+
+    if (auto store = dyn_cast<cir::StoreOp>(operation)) {
+      if (store.getIsVolatile() || store.getMemOrder()) {
+        result = LoopMemoryLegality::UnsupportedOperation;
+        return WalkResult::interrupt();
+      }
+      if (llvm::any_of(inductions, [&](cir::AllocaOp induction) {
+            return store.getAddr() == induction.getAddr();
+          }))
+        return WalkResult::advance();
+
+      FailureOr<LoopMemoryAccess> access =
+          analyzeMemoryAccess(operation, store.getAddr(), true, inductions);
+      if (failed(access)) {
+        result = LoopMemoryLegality::UnsupportedAddress;
+        return WalkResult::interrupt();
+      }
+      accesses.push_back(std::move(*access));
+      return WalkResult::advance();
+    }
+
+    if (auto alloca = dyn_cast<cir::AllocaOp>(operation)) {
+      if (llvm::is_contained(inductions, alloca))
+        return WalkResult::advance();
+      result = LoopMemoryLegality::UnsupportedAddress;
+      return WalkResult::interrupt();
+    }
+
+    if (auto loop = dyn_cast<cir::ForOp>(operation)) {
+      if (llvm::any_of(band.innerCandidates, [&](const LoopDomain &candidate) {
+            return candidate.loop == loop;
+          }))
+        return WalkResult::advance();
+      result = LoopMemoryLegality::UnsupportedOperation;
+      return WalkResult::interrupt();
+    }
+
+    if (isa<cir::YieldOp, cir::ConditionOp, cir::ScopeOp, cir::GetGlobalOp,
+            cir::GetElementOp, cir::PtrStrideOp>(operation))
+      return WalkResult::advance();
+    if (isa<cir::LoopOpInterface, cir::BreakOp, cir::ContinueOp, cir::ReturnOp>(
+            operation) ||
+        operation->getNumRegions() != 0 ||
+        !mlir::isMemoryEffectFree(operation)) {
+      result = LoopMemoryLegality::UnsupportedOperation;
+      return WalkResult::interrupt();
+    }
+    return WalkResult::advance();
+  });
+
+  if (walkResult.wasInterrupted())
+    return LoopBandMemoryAnalysis{result, std::move(accesses),
+                                  std::move(recurrences)};
+
+  for (const LoopMemoryAccess &access : accesses)
+    if (access.isWrite && !isBandWriteMapSafe(access, band, recurrences))
+      return LoopBandMemoryAnalysis{LoopMemoryLegality::PotentialDependence,
+                                    std::move(accesses),
+                                    std::move(recurrences)};
+
+  for (auto lhs = accesses.begin(), end = accesses.end(); lhs != end; ++lhs)
+    for (auto rhs = std::next(lhs); rhs != end; ++rhs)
+      if (!areBandAccessesIndependent(*lhs, *rhs, band))
+        return LoopBandMemoryAnalysis{LoopMemoryLegality::PotentialDependence,
+                                      std::move(accesses),
+                                      std::move(recurrences)};
+
+  return LoopBandMemoryAnalysis{LoopMemoryLegality::Safe, std::move(accesses),
+                                std::move(recurrences)};
+}
+
 static FailureOr<LoopReduction> analyzePrivateAddReduction(
     cir::AllocaOp variable, ArrayRef<cir::LoadOp> privateLoads,
     ArrayRef<cir::StoreOp> privateStores, const TwoLevelLoopNest &nest) {

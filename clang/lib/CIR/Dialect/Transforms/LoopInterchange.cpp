@@ -781,10 +781,8 @@ struct CIRLoopInterchangePass
       FailureOr<cir::ThreeLevelLoopBand> band =
           cir::analyzeThreeLevelLoopBand(loop);
       if (succeeded(band) && emitAnalysisRemarks) {
-        unsigned recurrenceCount = 0;
-        for (const cir::LoopDomain &inner : band->innerCandidates)
-          recurrenceCount +=
-              cir::analyzeLoopElementRecurrences(*band, inner).size();
+        cir::LoopBandMemoryAnalysis bandMemory =
+            cir::analyzeLoopBandMemory(*band);
         std::string message;
         llvm::raw_string_ostream os(message);
         os << "recognized anchored loop band";
@@ -793,7 +791,9 @@ struct CIRLoopInterchangePass
         os << " outer init ";
         band->outer.initial.print(os);
         os << " inner candidates " << band->innerCandidates.size();
-        os << " floating recurrences " << recurrenceCount;
+        os << " floating recurrences " << bandMemory.recurrences.size();
+        os << " band memory "
+           << cir::stringifyLoopMemoryLegality(bandMemory.result);
         loop.emitRemark(os.str());
       }
 
