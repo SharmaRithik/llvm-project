@@ -185,7 +185,7 @@ void reassigned_restricted_pointer(double (*restrict a)[N],
       a[j][i] = 0.0;
 }
 
-// CHECK-DAG: recognized anchored loop band in @anchored_single_phase outer init add(induction,constant) inner candidates 1 floating recurrences 1 band memory safe
+// CHECK-DAG: recognized anchored loop band in @anchored_single_phase outer init add(induction,constant) inner candidates 1 floating recurrences 1 band memory safe candidate 0 locality improved 3 regressed 0 profitable
 void anchored_single_phase(void) {
   for (int i = 0; i < N; ++i)
     for (int j = i + 1; j < N; ++j) {
@@ -196,7 +196,7 @@ void anchored_single_phase(void) {
     }
 }
 
-// CHECK-DAG: recognized anchored loop band in @anchored_multiple_phases outer init add(induction,constant) inner candidates 2 floating recurrences 1 band memory safe
+// CHECK-DAG: recognized anchored loop band in @anchored_multiple_phases outer init add(induction,constant) inner candidates 2 floating recurrences 1 band memory safe candidate 0 locality improved 3 regressed 0 profitable candidate 1 locality improved 3 regressed 0 profitable
 void anchored_multiple_phases(void) {
   for (int k = 0; k < N; ++k)
     for (int j = k + 1; j < N; ++j) {
@@ -258,6 +258,30 @@ void band_unknown_call(void) {
     for (int j = 0; j < N; ++j)
       for (int k = 0; k < N; ++k)
         opaque();
+}
+
+// CHECK-DAG: recognized anchored loop band in @band_regressed_locality {{.*}} band memory safe candidate 0 locality improved 0 regressed 2 not profitable
+void band_regressed_locality(void) {
+  for (int i = 0; i < N; ++i)
+    for (int j = 0; j < N; ++j)
+      for (int k = 0; k < N; ++k)
+        B[j][k] = A[j][k];
+}
+
+// CHECK-DAG: recognized anchored loop band in @band_balanced_locality {{.*}} band memory safe candidate 0 locality improved 1 regressed 1 not profitable
+void band_balanced_locality(void) {
+  for (int i = 0; i < N; ++i)
+    for (int j = 0; j < N; ++j)
+      for (int k = 0; k < N; ++k)
+        B[j][k] = A[k][j];
+}
+
+// CHECK-DAG: recognized anchored loop band in @band_unknown_locality {{.*}} band memory safe candidate 0 locality unknown
+void band_unknown_locality(void) {
+  for (int i = 0; i < N; ++i)
+    for (int j = 0; j < N; ++j)
+      for (int k = 0; k < N; ++k)
+        B[j][k] = A[k][j + 1];
 }
 
 // CHECK-DAG: recognized loop nest in @unknown_call {{.*}} memory unsupported operation

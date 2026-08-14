@@ -118,6 +118,47 @@ static bool isProfitableInterchange(const cir::TwoLevelLoopNest &nest,
   return improved > regressed;
 }
 
+struct InterchangeLocality {
+  unsigned improved = 0;
+  unsigned regressed = 0;
+  bool analyzable = true;
+
+  bool isProfitable() const { return analyzable && improved > regressed; }
+};
+
+static InterchangeLocality
+scoreBandCandidateLocality(const cir::ThreeLevelLoopBand &band,
+                           const cir::LoopBandMemoryAnalysis &memory,
+                           const cir::LoopDomain &inner) {
+  InterchangeLocality locality;
+  for (const cir::LoopMemoryAccess &access : memory.accesses) {
+    if (!inner.loop->isAncestor(access.operation))
+      continue;
+    if (access.subscripts.empty()) {
+      locality.analyzable = false;
+      return locality;
+    }
+
+    const cir::LoopDomainExpr &innermost = access.subscripts.back();
+    if (innermost.getKind() == cir::LoopDomainExpr::Kind::Induction) {
+      if (innermost.getInduction() == band.outer.induction) {
+        ++locality.improved;
+        continue;
+      }
+      if (innermost.getInduction() == inner.induction) {
+        ++locality.regressed;
+        continue;
+      }
+    }
+    if (innermost.dependsOn(band.outer.induction) ||
+        innermost.dependsOn(inner.induction)) {
+      locality.analyzable = false;
+      return locality;
+    }
+  }
+  return locality;
+}
+
 static std::optional<CanonicalUpperPlan>
 matchCanonicalUpperTriangle(cir::TwoLevelLoopNest &nest) {
   if (nest.outer.comparison.getKind() != cir::CmpOpKind::lt ||
@@ -794,6 +835,18 @@ struct CIRLoopInterchangePass
         os << " floating recurrences " << bandMemory.recurrences.size();
         os << " band memory "
            << cir::stringifyLoopMemoryLegality(bandMemory.result);
+        for (auto [index, inner] : llvm::enumerate(band->innerCandidates)) {
+          InterchangeLocality locality =
+              scoreBandCandidateLocality(*band, bandMemory, inner);
+          os << " candidate " << index << " locality ";
+          if (!locality.analyzable) {
+            os << "unknown";
+            continue;
+          }
+          os << "improved " << locality.improved << " regressed "
+             << locality.regressed << ' '
+             << (locality.isProfitable() ? "profitable" : "not profitable");
+        }
         loop.emitRemark(os.str());
       }
 
