@@ -186,7 +186,7 @@ void reassigned_restricted_pointer(double (*restrict a)[N],
 }
 
 // CHECK-DAG: recognized anchored loop band in @anchored_single_phase outer init add(induction,constant) inner candidates 1 floating recurrences 1 band memory safe candidate 0 locality improved 3 regressed 0 profitable
-// CHECK-DAG: distributed and interchanged single phase loop band
+// CHECK-DAG: distributed and interchanged 1 nested loop phase
 void anchored_single_phase(void) {
   for (int i = 0; i < N; ++i)
     for (int j = i + 1; j < N; ++j) {
@@ -198,6 +198,7 @@ void anchored_single_phase(void) {
 }
 
 // CHECK-DAG: recognized anchored loop band in @anchored_multiple_phases outer init add(induction,constant) inner candidates 2 floating recurrences 1 band memory safe candidate 0 locality improved 3 regressed 0 profitable candidate 1 locality improved 3 regressed 0 profitable
+// CHECK-DAG: distributed and interchanged 2 nested loop phases
 void anchored_multiple_phases(void) {
   for (int k = 0; k < N; ++k)
     for (int j = k + 1; j < N; ++j) {
@@ -514,6 +515,24 @@ void rejected_volatile(void) {
 // INTERCHANGE: } body {
 // INTERCHANGE-NEXT: [[BANDJ:%[0-9]+]] = cir.alloca "j"
 // INTERCHANGE: cir.store{{.*}}, [[BANDJ]]
+// INTERCHANGE-NEXT: cir.for : cond {
+
+// INTERCHANGE-LABEL: cir.func dso_local @anchored_multiple_phases()
+// INTERCHANGE: [[PHASE1I:%[0-9]+]] = cir.alloca "i"
+// INTERCHANGE-NEXT: [[PHASE1ZERO:%[0-9]+]] = cir.const #cir.int<0>
+// INTERCHANGE-NEXT: cir.store{{.*}} [[PHASE1ZERO]], [[PHASE1I]]
+// INTERCHANGE-NEXT: cir.for : cond {
+// INTERCHANGE: } body {
+// INTERCHANGE-NEXT: [[PHASE1J:%[0-9]+]] = cir.alloca "j"
+// INTERCHANGE: cir.store{{.*}}, [[PHASE1J]]
+// INTERCHANGE-NEXT: cir.for : cond {
+// INTERCHANGE: [[PHASE2I:%[0-9]+]] = cir.alloca "i"
+// INTERCHANGE-NEXT: [[PHASE2ZERO:%[0-9]+]] = cir.const #cir.int<0>
+// INTERCHANGE-NEXT: cir.store{{.*}} [[PHASE2ZERO]], [[PHASE2I]]
+// INTERCHANGE-NEXT: cir.for : cond {
+// INTERCHANGE: } body {
+// INTERCHANGE-NEXT: [[PHASE2J:%[0-9]+]] = cir.alloca "j"
+// INTERCHANGE: cir.store{{.*}}, [[PHASE2J]]
 // INTERCHANGE-NEXT: cir.for : cond {
 
 // INTERCHANGE-LABEL: cir.func dso_local @already_contiguous()

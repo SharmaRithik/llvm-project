@@ -807,15 +807,20 @@ static void applyLoopInterchangePlan(cir::TwoLevelLoopNest &nest,
       plan.domain);
 }
 
-struct SinglePhaseBandRewritePlan {
-  cir::ScopeOp outerSetup;
-  cir::ForOp outerLoop;
+struct BandRewritePhase {
   cir::ScopeOp innerSetup;
   cir::ForOp innerLoop;
-  SmallVector<Operation *, 8> outerSetupOperations;
+  SmallVector<Operation *, 8> operations;
   SmallVector<Operation *, 8> innerSetupOperations;
-  SmallVector<Operation *, 8> before;
-  SmallVector<Operation *, 8> after;
+
+  bool isNested() const { return innerLoop != nullptr; }
+};
+
+struct BandRewritePlan {
+  cir::ScopeOp outerSetup;
+  cir::ForOp outerLoop;
+  SmallVector<Operation *, 8> outerSetupOperations;
+  SmallVector<BandRewritePhase, 4> phases;
 };
 
 static bool areBandDomainSymbolsInvariant(const cir::LoopDomainExpr &expression,
@@ -878,29 +883,24 @@ static Operation *getIterationRoot(Operation *operation, Block &iteration) {
 }
 
 static int getBandPhase(Operation *operation, Block &iteration,
-                        cir::ScopeOp innerSetup, ArrayRef<Operation *> before,
-                        ArrayRef<Operation *> after) {
+                        ArrayRef<BandRewritePhase> phases) {
   Operation *root = getIterationRoot(operation, iteration);
   if (!root)
     return -1;
-  if (root == innerSetup.getOperation())
-    return 1;
-  if (llvm::is_contained(before, root))
-    return 0;
-  if (llvm::is_contained(after, root))
-    return 2;
+  for (auto [index, phase] : llvm::enumerate(phases))
+    if (llvm::is_contained(phase.operations, root))
+      return static_cast<int>(index);
   return -1;
 }
 
-static bool hasPhaseLocalSSAUses(Block &iteration, cir::ScopeOp innerSetup,
-                                 ArrayRef<Operation *> before,
-                                 ArrayRef<Operation *> after) {
+static bool hasPhaseLocalSSAUses(Block &iteration,
+                                 ArrayRef<BandRewritePhase> phases) {
   for (Operation &root : iteration.without_terminator()) {
-    int phase = getBandPhase(&root, iteration, innerSetup, before, after);
+    int phase = getBandPhase(&root, iteration, phases);
     WalkResult walkResult = root.walk([&](Operation *operation) {
       for (Value result : operation->getResults())
         for (Operation *user : result.getUsers())
-          if (getBandPhase(user, iteration, innerSetup, before, after) != phase)
+          if (getBandPhase(user, iteration, phases) != phase)
             return WalkResult::interrupt();
       return WalkResult::advance();
     });
@@ -910,32 +910,17 @@ static bool hasPhaseLocalSSAUses(Block &iteration, cir::ScopeOp innerSetup,
   return true;
 }
 
-static std::optional<SinglePhaseBandRewritePlan>
-matchSinglePhaseBandRewrite(cir::ThreeLevelLoopBand &band) {
-  if (band.innerCandidates.size() != 1)
-    return std::nullopt;
-
-  cir::LoopDomain &inner = band.innerCandidates.front();
-  if (inner.initial.dependsOn(band.outer.induction) ||
-      inner.conditionLHS.dependsOn(band.outer.induction) ||
-      inner.conditionRHS.dependsOn(band.outer.induction))
-    return std::nullopt;
-
+static std::optional<BandRewritePlan>
+matchBandRewrite(cir::ThreeLevelLoopBand &band) {
   cir::ForOp anchorLoop = band.anchor.loop;
   if (!areBandDomainSymbolsInvariant(band.outer.initial, anchorLoop) ||
       !areBandDomainSymbolsInvariant(band.outer.conditionLHS, anchorLoop) ||
-      !areBandDomainSymbolsInvariant(band.outer.conditionRHS, anchorLoop) ||
-      !areBandDomainSymbolsInvariant(inner.initial, anchorLoop) ||
-      !areBandDomainSymbolsInvariant(inner.conditionLHS, anchorLoop) ||
-      !areBandDomainSymbolsInvariant(inner.conditionRHS, anchorLoop))
+      !areBandDomainSymbolsInvariant(band.outer.conditionRHS, anchorLoop))
     return std::nullopt;
 
   auto outerSetup =
       dyn_cast_or_null<cir::ScopeOp>(band.outer.loop->getParentOp());
-  auto innerSetup = dyn_cast_or_null<cir::ScopeOp>(inner.loop->getParentOp());
-  if (!outerSetup || !innerSetup || outerSetup == innerSetup ||
-      !band.outer.loop.getBody().hasOneBlock() ||
-      !inner.loop.getBody().hasOneBlock())
+  if (!outerSetup || !band.outer.loop.getBody().hasOneBlock())
     return std::nullopt;
 
   Block &outerBody = band.outer.loop.getBody().front();
@@ -948,42 +933,76 @@ matchSinglePhaseBandRewrite(cir::ThreeLevelLoopBand &band) {
     return std::nullopt;
 
   SmallVector<Operation *, 8> outerSetupOperations;
-  SmallVector<Operation *, 8> innerSetupOperations;
-  if (!matchLoopSetup(band.outer, outerSetup, outerSetupOperations) ||
-      !matchLoopSetup(inner, innerSetup, innerSetupOperations))
+  if (!matchLoopSetup(band.outer, outerSetup, outerSetupOperations))
     return std::nullopt;
 
   Block &iterationBlock = iteration.getScopeRegion().front();
-  if (innerSetup->getBlock() != &iterationBlock ||
-      !isa<cir::YieldOp>(iterationBlock.back()))
+  if (!isa<cir::YieldOp>(iterationBlock.back()))
     return std::nullopt;
 
-  SmallVector<Operation *, 8> before;
-  SmallVector<Operation *, 8> after;
-  bool foundInner = false;
+  SmallVector<cir::ScopeOp, 2> innerSetups;
+  SmallVector<SmallVector<Operation *, 8>, 2> innerSetupOperations;
+  for (cir::LoopDomain &inner : band.innerCandidates) {
+    if (inner.initial.dependsOn(band.outer.induction) ||
+        inner.conditionLHS.dependsOn(band.outer.induction) ||
+        inner.conditionRHS.dependsOn(band.outer.induction) ||
+        !areBandDomainSymbolsInvariant(inner.initial, anchorLoop) ||
+        !areBandDomainSymbolsInvariant(inner.conditionLHS, anchorLoop) ||
+        !areBandDomainSymbolsInvariant(inner.conditionRHS, anchorLoop) ||
+        !inner.loop.getBody().hasOneBlock())
+      return std::nullopt;
+
+    auto innerSetup = dyn_cast_or_null<cir::ScopeOp>(inner.loop->getParentOp());
+    if (!innerSetup || innerSetup == outerSetup ||
+        innerSetup->getBlock() != &iterationBlock)
+      return std::nullopt;
+
+    SmallVector<Operation *, 8> setupOperations;
+    if (!matchLoopSetup(inner, innerSetup, setupOperations))
+      return std::nullopt;
+    innerSetups.push_back(innerSetup);
+    innerSetupOperations.push_back(std::move(setupOperations));
+  }
+
+  SmallVector<BandRewritePhase, 4> phases;
+  SmallVector<Operation *, 8> statements;
+  auto flushStatements = [&] {
+    if (statements.empty())
+      return;
+    BandRewritePhase phase;
+    phase.operations = std::move(statements);
+    phases.push_back(std::move(phase));
+    statements.clear();
+  };
+
+  unsigned innerIndex = 0;
   for (Operation &operation : iterationBlock.without_terminator()) {
-    if (&operation == innerSetup.getOperation()) {
-      foundInner = true;
+    if (innerIndex == innerSetups.size() ||
+        &operation != innerSetups[innerIndex].getOperation()) {
+      statements.push_back(&operation);
       continue;
     }
-    (foundInner ? after : before).push_back(&operation);
+
+    flushStatements();
+    BandRewritePhase phase;
+    phase.innerSetup = innerSetups[innerIndex];
+    phase.innerLoop = band.innerCandidates[innerIndex].loop;
+    phase.operations.push_back(&operation);
+    phase.innerSetupOperations = std::move(innerSetupOperations[innerIndex]);
+    phases.push_back(std::move(phase));
+    ++innerIndex;
   }
-  if (!foundInner ||
-      !hasPhaseLocalSSAUses(iterationBlock, innerSetup, before, after))
+  flushStatements();
+
+  if (innerIndex != band.innerCandidates.size() ||
+      !hasPhaseLocalSSAUses(iterationBlock, phases))
     return std::nullopt;
 
-  return SinglePhaseBandRewritePlan{outerSetup,
-                                    band.outer.loop,
-                                    innerSetup,
-                                    inner.loop,
-                                    std::move(outerSetupOperations),
-                                    std::move(innerSetupOperations),
-                                    std::move(before),
-                                    std::move(after)};
+  return BandRewritePlan{outerSetup, band.outer.loop,
+                         std::move(outerSetupOperations), std::move(phases)};
 }
 
-static void cloneBandSetup(SinglePhaseBandRewritePlan &plan,
-                           IRMapping &mapping) {
+static void cloneBandSetup(BandRewritePlan &plan, IRMapping &mapping) {
   Operation *clone = plan.outerSetup->clone(mapping);
   plan.outerSetup->getBlock()->getOperations().insert(
       plan.outerSetup->getIterator(), clone);
@@ -995,21 +1014,31 @@ static void eraseMappedOperations(ArrayRef<Operation *> operations,
     mapping.lookup(operation)->erase();
 }
 
-static void interchangeClonedBand(SinglePhaseBandRewritePlan &plan,
+static void eraseOtherPhases(BandRewritePlan &plan, BandRewritePhase &kept,
+                             const IRMapping &mapping) {
+  for (BandRewritePhase &phase : llvm::reverse(plan.phases)) {
+    if (&phase == &kept)
+      continue;
+    eraseMappedOperations(phase.operations, mapping);
+  }
+}
+
+static void interchangeClonedBand(BandRewritePlan &plan,
+                                  BandRewritePhase &phase,
                                   const IRMapping &mapping) {
   auto outerLoop =
       cast<cir::ForOp>(mapping.lookup(plan.outerLoop.getOperation()));
   auto innerSetup =
-      cast<cir::ScopeOp>(mapping.lookup(plan.innerSetup.getOperation()));
+      cast<cir::ScopeOp>(mapping.lookup(phase.innerSetup.getOperation()));
   auto innerLoop =
-      cast<cir::ForOp>(mapping.lookup(plan.innerLoop.getOperation()));
+      cast<cir::ForOp>(mapping.lookup(phase.innerLoop.getOperation()));
 
   Block &innerBody = innerLoop.getBody().front();
   for (Operation &operation :
        llvm::make_early_inc_range(innerBody.without_terminator()))
     operation.moveBefore(innerSetup);
 
-  for (Operation *operation : plan.innerSetupOperations)
+  for (Operation *operation : phase.innerSetupOperations)
     mapping.lookup(operation)->moveBefore(outerLoop);
   innerLoop->moveBefore(outerLoop);
   innerSetup->erase();
@@ -1019,27 +1048,14 @@ static void interchangeClonedBand(SinglePhaseBandRewritePlan &plan,
   outerLoop->moveBefore(innerBody.getTerminator());
 }
 
-static void applySinglePhaseBandRewrite(SinglePhaseBandRewritePlan &plan) {
-  if (!plan.before.empty()) {
+static void applyBandRewrite(BandRewritePlan &plan) {
+  for (BandRewritePhase &phase : plan.phases) {
     IRMapping mapping;
     cloneBandSetup(plan, mapping);
-    eraseMappedOperations(plan.after, mapping);
-    mapping.lookup(plan.innerSetup.getOperation())->erase();
+    eraseOtherPhases(plan, phase, mapping);
+    if (phase.isNested())
+      interchangeClonedBand(plan, phase, mapping);
   }
-
-  IRMapping computeMapping;
-  cloneBandSetup(plan, computeMapping);
-  eraseMappedOperations(plan.after, computeMapping);
-  eraseMappedOperations(plan.before, computeMapping);
-  interchangeClonedBand(plan, computeMapping);
-
-  if (!plan.after.empty()) {
-    IRMapping mapping;
-    cloneBandSetup(plan, mapping);
-    mapping.lookup(plan.innerSetup.getOperation())->erase();
-    eraseMappedOperations(plan.before, mapping);
-  }
-
   plan.outerSetup->erase();
 }
 
@@ -1091,16 +1107,24 @@ struct CIRLoopInterchangePass
           loop.emitRemark(os.str());
         }
 
-        if (bandMemory.isSafe() && localities.size() == 1 &&
-            localities.front().isProfitable()) {
-          std::optional<SinglePhaseBandRewritePlan> plan =
-              matchSinglePhaseBandRewrite(*band);
+        bool allProfitable =
+            !localities.empty() &&
+            llvm::all_of(localities, [](const InterchangeLocality &locality) {
+              return locality.isProfitable();
+            });
+        if (bandMemory.isSafe() && allProfitable) {
+          std::optional<BandRewritePlan> plan = matchBandRewrite(*band);
           if (plan) {
-            applySinglePhaseBandRewrite(*plan);
+            unsigned nestedPhases = band->innerCandidates.size();
+            applyBandRewrite(*plan);
             changed = true;
-            if (emitAnalysisRemarks)
-              loop.emitRemark(
-                  "distributed and interchanged single phase loop band");
+            if (emitAnalysisRemarks) {
+              std::string message;
+              llvm::raw_string_ostream os(message);
+              os << "distributed and interchanged " << nestedPhases
+                 << " nested loop " << (nestedPhases == 1 ? "phase" : "phases");
+              loop.emitRemark(os.str());
+            }
             continue;
           }
         }
