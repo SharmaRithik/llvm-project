@@ -293,6 +293,28 @@ void unknown_call(void) {
       opaque();
 }
 
+// CHECK-DAG: recognized anchored loop band in @band_outer_dependent_domain {{.*}} band memory safe candidate 0 locality improved 3 regressed 0 profitable
+void band_outer_dependent_domain(void) {
+  for (int i = 0; i < N; ++i)
+    for (int j = 0; j < N; ++j) {
+      B[i][j] = 0.0;
+      for (int k = j; k < N; ++k)
+        B[i][j] += A[k][j];
+    }
+}
+
+// CHECK-DAG: recognized anchored loop band in @band_mixed_locality_phases {{.*}} band memory safe candidate 0 locality improved 3 regressed 0 profitable candidate 1 locality improved 0 regressed 2 not profitable
+void band_mixed_locality_phases(void) {
+  for (int i = 0; i < N; ++i)
+    for (int j = 0; j < N; ++j) {
+      B[i][j] = 0.0;
+      for (int k = 0; k < N; ++k)
+        B[i][j] += A[k][j];
+      for (int k = 0; k < N; ++k)
+        C[j][k] = A[j][k];
+    }
+}
+
 // CHECK-DAG: recognized loop nest in @already_contiguous {{.*}} memory safe profitability not profitable
 void already_contiguous(void) {
   for (int i = 1; i < N; ++i)
@@ -534,6 +556,14 @@ void rejected_volatile(void) {
 // INTERCHANGE-NEXT: [[PHASE2J:%[0-9]+]] = cir.alloca "j"
 // INTERCHANGE: cir.store{{.*}}, [[PHASE2J]]
 // INTERCHANGE-NEXT: cir.for : cond {
+
+// INTERCHANGE-LABEL: cir.func dso_local @band_outer_dependent_domain()
+// INTERCHANGE: [[DEPENDENTJ:%[0-9]+]] = cir.alloca "j"
+// INTERCHANGE-NOT: cir.alloca "j"
+
+// INTERCHANGE-LABEL: cir.func dso_local @band_mixed_locality_phases()
+// INTERCHANGE: [[MIXEDJ:%[0-9]+]] = cir.alloca "j"
+// INTERCHANGE-NOT: cir.alloca "j"
 
 // INTERCHANGE-LABEL: cir.func dso_local @already_contiguous()
 // INTERCHANGE: [[CONTIGI:%[0-9]+]] = cir.alloca "i"
