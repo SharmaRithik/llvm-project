@@ -480,6 +480,27 @@ matchElementRecurrence(cir::StoreOp store) {
   return {};
 }
 
+static FailureOr<LoopElementRecurrence> analyzeOrderedElementRecurrence(
+    cir::StoreOp store, Block &body, ArrayRef<cir::AllocaOp> inductions,
+    cir::AllocaOp recurrenceInduction, ArrayRef<cir::AllocaOp> laneInductions) {
+  auto [load, combiner] = matchElementRecurrence(store);
+  if (!load || load.getIsVolatile() || load.getMemOrder() ||
+      load->getBlock() != &body || combiner->getBlock() != &body ||
+      !load.getResult().hasOneUse() || !combiner->getResult(0).hasOneUse())
+    return failure();
+
+  FailureOr<LoopMemoryAccess> target =
+      analyzeMemoryAccess(store, store.getAddr(), true, inductions);
+  if (failed(target) || !isInjectiveOverInductions(*target, laneInductions))
+    return failure();
+
+  SmallVector<cir::AllocaOp, 2> lanes(laneInductions.begin(),
+                                      laneInductions.end());
+  return LoopElementRecurrence{std::move(*target), recurrenceInduction,
+                               std::move(lanes),   load,
+                               combiner,           store};
+}
+
 SmallVector<LoopElementRecurrence, 2>
 analyzeLoopElementRecurrences(const ThreeLevelLoopBand &band,
                               const LoopDomain &inner) {
@@ -501,18 +522,12 @@ analyzeLoopElementRecurrences(const ThreeLevelLoopBand &band,
     auto store = dyn_cast<cir::StoreOp>(operation);
     if (!store)
       continue;
-    auto [load, combiner] = matchElementRecurrence(store);
-    if (!load || load.getIsVolatile() || load.getMemOrder() ||
-        load->getBlock() != &body || combiner->getBlock() != &body ||
-        !load.getResult().hasOneUse() || !combiner->getResult(0).hasOneUse())
+    FailureOr<LoopElementRecurrence> recurrence =
+        analyzeOrderedElementRecurrence(store, body, inductions,
+                                        inner.induction, targetInductions);
+    if (failed(recurrence))
       continue;
-
-    FailureOr<LoopMemoryAccess> target =
-        analyzeMemoryAccess(store, store.getAddr(), true, inductions);
-    if (failed(target) || !isInjectiveOverInductions(*target, targetInductions))
-      continue;
-    recurrences.push_back(
-        LoopElementRecurrence{std::move(*target), load, combiner, store});
+    recurrences.push_back(std::move(*recurrence));
   }
   return recurrences;
 }

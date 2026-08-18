@@ -117,9 +117,11 @@ struct LoopMemoryAccess {
   bool isWrite;
 };
 
-/// Floating point array element update
+/// Ordered floating point array element update
 struct LoopElementRecurrence {
   LoopMemoryAccess target;
+  cir::AllocaOp recurrenceInduction;
+  llvm::SmallVector<cir::AllocaOp, 2> laneInductions;
   cir::LoadOp load;
   mlir::Operation *combiner;
   cir::StoreOp store;
