@@ -848,12 +848,9 @@ static void collectSetupExpressionOperations(
     collectSetupExpressionOperations(*expression.getRHS(), block, operations);
 }
 
-static bool matchLoopSetup(cir::LoopDomain &domain, cir::ScopeOp scope,
-                           SmallVectorImpl<Operation *> &setupOperations) {
-  if (scope.getNumResults() != 0 || !scope.getScopeRegion().hasOneBlock())
-    return false;
-
-  Block &block = scope.getScopeRegion().front();
+static bool
+matchLoopSetupInBlock(cir::LoopDomain &domain, Block &block,
+                      SmallVectorImpl<Operation *> &setupOperations) {
   Operation *terminator = block.getTerminator();
   if (domain.loop->getBlock() != &block ||
       domain.loop->getNextNode() != terminator ||
@@ -874,6 +871,15 @@ static bool matchLoopSetup(cir::LoopDomain &domain, cir::ScopeOp scope,
     setupOperations.push_back(&operation);
   }
   return expected.empty();
+}
+
+static bool matchLoopSetup(cir::LoopDomain &domain, cir::ScopeOp scope,
+                           SmallVectorImpl<Operation *> &setupOperations) {
+  if (scope.getNumResults() != 0 || !scope.getScopeRegion().hasOneBlock())
+    return false;
+
+  return matchLoopSetupInBlock(domain, scope.getScopeRegion().front(),
+                               setupOperations);
 }
 
 static Operation *getIterationRoot(Operation *operation, Block &iteration) {
@@ -942,6 +948,7 @@ matchBandRewrite(cir::ThreeLevelLoopBand &band) {
 
   SmallVector<cir::ScopeOp, 2> innerSetups;
   SmallVector<SmallVector<Operation *, 8>, 2> innerSetupOperations;
+  bool hasInlineInnerSetup = false;
   for (cir::LoopDomain &inner : band.innerCandidates) {
     if (inner.initial.dependsOn(band.outer.induction) ||
         inner.conditionLHS.dependsOn(band.outer.induction) ||
@@ -953,13 +960,20 @@ matchBandRewrite(cir::ThreeLevelLoopBand &band) {
       return std::nullopt;
 
     auto innerSetup = dyn_cast_or_null<cir::ScopeOp>(inner.loop->getParentOp());
-    if (!innerSetup || innerSetup == outerSetup ||
-        innerSetup->getBlock() != &iterationBlock)
-      return std::nullopt;
-
     SmallVector<Operation *, 8> setupOperations;
-    if (!matchLoopSetup(inner, innerSetup, setupOperations))
-      return std::nullopt;
+    if (innerSetup == iteration) {
+      if (band.innerCandidates.size() != 1 ||
+          !matchLoopSetupInBlock(inner, iterationBlock, setupOperations))
+        return std::nullopt;
+      hasInlineInnerSetup = true;
+      innerSetup = {};
+    } else {
+      if (!innerSetup || innerSetup == outerSetup ||
+          innerSetup->getBlock() != &iterationBlock)
+        return std::nullopt;
+      if (!matchLoopSetup(inner, innerSetup, setupOperations))
+        return std::nullopt;
+    }
     innerSetups.push_back(innerSetup);
     innerSetupOperations.push_back(std::move(setupOperations));
   }
@@ -976,23 +990,33 @@ matchBandRewrite(cir::ThreeLevelLoopBand &band) {
   };
 
   unsigned innerIndex = 0;
-  for (Operation &operation : iterationBlock.without_terminator()) {
-    if (innerIndex == innerSetups.size() ||
-        &operation != innerSetups[innerIndex].getOperation()) {
-      statements.push_back(&operation);
-      continue;
-    }
-
-    flushStatements();
+  if (hasInlineInnerSetup) {
     BandRewritePhase phase;
-    phase.innerSetup = innerSetups[innerIndex];
-    phase.innerLoop = band.innerCandidates[innerIndex].loop;
-    phase.operations.push_back(&operation);
-    phase.innerSetupOperations = std::move(innerSetupOperations[innerIndex]);
+    phase.innerLoop = band.innerCandidates.front().loop;
+    phase.operations.append(innerSetupOperations.front());
+    phase.operations.push_back(phase.innerLoop.getOperation());
+    phase.innerSetupOperations = std::move(innerSetupOperations.front());
     phases.push_back(std::move(phase));
-    ++innerIndex;
+    innerIndex = 1;
+  } else {
+    for (Operation &operation : iterationBlock.without_terminator()) {
+      if (innerIndex == innerSetups.size() ||
+          &operation != innerSetups[innerIndex].getOperation()) {
+        statements.push_back(&operation);
+        continue;
+      }
+
+      flushStatements();
+      BandRewritePhase phase;
+      phase.innerSetup = innerSetups[innerIndex];
+      phase.innerLoop = band.innerCandidates[innerIndex].loop;
+      phase.operations.push_back(&operation);
+      phase.innerSetupOperations = std::move(innerSetupOperations[innerIndex]);
+      phases.push_back(std::move(phase));
+      ++innerIndex;
+    }
+    flushStatements();
   }
-  flushStatements();
 
   if (innerIndex != band.innerCandidates.size() ||
       !hasPhaseLocalSSAUses(iterationBlock, phases))
@@ -1028,20 +1052,28 @@ static void interchangeClonedBand(BandRewritePlan &plan,
                                   const IRMapping &mapping) {
   auto outerLoop =
       cast<cir::ForOp>(mapping.lookup(plan.outerLoop.getOperation()));
-  auto innerSetup =
-      cast<cir::ScopeOp>(mapping.lookup(phase.innerSetup.getOperation()));
   auto innerLoop =
       cast<cir::ForOp>(mapping.lookup(phase.innerLoop.getOperation()));
+  cir::ScopeOp innerSetup;
+  Operation *innerSetupAnchor;
+  if (phase.innerSetup) {
+    innerSetup =
+        cast<cir::ScopeOp>(mapping.lookup(phase.innerSetup.getOperation()));
+    innerSetupAnchor = innerSetup;
+  } else {
+    innerSetupAnchor = mapping.lookup(phase.innerSetupOperations.front());
+  }
 
   Block &innerBody = innerLoop.getBody().front();
   for (Operation &operation :
        llvm::make_early_inc_range(innerBody.without_terminator()))
-    operation.moveBefore(innerSetup);
+    operation.moveBefore(innerSetupAnchor);
 
   for (Operation *operation : phase.innerSetupOperations)
     mapping.lookup(operation)->moveBefore(outerLoop);
   innerLoop->moveBefore(outerLoop);
-  innerSetup->erase();
+  if (innerSetup)
+    innerSetup->erase();
 
   for (Operation *operation : plan.outerSetupOperations)
     mapping.lookup(operation)->moveBefore(innerBody.getTerminator());

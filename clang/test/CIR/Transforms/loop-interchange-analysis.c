@@ -218,6 +218,18 @@ void anchored_fadd_recurrence(void) {
         B[i][j] += A[k][j];
 }
 
+// CHECK-DAG: recognized anchored loop band in @outer_carried_recurrence {{.*}} floating recurrences 1 band memory safe candidate 0 locality improved 4 regressed 2 profitable
+void outer_carried_recurrence(void) {
+  for (int i = 0; i < N; ++i) {
+    for (int j = 0; j < N; ++j)
+      C[i][j] *= 2.0;
+    for (int k = 0; k < N; ++k)
+      for (int j = 0; j < N; ++j) {
+        C[i][j] += A[i][k] * B[j][k] + B[i][k] * A[j][k];
+      }
+  }
+}
+
 // CHECK-DAG: recognized anchored loop band in @inner_varying_update {{.*}} floating recurrences 0 band memory safe
 void inner_varying_update(void) {
   for (int i = 0; i < N; ++i)
@@ -556,6 +568,17 @@ void rejected_volatile(void) {
 // INTERCHANGE-NEXT: [[PHASE2J:%[0-9]+]] = cir.alloca "j"
 // INTERCHANGE: cir.store{{.*}}, [[PHASE2J]]
 // INTERCHANGE-NEXT: cir.for : cond {
+
+// INTERCHANGE-LABEL: cir.func dso_local @outer_carried_recurrence()
+// INTERCHANGE: [[OUTERCARRIEDI:%[0-9]+]] = cir.alloca "i"
+// INTERCHANGE: cir.for : cond {
+// INTERCHANGE: [[SCALEJ:%[0-9]+]] = cir.alloca "j"
+// INTERCHANGE: cir.for : cond {
+// INTERCHANGE: [[UPDATEJ:%[0-9]+]] = cir.alloca "j"
+// INTERCHANGE: cir.for : cond {
+// INTERCHANGE: } body {
+// INTERCHANGE: [[UPDATEK:%[0-9]+]] = cir.alloca "k"
+// INTERCHANGE: cir.for : cond {
 
 // INTERCHANGE-LABEL: cir.func dso_local @band_outer_dependent_domain()
 // INTERCHANGE: [[DEPENDENTJ:%[0-9]+]] = cir.alloca "j"

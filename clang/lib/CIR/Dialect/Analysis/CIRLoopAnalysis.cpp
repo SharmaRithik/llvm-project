@@ -481,11 +481,12 @@ matchElementRecurrence(cir::StoreOp store) {
 }
 
 static FailureOr<LoopElementRecurrence> analyzeOrderedElementRecurrence(
-    cir::StoreOp store, Block &body, ArrayRef<cir::AllocaOp> inductions,
+    cir::StoreOp store, ArrayRef<cir::AllocaOp> inductions,
     cir::AllocaOp recurrenceInduction, ArrayRef<cir::AllocaOp> laneInductions) {
+  Block *body = store->getBlock();
   auto [load, combiner] = matchElementRecurrence(store);
   if (!load || load.getIsVolatile() || load.getMemOrder() ||
-      load->getBlock() != &body || combiner->getBlock() != &body ||
+      load->getBlock() != body || combiner->getBlock() != body ||
       !load.getResult().hasOneUse() || !combiner->getResult(0).hasOneUse())
     return failure();
 
@@ -512,23 +513,24 @@ analyzeLoopElementRecurrences(const ThreeLevelLoopBand &band,
       }))
     return recurrences;
 
-  Block &body = innerLoop.getBody().front();
   SmallVector<cir::AllocaOp, 3> inductions = {
       band.anchor.induction, band.outer.induction, inner.induction};
-  SmallVector<cir::AllocaOp, 2> targetInductions = {band.anchor.induction,
-                                                    band.outer.induction};
+  SmallVector<cir::AllocaOp, 2> innerRecurrenceLanes = {band.anchor.induction,
+                                                        band.outer.induction};
+  SmallVector<cir::AllocaOp, 2> outerRecurrenceLanes = {band.anchor.induction,
+                                                        inner.induction};
 
-  for (Operation &operation : body.without_terminator()) {
-    auto store = dyn_cast<cir::StoreOp>(operation);
-    if (!store)
-      continue;
+  innerLoop.getBody().walk([&](cir::StoreOp store) {
     FailureOr<LoopElementRecurrence> recurrence =
-        analyzeOrderedElementRecurrence(store, body, inductions,
-                                        inner.induction, targetInductions);
+        analyzeOrderedElementRecurrence(store, inductions, inner.induction,
+                                        innerRecurrenceLanes);
     if (failed(recurrence))
-      continue;
+      recurrence = analyzeOrderedElementRecurrence(
+          store, inductions, band.outer.induction, outerRecurrenceLanes);
+    if (failed(recurrence))
+      return;
     recurrences.push_back(std::move(*recurrence));
-  }
+  });
   return recurrences;
 }
 
