@@ -140,6 +140,22 @@ long subtract_reduction(long lo) {
   return sum;
 }
 
+// CHECK-DAG: recognized loop nest in @invariant_scalar_input {{.*}} memory safe profitability profitable
+void invariant_scalar_input(double scale) {
+  for (int i = 1; i < N; ++i)
+    for (int j = 0; j < i; ++j)
+      B[j][i] = scale * A[j][i];
+}
+
+// CHECK-DAG: recognized loop nest in @mutated_scalar_input {{.*}} memory unsupported address
+void mutated_scalar_input(double scale) {
+  for (int i = 1; i < N; ++i) {
+    scale += 1.0;
+    for (int j = 0; j < i; ++j)
+      B[j][i] = scale * A[j][i];
+  }
+}
+
 // CHECK-DAG: recognized loop nest in @shifted_dependence {{.*}} memory potential dependence
 void shifted_dependence(void) {
   for (int i = 1; i < N; ++i)
@@ -510,6 +526,16 @@ void rejected_volatile(void) {
 // INTERCHANGE: [[SUBI:%[0-9]+]] = cir.alloca "i"
 // INTERCHANGE-NEXT: [[SUBZERO:%[0-9]+]] = cir.const #cir.int<0>
 // INTERCHANGE-NEXT: cir.store{{.*}} [[SUBZERO]], [[SUBI]]
+
+// INTERCHANGE-LABEL: cir.func dso_local @invariant_scalar_input(
+// INTERCHANGE: [[SCALARI:%[0-9]+]] = cir.alloca "i"
+// INTERCHANGE-NEXT: [[SCALARJ:%[0-9]+]] = cir.alloca "j"
+// INTERCHANGE-NEXT: [[SCALARZERO:%[0-9]+]] = cir.const #cir.int<0>
+// INTERCHANGE-NEXT: cir.store{{.*}} [[SCALARZERO]], [[SCALARJ]]
+// INTERCHANGE-NEXT: cir.for : cond {
+// INTERCHANGE: } body {
+// INTERCHANGE: cir.store{{.*}}, [[SCALARI]]
+// INTERCHANGE-NEXT: cir.for : cond {
 
 // INTERCHANGE-LABEL: cir.func dso_local @shifted_dependence()
 // INTERCHANGE: [[SHIFTI:%[0-9]+]] = cir.alloca "i"

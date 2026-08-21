@@ -856,6 +856,8 @@ LoopMemoryAnalysis analyzeLoopMemory(const TwoLevelLoopNest &nest) {
         return WalkResult::advance();
       if (succeeded(resolveNoAliasArgument(load.getResult())))
         return WalkResult::advance();
+      if (isInvariantLoad(load, nest.outer.loop))
+        return WalkResult::advance();
       if (auto variable = load.getAddr().getDefiningOp<cir::AllocaOp>()) {
         privateLoads.push_back(load);
         if (!llvm::is_contained(privateVariables, variable))
