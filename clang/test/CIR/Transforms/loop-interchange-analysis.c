@@ -20,6 +20,8 @@ static double A[N][N];
 static double B[N][N];
 static double C[N][N];
 static double D[N][N];
+static double X[N];
+static double Y[N];
 static long L[N][N];
 
 // CHECK-DAG: recognized loop nest in @tri_upper outer init constant condition induction lt constant inner init constant condition induction lt induction memory safe
@@ -154,6 +156,35 @@ void mutated_scalar_input(double scale) {
     for (int j = 0; j < i; ++j)
       B[j][i] = scale * A[j][i];
   }
+}
+
+// CHECK-DAG: recognized loop nest in @two_level_element_recurrence {{.*}} memory safe profitability profitable floating recurrences 1
+void two_level_element_recurrence(void) {
+  for (int i = 0; i < N; ++i)
+    for (int j = 0; j < N; ++j)
+      X[i] = X[i] + A[j][i] * Y[j];
+}
+
+// CHECK-DAG: recognized loop nest in @scaled_element_recurrence {{.*}} memory safe profitability profitable floating recurrences 1
+void scaled_element_recurrence(double scale) {
+  for (int i = 0; i < N; ++i)
+    for (int j = 0; j < N; ++j)
+      X[i] += scale * A[j][i] * Y[j];
+}
+
+// CHECK-DAG: recognized loop nest in @reused_recurrence_inductions {{.*}} memory safe profitability profitable floating recurrences 1
+void reused_recurrence_inductions(void) {
+  int i, j;
+  for (i = 0; i < N; ++i)
+    for (j = 0; j < N; ++j)
+      X[i] += A[j][i] * Y[j];
+}
+
+// CHECK-DAG: recognized loop nest in @outer_carried_two_level_update {{.*}} memory potential dependence
+void outer_carried_two_level_update(void) {
+  for (int i = 0; i < N; ++i)
+    for (int j = 0; j < N; ++j)
+      X[j] += A[j][i];
 }
 
 // CHECK-DAG: recognized loop nest in @shifted_dependence {{.*}} memory potential dependence
@@ -535,6 +566,45 @@ void rejected_volatile(void) {
 // INTERCHANGE-NEXT: cir.for : cond {
 // INTERCHANGE: } body {
 // INTERCHANGE: cir.store{{.*}}, [[SCALARI]]
+// INTERCHANGE-NEXT: cir.for : cond {
+
+// INTERCHANGE-LABEL: cir.func dso_local @two_level_element_recurrence()
+// INTERCHANGE: [[RECURRENCEI:%[0-9]+]] = cir.alloca "i"
+// INTERCHANGE-NEXT: [[RECURRENCEIZERO:%[0-9]+]] = cir.const #cir.int<0>
+// INTERCHANGE-NEXT: [[RECURRENCEJ:%[0-9]+]] = cir.alloca "j"
+// INTERCHANGE-NEXT: [[RECURRENCEJZERO:%[0-9]+]] = cir.const #cir.int<0>
+// INTERCHANGE-NEXT: cir.store{{.*}} [[RECURRENCEJZERO]], [[RECURRENCEJ]]
+// INTERCHANGE-NEXT: cir.for : cond {
+// INTERCHANGE: } body {
+// INTERCHANGE: cir.store{{.*}} [[RECURRENCEIZERO]], [[RECURRENCEI]]
+// INTERCHANGE-NEXT: cir.for : cond {
+
+// INTERCHANGE-LABEL: cir.func dso_local @scaled_element_recurrence(
+// INTERCHANGE: [[SCALEDI:%[0-9]+]] = cir.alloca "i"
+// INTERCHANGE-NEXT: [[SCALEDIZERO:%[0-9]+]] = cir.const #cir.int<0>
+// INTERCHANGE-NEXT: [[SCALEDJ:%[0-9]+]] = cir.alloca "j"
+// INTERCHANGE-NEXT: [[SCALEDJZERO:%[0-9]+]] = cir.const #cir.int<0>
+// INTERCHANGE-NEXT: cir.store{{.*}} [[SCALEDJZERO]], [[SCALEDJ]]
+// INTERCHANGE-NEXT: cir.for : cond {
+// INTERCHANGE: } body {
+// INTERCHANGE: cir.store{{.*}} [[SCALEDIZERO]], [[SCALEDI]]
+// INTERCHANGE-NEXT: cir.for : cond {
+
+// INTERCHANGE-LABEL: cir.func dso_local @reused_recurrence_inductions()
+// INTERCHANGE: [[REUSEDRECI:%[0-9]+]] = cir.alloca "i"
+// INTERCHANGE-NEXT: [[REUSEDRECJ:%[0-9]+]] = cir.alloca "j"
+// INTERCHANGE: [[REUSEDRECIZERO:%[0-9]+]] = cir.const #cir.int<0>
+// INTERCHANGE-NEXT: [[REUSEDRECJZERO:%[0-9]+]] = cir.const #cir.int<0>
+// INTERCHANGE-NEXT: cir.store{{.*}} [[REUSEDRECJZERO]], [[REUSEDRECJ]]
+// INTERCHANGE-NEXT: cir.for : cond {
+// INTERCHANGE: } body {
+// INTERCHANGE: cir.store{{.*}} [[REUSEDRECIZERO]], [[REUSEDRECI]]
+// INTERCHANGE-NEXT: cir.for : cond {
+
+// INTERCHANGE-LABEL: cir.func dso_local @outer_carried_two_level_update()
+// INTERCHANGE: [[OUTERUPDATEI:%[0-9]+]] = cir.alloca "i"
+// INTERCHANGE-NEXT: [[OUTERUPDATEZERO:%[0-9]+]] = cir.const #cir.int<0>
+// INTERCHANGE-NEXT: cir.store{{.*}} [[OUTERUPDATEZERO]], [[OUTERUPDATEI]]
 // INTERCHANGE-NEXT: cir.for : cond {
 
 // INTERCHANGE-LABEL: cir.func dso_local @shifted_dependence()

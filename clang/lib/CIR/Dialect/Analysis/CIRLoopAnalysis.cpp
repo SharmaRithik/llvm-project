@@ -444,50 +444,47 @@ static bool isInjectiveOverNest(const LoopMemoryAccess &access,
   return isInjectiveOverInductions(access, inductions);
 }
 
-static std::pair<cir::LoadOp, Operation *>
-matchElementRecurrence(cir::StoreOp store) {
+struct ElementRecurrenceMatch {
+  SmallVector<cir::LoadOp, 2> loads;
+  Operation *combiner = nullptr;
+};
+
+static ElementRecurrenceMatch matchElementRecurrence(cir::StoreOp store) {
+  ElementRecurrenceMatch match;
   if (store.getIsVolatile() || store.getMemOrder() ||
       !isa<cir::FPTypeInterface>(store.getValue().getType()))
-    return {};
+    return match;
 
   if (auto addition = store.getValue().getDefiningOp<cir::FAddOp>()) {
     if (addition.getFenv())
-      return {};
-    cir::LoadOp load;
-    auto lhs = addition.getLhs().getDefiningOp<cir::LoadOp>();
-    auto rhs = addition.getRhs().getDefiningOp<cir::LoadOp>();
-    if (lhs && lhs.getAddr() == store.getAddr())
-      load = lhs;
-    if (rhs && rhs.getAddr() == store.getAddr()) {
-      if (load)
-        return {};
-      load = rhs;
-    }
-    if (!load)
-      return {};
-    return {load, addition.getOperation()};
+      return match;
+    if (auto lhs = addition.getLhs().getDefiningOp<cir::LoadOp>())
+      match.loads.push_back(lhs);
+    if (auto rhs = addition.getRhs().getDefiningOp<cir::LoadOp>())
+      match.loads.push_back(rhs);
+    match.combiner = addition;
+    return match;
   }
 
   if (auto multiplyAdd = store.getValue().getDefiningOp<cir::FMulAddOp>()) {
     if (multiplyAdd.getFenv())
-      return {};
-    auto load = multiplyAdd.getC().getDefiningOp<cir::LoadOp>();
-    if (!load || load.getAddr() != store.getAddr())
-      return {};
-    return {load, multiplyAdd.getOperation()};
+      return match;
+    if (auto load = multiplyAdd.getC().getDefiningOp<cir::LoadOp>())
+      match.loads.push_back(load);
+    match.combiner = multiplyAdd;
+    return match;
   }
 
-  return {};
+  return match;
 }
 
 static FailureOr<LoopElementRecurrence> analyzeOrderedElementRecurrence(
     cir::StoreOp store, ArrayRef<cir::AllocaOp> inductions,
     cir::AllocaOp recurrenceInduction, ArrayRef<cir::AllocaOp> laneInductions) {
   Block *body = store->getBlock();
-  auto [load, combiner] = matchElementRecurrence(store);
-  if (!load || load.getIsVolatile() || load.getMemOrder() ||
-      load->getBlock() != body || combiner->getBlock() != body ||
-      !load.getResult().hasOneUse() || !combiner->getResult(0).hasOneUse())
+  ElementRecurrenceMatch match = matchElementRecurrence(store);
+  if (!match.combiner || match.combiner->getBlock() != body ||
+      !match.combiner->getResult(0).hasOneUse())
     return failure();
 
   FailureOr<LoopMemoryAccess> target =
@@ -495,11 +492,23 @@ static FailureOr<LoopElementRecurrence> analyzeOrderedElementRecurrence(
   if (failed(target) || !isInjectiveOverInductions(*target, laneInductions))
     return failure();
 
-  SmallVector<cir::AllocaOp, 2> lanes(laneInductions.begin(),
-                                      laneInductions.end());
-  return LoopElementRecurrence{std::move(*target), recurrenceInduction,
-                               std::move(lanes),   load,
-                               combiner,           store};
+  for (cir::LoadOp load : match.loads) {
+    if (load.getIsVolatile() || load.getMemOrder() ||
+        load->getBlock() != body || !load.getResult().hasOneUse())
+      continue;
+    FailureOr<LoopMemoryAccess> loaded =
+        analyzeMemoryAccess(load, load.getAddr(), false, inductions);
+    if (failed(loaded) || loaded->base != target->base ||
+        !hasIdenticalSubscripts(*loaded, *target))
+      continue;
+
+    SmallVector<cir::AllocaOp, 2> lanes(laneInductions.begin(),
+                                        laneInductions.end());
+    return LoopElementRecurrence{std::move(*target), recurrenceInduction,
+                                 std::move(lanes),   load,
+                                 match.combiner,     store};
+  }
+  return failure();
 }
 
 SmallVector<LoopElementRecurrence, 2>
@@ -530,6 +539,27 @@ analyzeLoopElementRecurrences(const ThreeLevelLoopBand &band,
     if (failed(recurrence))
       return;
     recurrences.push_back(std::move(*recurrence));
+  });
+  return recurrences;
+}
+
+static SmallVector<LoopElementRecurrence, 2>
+analyzeTwoLevelElementRecurrences(const TwoLevelLoopNest &nest) {
+  SmallVector<LoopElementRecurrence, 2> recurrences;
+  cir::ForOp innerLoop = nest.inner.loop;
+  if (!innerLoop.getBody().hasOneBlock())
+    return recurrences;
+
+  SmallVector<cir::AllocaOp, 2> inductions = {nest.outer.induction,
+                                              nest.inner.induction};
+  SmallVector<cir::AllocaOp, 1> laneInductions = {nest.outer.induction};
+
+  innerLoop.getBody().walk([&](cir::StoreOp store) {
+    FailureOr<LoopElementRecurrence> recurrence =
+        analyzeOrderedElementRecurrence(store, inductions, nest.inner.induction,
+                                        laneInductions);
+    if (succeeded(recurrence))
+      recurrences.push_back(std::move(*recurrence));
   });
   return recurrences;
 }
@@ -833,6 +863,8 @@ static FailureOr<LoopReduction> analyzePrivateAddReduction(
 
 LoopMemoryAnalysis analyzeLoopMemory(const TwoLevelLoopNest &nest) {
   SmallVector<LoopMemoryAccess, 8> accesses;
+  SmallVector<LoopElementRecurrence, 2> recurrences =
+      analyzeTwoLevelElementRecurrences(nest);
   SmallVector<cir::LoadOp, 2> privateLoads;
   SmallVector<cir::StoreOp, 2> privateStores;
   SmallVector<cir::AllocaOp, 2> privateVariables;
@@ -909,22 +941,28 @@ LoopMemoryAnalysis analyzeLoopMemory(const TwoLevelLoopNest &nest) {
   });
 
   if (walkResult.wasInterrupted())
-    return LoopMemoryAnalysis{result, std::move(accesses), {}};
+    return LoopMemoryAnalysis{
+        result, std::move(accesses), {}, std::move(recurrences)};
 
   SmallVector<LoopReduction, 2> reductions;
   for (cir::AllocaOp variable : privateVariables) {
     FailureOr<LoopReduction> reduction =
         analyzePrivateAddReduction(variable, privateLoads, privateStores, nest);
     if (failed(reduction))
-      return LoopMemoryAnalysis{
-          LoopMemoryLegality::UnsupportedAddress, std::move(accesses), {}};
+      return LoopMemoryAnalysis{LoopMemoryLegality::UnsupportedAddress,
+                                std::move(accesses),
+                                {},
+                                std::move(recurrences)};
     reductions.push_back(*reduction);
   }
 
   for (const LoopMemoryAccess &access : accesses) {
-    if (access.isWrite && !isInjectiveOverNest(access, nest))
-      return LoopMemoryAnalysis{
-          LoopMemoryLegality::PotentialDependence, std::move(accesses), {}};
+    if (access.isWrite && !isRecurrenceStore(access.operation, recurrences) &&
+        !isInjectiveOverNest(access, nest))
+      return LoopMemoryAnalysis{LoopMemoryLegality::PotentialDependence,
+                                std::move(accesses),
+                                {},
+                                std::move(recurrences)};
   }
 
   for (auto lhs = accesses.begin(), end = accesses.end(); lhs != end; ++lhs) {
@@ -932,13 +970,15 @@ LoopMemoryAnalysis analyzeLoopMemory(const TwoLevelLoopNest &nest) {
       if ((!lhs->isWrite && !rhs->isWrite) || lhs->base != rhs->base)
         continue;
       if (!hasIdenticalSubscripts(*lhs, *rhs))
-        return LoopMemoryAnalysis{
-            LoopMemoryLegality::PotentialDependence, std::move(accesses), {}};
+        return LoopMemoryAnalysis{LoopMemoryLegality::PotentialDependence,
+                                  std::move(accesses),
+                                  {},
+                                  std::move(recurrences)};
     }
   }
 
   return LoopMemoryAnalysis{LoopMemoryLegality::Safe, std::move(accesses),
-                            std::move(reductions)};
+                            std::move(reductions), std::move(recurrences)};
 }
 
 } // namespace cir

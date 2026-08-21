@@ -139,6 +139,7 @@ struct LoopMemoryAnalysis {
   LoopMemoryLegality result;
   llvm::SmallVector<LoopMemoryAccess, 8> accesses;
   llvm::SmallVector<LoopReduction, 2> reductions;
+  llvm::SmallVector<LoopElementRecurrence, 2> recurrences;
 
   bool isSafe() const { return result == LoopMemoryLegality::Safe; }
 };

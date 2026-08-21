@@ -77,15 +77,16 @@ struct ProductBoundPlan {
   Operation *oldOuterBound;
 };
 
-struct RectangularSymbolPlan {};
+struct RectangularPlan {};
 
 using DomainInterchangePlan =
     std::variant<CanonicalUpperPlan, CanonicalLowerPlan, AffineOffsetPlan,
-                 ScaledUpperPlan, ProductBoundPlan, RectangularSymbolPlan>;
+                 ScaledUpperPlan, ProductBoundPlan, RectangularPlan>;
 
 struct LoopNestRewritePlan {
   Operation *scope;
   Operation *innerInitialOperation;
+  bool moveInnerInduction;
 };
 
 struct LoopInterchangePlan {
@@ -466,29 +467,37 @@ static bool isInvariantSymbol(const cir::LoopDomainExpr &expression,
   return true;
 }
 
-static std::optional<RectangularSymbolPlan>
-matchRectangularSymbolStart(cir::TwoLevelLoopNest &nest) {
+static bool isInvariantRectangularValue(const cir::LoopDomainExpr &expression,
+                                        cir::ForOp outerLoop) {
+  return expression.getKind() == cir::LoopDomainExpr::Kind::Constant ||
+         (expression.getKind() == cir::LoopDomainExpr::Kind::Symbol &&
+          isInvariantSymbol(expression, outerLoop));
+}
+
+static std::optional<RectangularPlan>
+matchRectangularDomain(cir::TwoLevelLoopNest &nest) {
   if (nest.outer.comparison.getKind() != cir::CmpOpKind::lt ||
       nest.inner.comparison.getKind() != cir::CmpOpKind::lt ||
-      !isConstantZero(nest.outer.initial) ||
-      !isInvariantSymbol(nest.inner.initial, nest.outer.loop) ||
+      !isInvariantRectangularValue(nest.outer.initial, nest.outer.loop) ||
+      !isInvariantRectangularValue(nest.inner.initial, nest.outer.loop) ||
+      !isInvariantRectangularValue(nest.outer.conditionRHS, nest.outer.loop) ||
+      !isInvariantRectangularValue(nest.inner.conditionRHS, nest.outer.loop) ||
       nest.outer.conditionLHS.getKind() !=
           cir::LoopDomainExpr::Kind::Induction ||
       nest.outer.conditionLHS.getInduction() != nest.outer.induction ||
       nest.inner.conditionLHS.getKind() !=
           cir::LoopDomainExpr::Kind::Induction ||
-      nest.inner.conditionLHS.getInduction() != nest.inner.induction ||
-      nest.outer.conditionRHS.getKind() !=
-          cir::LoopDomainExpr::Kind::Constant ||
-      !nest.outer.conditionRHS.isStructurallyEqual(nest.inner.conditionRHS))
+      nest.inner.conditionLHS.getInduction() != nest.inner.induction)
     return std::nullopt;
 
   if (nest.outer.stepLoad.getResult().getType() !=
           nest.inner.stepLoad.getResult().getType() ||
+      nest.outer.initial.getSource().getType() !=
+          nest.outer.stepLoad.getResult().getType() ||
       nest.inner.initial.getSource().getType() !=
           nest.inner.stepLoad.getResult().getType())
     return std::nullopt;
-  return RectangularSymbolPlan{};
+  return RectangularPlan{};
 }
 
 static std::optional<DomainInterchangePlan>
@@ -503,7 +512,7 @@ matchLoopInterchangeDomain(cir::TwoLevelLoopNest &nest) {
     return DomainInterchangePlan(std::move(*plan));
   if (auto plan = matchProductBoundTriangle(nest))
     return DomainInterchangePlan(std::move(*plan));
-  if (auto plan = matchRectangularSymbolStart(nest))
+  if (auto plan = matchRectangularDomain(nest))
     return DomainInterchangePlan(std::move(*plan));
   return std::nullopt;
 }
@@ -571,11 +580,15 @@ matchPerfectLoopNest(cir::TwoLevelLoopNest &nest) {
   Block &scopeBody = scope.getScopeRegion().front();
   Operation *innerInitialOperation =
       nest.inner.initial.getSource().getDefiningOp();
-  if (scopeBody.getOperations().size() != (innerInitialOperation ? 5u : 4u))
+  bool moveInnerInduction = nest.inner.induction->getBlock() == &scopeBody;
+  unsigned expectedOperations =
+      3u + (innerInitialOperation ? 1u : 0u) + (moveInnerInduction ? 1u : 0u);
+  if (scopeBody.getOperations().size() != expectedOperations)
     return std::nullopt;
 
   auto operation = scopeBody.begin();
-  if (&*operation++ != nest.inner.induction.getOperation() ||
+  if ((moveInnerInduction &&
+       &*operation++ != nest.inner.induction.getOperation()) ||
       (innerInitialOperation && &*operation++ != innerInitialOperation) ||
       &*operation++ != nest.inner.initialization.getOperation() ||
       &*operation++ != innerLoop.getOperation() ||
@@ -585,7 +598,8 @@ matchPerfectLoopNest(cir::TwoLevelLoopNest &nest) {
   if (nest.inner.induction->getNumOperands() != 0 ||
       nest.outer.initialization->getBlock() != outerLoop->getBlock())
     return std::nullopt;
-  return LoopNestRewritePlan{scope.getOperation(), innerInitialOperation};
+  return LoopNestRewritePlan{scope.getOperation(), innerInitialOperation,
+                             moveInnerInduction};
 }
 
 static std::optional<LoopInterchangePlan>
@@ -609,7 +623,8 @@ static void interchangeLoopStructure(cir::TwoLevelLoopNest &nest,
   Block &outerBody = outerLoop.getBody().front();
   Block &innerBody = innerLoop.getBody().front();
 
-  nest.inner.induction->moveBefore(outerLoop);
+  if (plan.moveInnerInduction)
+    nest.inner.induction->moveBefore(outerLoop);
   if (innerInitialOperation)
     innerInitialOperation->moveBefore(outerLoop);
   nest.inner.initialization->moveBefore(outerLoop);
@@ -794,7 +809,7 @@ static void applyLoopInterchangePlan(cir::TwoLevelLoopNest &nest,
 
 static void applyLoopInterchangePlan(cir::TwoLevelLoopNest &nest,
                                      const LoopNestRewritePlan &structure,
-                                     const RectangularSymbolPlan &) {
+                                     const RectangularPlan &) {
   interchangeLoopStructure(nest, structure);
 }
 
@@ -1191,6 +1206,7 @@ struct CIRLoopInterchangePass
       nest->inner.conditionRHS.print(os);
       os << " memory " << cir::stringifyLoopMemoryLegality(memory.result);
       os << " profitability " << (profitable ? "profitable" : "not profitable");
+      os << " floating recurrences " << memory.recurrences.size();
       if (emitAnalysisRemarks)
         loop.emitRemark(os.str());
 
