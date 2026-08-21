@@ -25,8 +25,11 @@
 #include "llvm/ADT/StringRef.h"
 #include "llvm/ADT/StringSet.h"
 #include "llvm/ADT/Twine.h"
+#include "llvm/Analysis/TargetLibraryInfo.h"
 #include "llvm/Support/ErrorHandling.h"
 #include "llvm/Support/Path.h"
+#include "llvm/TargetParser/Triple.h"
+#include <optional>
 
 using cir::CIRBaseBuilderTy;
 using namespace mlir;
@@ -50,26 +53,139 @@ struct LibOptPass : public impl::LibOptBase<LibOptPass> {
   // Raw libopt option string forwarded by the frontend. This will later control
   // which optimizations the pass enables.
   std::string optimizationOptions;
-
-  /// Tracks current module.
-  ModuleOp theModule;
 };
 } // namespace
 
 mlir::LogicalResult LibOptPass::initializeOptions(
     llvm::StringRef options,
-    llvm::function_ref<mlir::LogicalResult(const llvm::Twine &)> errorHandler) {
-  (void)errorHandler;
+    llvm::function_ref<mlir::LogicalResult(const llvm::Twine &)>) {
   optimizationOptions = options.str();
   // TODO(cir): Parse options to select the active transformations for the
   // pass.
   return mlir::success();
 }
 
+static void rewriteStdFindToMemchr(StdFindOp findOp,
+                                   mlir::SymbolTableCollection &symbolTables) {
+  auto iterTy = mlir::dyn_cast<cir::PointerType>(findOp.getResult().getType());
+  if (!iterTy || iterTy.getAddrSpace())
+    return;
+  auto elemTy = mlir::dyn_cast<cir::IntType>(iterTy.getPointee());
+  if (!elemTy || elemTy.getWidth() != 8)
+    return;
+
+  auto patternPtrTy =
+      mlir::dyn_cast<cir::PointerType>(findOp.getPattern().getType());
+  if (!patternPtrTy || patternPtrTy.getPointee() != elemTy)
+    return;
+
+  // LibOpt runs before LoweringPrepare, so a global initializer is still a
+  // cir.global here. Anything else is not a shape CIRGen produces.
+  auto enclosing = findOp->getParentOfType<cir::FuncOp>();
+  auto enclosingGlobal = findOp->getParentOfType<cir::GlobalOp>();
+  if (!enclosing && !enclosingGlobal)
+    return;
+
+  // No builtin state rides on the raised call and on the enclosing function.
+  // A global initializer has no function to carry the list.
+  if (isNoBuiltin(findOp, "memchr") ||
+      (enclosing && noBuiltinListDisables(enclosing, "memchr")))
+    return;
+
+  // Only the unit attribute CIRGen recorded licenses the rewrite, since an
+  // enum or atomic element also lowers to a byte-wide integer.
+  if (!findOp->getAttrOfType<mlir::UnitAttr>(
+          cir::CIRDialect::getNarrowCharParamsAttrName()))
+    return;
+
+  auto moduleOp = findOp->getParentOfType<mlir::ModuleOp>();
+  if (!moduleOp)
+    return;
+
+  // The rewrite introduces a libcall the program never named, so the target
+  // has to provide it. TargetLibraryInfo is the availability oracle LLVM
+  // transforms consult before creating a libcall, and it answers from the
+  // triple. The ABI attributes of the introduced call stay with the general
+  // call ABI work.
+  auto tripleAttr = moduleOp->getAttrOfType<mlir::StringAttr>(
+      cir::CIRDialect::getTripleAttrName());
+  if (!tripleAttr)
+    return;
+  llvm::TargetLibraryInfoImpl tliImpl(
+      llvm::Triple(tripleAttr.getValue().str()));
+  if (!llvm::TargetLibraryInfo(tliImpl).has(llvm::LibFunc_memchr))
+    return;
+
+  // The introduced operands take the int and size_t widths the module
+  // records, which is what the cir.libc.memchr verifier checks them against.
+  std::optional<unsigned> intWidth = cir::getRecordedIntegerWidth(
+      moduleOp, cir::CIRDialect::getIntTypeWidthAttrName());
+  std::optional<unsigned> sizeWidth = cir::getRecordedIntegerWidth(
+      moduleOp, cir::CIRDialect::getSizeTypeWidthAttrName());
+  if (!intWidth || !sizeWidth)
+    return;
+
+  // A libc that implements memchr with std::find would call itself forever.
+  if (enclosing && enclosing.getName() == "memchr")
+    return;
+
+  CIRBaseBuilderTy builder(*findOp.getContext());
+
+  if (mlir::Operation *existing = symbolTables.lookupSymbolIn(
+          moduleOp, mlir::StringAttr::get(findOp.getContext(), "memchr"))) {
+    auto existingFn = mlir::dyn_cast<cir::FuncOp>(existing);
+    if (!existingFn)
+      return;
+    auto libcallTy = cir::FuncType::get({builder.getVoidPtrTy(),
+                                         builder.getSIntNTy(*intWidth),
+                                         builder.getUIntNTy(*sizeWidth)},
+                                        builder.getVoidPtrTy());
+    // An alias forwards to some other symbol, so a matching prototype says
+    // nothing about what the call would reach.
+    if (existingFn.getAliasee() || existingFn.getFunctionType() != libcallTy ||
+        existingFn.getCallingConv() != cir::CallingConv::C)
+      return;
+  }
+
+  mlir::Location loc = findOp.getLoc();
+  mlir::Value first = findOp.getFirst();
+  mlir::Value last = findOp.getLast();
+  builder.setInsertionPointAfter(findOp);
+
+  // An empty std::find range is allowed to be a pair of null pointers, while
+  // C requires the memchr pointer to be valid even when the length is zero.
+  mlir::Value isEmpty =
+      builder.createCompare(loc, cir::CmpOpKind::eq, first, last);
+  mlir::Value result =
+      cir::TernaryOp::create(
+          builder, loc, isEmpty,
+          [&](mlir::OpBuilder &, mlir::Location) {
+            builder.createYield(loc, last);
+          },
+          [&](mlir::OpBuilder &, mlir::Location) {
+            mlir::Value src =
+                builder.createBitcast(loc, first, builder.getVoidPtrTy());
+            mlir::Value pattern = builder.createIntCast(
+                builder.createLoad(loc, findOp.getPattern()),
+                builder.getSIntNTy(*intWidth));
+            mlir::Value len = cir::PtrDiffOp::create(
+                builder, loc, builder.getUIntNTy(*sizeWidth), last, first);
+            mlir::Value res =
+                cir::MemChrOp::create(builder, loc, src, pattern, len);
+            res = builder.createBitcast(loc, res, iterTy);
+            builder.createYield(
+                loc, builder.createSelect(loc, builder.createPtrIsNull(res),
+                                          last, res));
+          })
+          .getResult();
+  findOp.getResult().replaceAllUsesWith(result);
+  findOp.erase();
+}
+
 void LibOptPass::runOnOperation() {
-  auto *op = getOperation();
-  if (isa<::mlir::ModuleOp>(op))
-    theModule = cast<::mlir::ModuleOp>(op);
+  mlir::SymbolTableCollection symbolTables;
+  getOperation()->walk(
+      [&](StdFindOp findOp) { rewriteStdFindToMemchr(findOp, symbolTables); });
 }
 
 std::unique_ptr<Pass> mlir::createLibOptPass() {

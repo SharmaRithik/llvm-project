@@ -33,6 +33,9 @@
 #include "clang/CIR/Interfaces/CIRLoopOpInterface.h"
 #include "clang/CIR/Interfaces/CIROpInterfaces.h"
 #include "clang/CIR/MissingFeatures.h"
+#include "llvm/ADT/StringRef.h"
+
+#include <optional>
 
 using BuilderCallbackRef =
     llvm::function_ref<void(mlir::OpBuilder &, mlir::Location)>;
@@ -88,6 +91,13 @@ RecordLayoutAttr getRecordLayout(mlir::ModuleOp mod, mlir::StringAttr name);
 /// Same lookup as getRecordLayout, but returns a null attribute instead of
 /// asserting when the record has no layout entry.
 RecordLayoutAttr tryGetRecordLayout(mlir::ModuleOp mod, mlir::StringAttr name);
+
+/// The integer width recorded by module attribute `name`, if it is a plain
+/// i32 holding a fundamental integer width. The cir.libc.memchr
+/// verifier and the passes that build the operation read widths through
+/// this, so they agree on what counts as usable.
+std::optional<unsigned> getRecordedIntegerWidth(mlir::ModuleOp mod,
+                                                llvm::StringRef name);
 } // namespace cir
 
 // TableGen'erated files for MLIR dialects require that a macro be defined when

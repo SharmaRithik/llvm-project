@@ -23,6 +23,7 @@ add_clang_library(MLIRCIRTransforms
   clangBasic
 
   LLVMABI
+  LLVMAnalysis
   MLIRABI
   MLIRAnalysis
   MLIRDLTIDialect

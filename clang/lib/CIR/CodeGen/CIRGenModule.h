@@ -813,6 +813,15 @@ public:
   /// entity that passes can recognize without the AST.
   void setFuncInfoAttr(cir::FuncOp funcOp, const clang::FunctionDecl *funcDecl);
 
+  /// The known standard library entity `funcDecl` names, if any.
+  static std::optional<cir::KnownFuncKind>
+  getKnownFuncKind(const clang::FunctionDecl *funcDecl);
+
+  /// Whether each parameter of `funcDecl` is a pointer or reference to the
+  /// same non-volatile narrow character type, meaning char, signed char,
+  /// unsigned char or char8_t.
+  static bool hasNarrowCharParams(const clang::FunctionDecl *funcDecl);
+
   cir::FuncOp createRuntimeFunction(cir::FuncType ty, llvm::StringRef name,
                                     mlir::NamedAttrList extraAttrs = {},
                                     bool isLocal = false,

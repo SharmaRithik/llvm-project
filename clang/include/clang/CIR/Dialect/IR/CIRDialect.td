@@ -38,6 +38,15 @@ def CIR_Dialect : Dialect {
     static llvm::StringRef getTripleAttrName() { return "cir.triple"; }
     static llvm::StringRef getSizeTypeWidthAttrName() { return "cir.size_type_width"; }
     static llvm::StringRef getIntTypeWidthAttrName() { return "cir.int_type_width"; }
+    // Set by CIRGen on a call to a recognized standard library function
+    // when each parameter of the callee is a pointer
+    // or reference to the same non-volatile narrow character type, meaning
+    // char, signed char, unsigned char or char8_t. Equality between two such
+    // character values cannot be overloaded, which is what licenses comparing
+    // representations.
+    static llvm::StringRef getNarrowCharParamsAttrName() {
+      return "cir.narrow_char_params";
+    }
     static llvm::StringRef getOptInfoAttrName() { return "cir.opt_info"; }
     static llvm::StringRef getCalleeAttrName() { return "callee"; }
     static llvm::StringRef getNoThrowAttrName() { return "nothrow"; }

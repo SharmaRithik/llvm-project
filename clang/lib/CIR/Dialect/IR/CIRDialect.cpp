@@ -4638,7 +4638,7 @@ LogicalResult cir::LifetimeEndOp::verify() {
 //===----------------------------------------------------------------------===//
 
 /// Reads a fundamental integer width from a signless i32 attribute.
-static std::optional<unsigned> getRecordedIntegerWidth(mlir::Attribute attr) {
+static std::optional<unsigned> readRecordedIntegerWidth(mlir::Attribute attr) {
   auto intAttr = mlir::dyn_cast<mlir::IntegerAttr>(attr);
   if (!intAttr || !intAttr.getType().isSignlessInteger(32))
     return std::nullopt;
@@ -4647,6 +4647,14 @@ static std::optional<unsigned> getRecordedIntegerWidth(mlir::Attribute attr) {
       !cir::isValidFundamentalIntWidth(static_cast<unsigned>(width)))
     return std::nullopt;
   return static_cast<unsigned>(width);
+}
+
+std::optional<unsigned> cir::getRecordedIntegerWidth(mlir::ModuleOp mod,
+                                                     llvm::StringRef name) {
+  mlir::Attribute attr = mod->getAttr(name);
+  if (!attr)
+    return std::nullopt;
+  return readRecordedIntegerWidth(attr);
 }
 
 LogicalResult cir::MemChrOp::verify() {
@@ -4663,7 +4671,7 @@ LogicalResult cir::MemChrOp::verify() {
     mlir::Attribute attr = moduleOp->getAttr(attrName);
     if (!attr)
       return emitOpError("expects the module to record ") << attrName;
-    std::optional<unsigned> width = getRecordedIntegerWidth(attr);
+    std::optional<unsigned> width = readRecordedIntegerWidth(attr);
     if (!width)
       return emitOpError("requires ")
              << attrName

@@ -80,6 +80,11 @@ def CIR_StdFindOp : CIR_StdOp<"find",
   (outs CIR_AnyType:$result),
   [AllTypesMatch<["first", "last", "result"]>], "StdFind"> {
   let summary = "std::find()";
+  let description = [{
+    A raised `std::find`. `cir.narrow_char_params` is carried here from the
+    call when CIRGen recorded it. It is discardable, so a pass that drops it
+    costs the rewrite rather than making it wrong.
+  }];
   let assemblyFormat = [{
     `(` $first `:` qualified(type($first)) `,`
         $last `:` qualified(type($last)) `,`

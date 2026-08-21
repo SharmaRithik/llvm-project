@@ -368,6 +368,11 @@ void CIRGenModule::constructAttributeList(
       addAttributesFromFunctionProtoType(
           getBuilder(), attrs, func->getType()->getAs<FunctionProtoType>());
 
+      // Source-level legality information for the bytewise equality
+      // rewrites, not part of the callee identity.
+      if (attrOnCallSite && getKnownFuncKind(func) && hasNarrowCharParams(func))
+        addUnitAttr(cir::CIRDialect::getNarrowCharParamsAttrName());
+
       // TODO(cir): When doing 'return attrs' we need to cover the 'NoAlias' for
       // global allocation functions here.
       assert(!cir::MissingFeatures::opCallAttrs());

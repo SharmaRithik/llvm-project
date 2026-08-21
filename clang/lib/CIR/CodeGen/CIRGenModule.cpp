@@ -3722,32 +3722,56 @@ void CIRGenModule::setFuncInfoAttr(cir::FuncOp funcOp,
     return;
   }
 
-  // Otherwise tag a function that matches a known standard library entity. A
-  // known entity is named by a plain identifier in std. For a member the
-  // record decides std membership. Inline namespaces, like the versioning
-  // namespace of libc++, count as part of std.
-  if (!funcDecl->getIdentifier())
-    return;
-  bool inStdNamespace = method ? method->getParent()->isInStdNamespace()
-                               : funcDecl->isInStdNamespace();
-  if (!inStdNamespace)
-    return;
-
-  // The names and the tags come from CIRStdOps.td, and the recognizer checks
-  // the shape of each call. Only free functions name a known entity today, so
-  // a member like char_traits::find never shares the tag of the free std::find.
-  std::optional<cir::KnownFuncKind> kind;
-  if (!method) {
-    kind = llvm::StringSwitch<std::optional<cir::KnownFuncKind>>(
-               funcDecl->getName())
-               .Case(cir::StdFindOp::getFunctionName(),
-                     cir::StdFindOp::getFuncKind())
-               .Default(std::nullopt);
-  }
+  // Otherwise tag a function that matches a known standard library entity.
+  std::optional<cir::KnownFuncKind> kind = getKnownFuncKind(funcDecl);
   if (!kind)
     return;
 
   funcOp.setFuncInfoAttr(cir::FuncIdentityAttr::get(&getMLIRContext(), *kind));
+}
+
+std::optional<cir::KnownFuncKind>
+CIRGenModule::getKnownFuncKind(const FunctionDecl *funcDecl) {
+  // A known entity is named by a plain identifier in std. For a member the
+  // record decides std membership. Inline namespaces, like the versioning
+  // namespace of libc++, count as part of std.
+  if (!funcDecl->getIdentifier())
+    return std::nullopt;
+  const auto *method = dyn_cast<CXXMethodDecl>(funcDecl);
+  bool inStdNamespace = method ? method->getParent()->isInStdNamespace()
+                               : funcDecl->isInStdNamespace();
+  if (!inStdNamespace)
+    return std::nullopt;
+
+  // The names and the tags come from CIRStdOps.td, and the recognizer checks
+  // the shape of each call. Only free functions name a known entity today, so
+  // a member like char_traits::find never shares the tag of the free std::find.
+  if (method)
+    return std::nullopt;
+  return llvm::StringSwitch<std::optional<cir::KnownFuncKind>>(
+             funcDecl->getName())
+      .Case(cir::StdFindOp::getFunctionName(), cir::StdFindOp::getFuncKind())
+      .Default(std::nullopt);
+}
+
+bool CIRGenModule::hasNarrowCharParams(const FunctionDecl *funcDecl) {
+  // An enum lowers to the same byte-wide integer as a character type and can
+  // carry a user-defined operator==, so CIR cannot tell the two apart.
+  // char8_t is a distinct type but cannot carry one, so it belongs here too.
+  clang::QualType firstPointee;
+  return !funcDecl->parameters().empty() &&
+         llvm::all_of(funcDecl->parameters(), [&](const ParmVarDecl *param) {
+           clang::QualType pointee = param->getType()->getPointeeType();
+           if (pointee.isNull() || pointee.isVolatileQualified())
+             return false;
+           if (!pointee->isCharType() && !pointee->isChar8Type())
+             return false;
+           clang::QualType canonical =
+               pointee.getCanonicalType().getUnqualifiedType();
+           if (firstPointee.isNull())
+             firstPointee = canonical;
+           return canonical == firstPointee;
+         });
 }
 
 static void setWindowsItaniumDLLImport(CIRGenModule &cgm, bool isLocal,
