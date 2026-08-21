@@ -376,3 +376,42 @@ module attributes {cir.triple = "nvptx64-nvidia-cuda",
 // CHECK: cir.std.find
 // CHECK-NOT: cir.libc.memchr
 }
+
+// -----
+
+!u8i = !cir.int<u, 8>
+!wrapiter = !cir.struct<class "std::__1::__wrap_iter<char *>" {data !cir.ptr<!u8i>}>
+
+module attributes {cir.triple = "x86_64-unknown-linux-gnu",
+                   cir.int_type_width = 32 : i32, cir.size_type_width = 64 : i32} {
+  cir.func private @_ZSt4findISt11__wrap_iterIPhEhET_S2_S2_RKT0_(!wrapiter, !wrapiter, !cir.ptr<!u8i>) -> !wrapiter func_info<#cir.func_identity<"std::find">>
+
+  cir.func @rewrites_wrapped_iterator(%first: !wrapiter, %last: !wrapiter, %value: !cir.ptr<!u8i>) -> !wrapiter {
+    %0 = cir.std.find(%first : !wrapiter, %last : !wrapiter, %value : !cir.ptr<!u8i>, @_ZSt4findISt11__wrap_iterIPhEhET_S2_S2_RKT0_) -> !wrapiter {cir.narrow_char_params}
+    cir.return %0 : !wrapiter
+  }
+// CHECK-LABEL: @rewrites_wrapped_iterator
+// CHECK: %[[FIRST:.*]] = cir.extract_member %{{.*}}[0] : !rec_std3A3A__13A3A__wrap_iter3Cchar_2A3E -> !cir.ptr<!u8i>
+// CHECK: %[[LAST:.*]] = cir.extract_member %{{.*}}[0] : !rec_std3A3A__13A3A__wrap_iter3Cchar_2A3E -> !cir.ptr<!u8i>
+// CHECK: cir.libc.memchr
+// CHECK: cir.insert_member %{{.*}}[0], %{{.*}} : !rec_std3A3A__13A3A__wrap_iter3Cchar_2A3E, !cir.ptr<!u8i>
+// CHECK-NOT: cir.std.find
+}
+
+// -----
+
+!u8i = !cir.int<u, 8>
+!fatiter = !cir.struct<class "fat" {data !cir.ptr<!u8i>, data !cir.ptr<!u8i>}>
+
+module attributes {cir.triple = "x86_64-unknown-linux-gnu",
+                   cir.int_type_width = 32 : i32, cir.size_type_width = 64 : i32} {
+  cir.func private @_ZSt4findI3fathET_S1_S1_RKT0_(!fatiter, !fatiter, !cir.ptr<!u8i>) -> !fatiter func_info<#cir.func_identity<"std::find">>
+
+  cir.func @keeps_two_member_iterator(%first: !fatiter, %last: !fatiter, %value: !cir.ptr<!u8i>) -> !fatiter {
+    %0 = cir.std.find(%first : !fatiter, %last : !fatiter, %value : !cir.ptr<!u8i>, @_ZSt4findI3fathET_S1_S1_RKT0_) -> !fatiter {cir.narrow_char_params}
+    cir.return %0 : !fatiter
+  }
+// CHECK-LABEL: @keeps_two_member_iterator
+// CHECK: cir.std.find
+// CHECK-NOT: cir.libc.memchr
+}

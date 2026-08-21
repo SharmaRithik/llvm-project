@@ -3754,6 +3754,47 @@ CIRGenModule::getKnownFuncKind(const FunctionDecl *funcDecl) {
       .Default(std::nullopt);
 }
 
+/// The pointee a std contiguous iterator designates, or a null type. The
+/// class has to come from std and name the C++20 contiguous iterator
+/// concept through its iterator_concept typedef, which is what licenses
+/// treating it as the pointer it wraps. It also has to hold exactly that
+/// pointer as its only field with no base classes, because the rewrite
+/// reads the field as the address the iterator points to.
+static clang::QualType stdContiguousIteratorPointee(clang::QualType ty) {
+  const clang::CXXRecordDecl *rec = ty->getAsCXXRecordDecl();
+  if (!rec || !rec->isInStdNamespace() || !rec->hasDefinition())
+    return {};
+  rec = rec->getDefinition();
+  if (rec->getNumBases() != 0)
+    return {};
+
+  const clang::FieldDecl *onlyField = nullptr;
+  for (const clang::FieldDecl *field : rec->fields()) {
+    if (onlyField)
+      return {};
+    onlyField = field;
+  }
+  if (!onlyField || !onlyField->getType()->isPointerType())
+    return {};
+
+  clang::ASTContext &ctx = rec->getASTContext();
+  bool taggedContiguous = false;
+  for (const NamedDecl *found : rec->lookup(
+           clang::DeclarationName(&ctx.Idents.get("iterator_concept")))) {
+    const auto *alias = dyn_cast<TypedefNameDecl>(found);
+    if (!alias)
+      continue;
+    const clang::CXXRecordDecl *tag =
+        alias->getUnderlyingType()->getAsCXXRecordDecl();
+    if (tag && tag->isInStdNamespace() && tag->getIdentifier() &&
+        tag->getName() == "contiguous_iterator_tag")
+      taggedContiguous = true;
+  }
+  if (!taggedContiguous)
+    return {};
+  return onlyField->getType()->getPointeeType();
+}
+
 bool CIRGenModule::hasNarrowCharParams(const FunctionDecl *funcDecl) {
   // An enum lowers to the same byte-wide integer as a character type and can
   // carry a user-defined operator==, so CIR cannot tell the two apart.
@@ -3762,6 +3803,8 @@ bool CIRGenModule::hasNarrowCharParams(const FunctionDecl *funcDecl) {
   return !funcDecl->parameters().empty() &&
          llvm::all_of(funcDecl->parameters(), [&](const ParmVarDecl *param) {
            clang::QualType pointee = param->getType()->getPointeeType();
+           if (pointee.isNull())
+             pointee = stdContiguousIteratorPointee(param->getType());
            if (pointee.isNull() || pointee.isVolatileQualified())
              return false;
            if (!pointee->isCharType() && !pointee->isChar8Type())

@@ -4876,7 +4876,15 @@ bool cir::StdFindOp::signatureMatches(mlir::TypeRange operands,
   if (operands.size() != getNumArgs() || results.size() != 1)
     return false;
   mlir::Type iterTy = operands[0];
-  return iterTy == operands[1] && iterTy == operands[2] && iterTy == results[0];
+  if (iterTy != operands[1] || iterTy != results[0])
+    return false;
+  // A pointer iterator carries the by-reference pattern as that same
+  // pointer type. A class iterator is a record instead, and its pattern
+  // stays a pointer to the element, so those two operand types can never
+  // match each other. The shape check stays structural; LibOpt re-proves
+  // the element types before rewriting.
+  return operands[2] == iterTy || (mlir::isa<cir::RecordType>(iterTy) &&
+                                   mlir::isa<cir::PointerType>(operands[2]));
 }
 
 //===----------------------------------------------------------------------===//

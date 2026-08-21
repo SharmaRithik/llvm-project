@@ -67,13 +67,24 @@ mlir::LogicalResult LibOptPass::initializeOptions(
 
 static void rewriteStdFindToMemchr(StdFindOp findOp,
                                    mlir::SymbolTableCollection &symbolTables) {
-  auto iterTy = mlir::dyn_cast<cir::PointerType>(findOp.getResult().getType());
+  // A std contiguous iterator wraps the pointer as its only member.  The
+  // narrow character fact CIRGen recorded is what licenses reading that
+  // member as the address, so the rewrite runs on the wrapped pointer and
+  // rebuilds the record around its result.
+  mlir::Type resultTy = findOp.getResult().getType();
+  auto wrapperTy = mlir::dyn_cast<cir::RecordType>(resultTy);
+  auto iterTy = mlir::dyn_cast<cir::PointerType>(resultTy);
+  if (wrapperTy) {
+    if (wrapperTy.isUnion() || !wrapperTy.isComplete() ||
+        wrapperTy.getMembers().size() != 1)
+      return;
+    iterTy = mlir::dyn_cast<cir::PointerType>(wrapperTy.getMembers()[0]);
+  }
   if (!iterTy || iterTy.getAddrSpace())
     return;
   auto elemTy = mlir::dyn_cast<cir::IntType>(iterTy.getPointee());
   if (!elemTy || elemTy.getWidth() != 8)
     return;
-
   auto patternPtrTy =
       mlir::dyn_cast<cir::PointerType>(findOp.getPattern().getType());
   if (!patternPtrTy || patternPtrTy.getPointee() != elemTy)
@@ -151,6 +162,10 @@ static void rewriteStdFindToMemchr(StdFindOp findOp,
   mlir::Value first = findOp.getFirst();
   mlir::Value last = findOp.getLast();
   builder.setInsertionPointAfter(findOp);
+  if (wrapperTy) {
+    first = cir::ExtractMemberOp::create(builder, loc, first, 0);
+    last = cir::ExtractMemberOp::create(builder, loc, last, 0);
+  }
 
   // An empty std::find range is allowed to be a pair of null pointers, while
   // C requires the memchr pointer to be valid even when the length is zero.
@@ -178,6 +193,9 @@ static void rewriteStdFindToMemchr(StdFindOp findOp,
                                           last, res));
           })
           .getResult();
+  if (wrapperTy)
+    result = cir::InsertMemberOp::create(builder, loc, findOp.getFirst(),
+                                         /*index=*/0, result);
   findOp.getResult().replaceAllUsesWith(result);
   findOp.erase();
 }
