@@ -3799,15 +3799,35 @@ CIRGenModule::getKnownFuncKind(const FunctionDecl *funcDecl) {
       .Default(std::nullopt);
 }
 
-/// The pointee a std contiguous iterator designates, or a null type. The
-/// class has to come from std and name the C++20 contiguous iterator
-/// concept through its iterator_concept typedef, which is what licenses
-/// treating it as the pointer it wraps. It also has to hold exactly that
-/// pointer as its only field with no base classes, because the rewrite
-/// reads the field as the address the iterator points to.
+/// Whether the record lives in a namespace the standard library
+/// implementation owns. libc++ keeps its iterators in std while
+/// libstdc++ keeps them in __gnu_cxx, and both store the designated
+/// pointer as the wrapper's only field.
+static bool inStdImplementationNamespace(const clang::CXXRecordDecl *rec) {
+  if (rec->isInStdNamespace())
+    return true;
+  for (const clang::DeclContext *ctx = rec->getDeclContext(); ctx;
+       ctx = ctx->getParent()) {
+    const auto *ns = dyn_cast<clang::NamespaceDecl>(ctx);
+    if (ns && ns->getIdentifier() && ns->getName() == "__gnu_cxx")
+      return true;
+  }
+  return false;
+}
+
+/// The pointee a standard library contiguous iterator designates, or a
+/// null type. The class has to come from the implementation's namespace
+/// and name the C++20 contiguous iterator concept through its
+/// iterator_concept typedef, which is what licenses treating it as the
+/// pointer it wraps. It also has to hold exactly that pointer as its
+/// only field with no base classes: a contiguous iterator's position
+/// fully determines std::to_address, so when one pointer is the whole
+/// state, that pointer is the position. An iterator carrying more, such
+/// as MSVC's checked iterators or libc++'s hardened __bounded_iter, has
+/// several fields and stays out.
 static clang::QualType stdContiguousIteratorPointee(clang::QualType ty) {
   const clang::CXXRecordDecl *rec = ty->getAsCXXRecordDecl();
-  if (!rec || !rec->isInStdNamespace() || !rec->hasDefinition())
+  if (!rec || !inStdImplementationNamespace(rec) || !rec->hasDefinition())
     return {};
   rec = rec->getDefinition();
   if (rec->getNumBases() != 0)

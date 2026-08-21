@@ -92,3 +92,18 @@ char *wrapped_outside_std(user::span_iter<char *> first,
 // CHECK-LABEL: cir.func{{.*}} @_Z19wrapped_outside_std
 // CHECK: cir.call @_ZNSt3__14findIN4user9span_iterIPcEEcEET_S5_S5_RKT0_
 // CHECK-NOT: cir.narrow_char_params
+
+namespace __gnu_cxx {
+template <class P, class C> struct normal_iter {
+  P ptr;
+  typedef std::contiguous_iterator_tag iterator_concept;
+};
+}
+
+char *gnu_wrapped_eligible(__gnu_cxx::normal_iter<char *, int> first,
+                           __gnu_cxx::normal_iter<char *, int> last,
+                           const char &value) {
+  return std::find(first, last, value).ptr;
+}
+// CHECK-LABEL: cir.func{{.*}} @_Z20gnu_wrapped_eligible
+// CHECK: cir.call @_ZNSt3__14findIN9__gnu_cxx11normal_iterIPciEEcEET_S5_S5_RKT0_({{.*}}) {{{.*}}cir.narrow_char_params
