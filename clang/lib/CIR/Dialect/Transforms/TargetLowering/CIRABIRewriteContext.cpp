@@ -1204,21 +1204,116 @@ CIRABIRewriteContext::rewriteCallSite(mlir::Operation *callOp,
                          dl);
       newArgs.push_back(arg);
     } else if (ac.kind == ArgKind::Indirect) {
-      // byval and byref: allocate a stack slot, copy the value in, and pass
-      // the pointer.  The alloca+store pattern is identical for both; the
-      // attribute distinction (llvm.byval vs llvm.byref) is applied by
+      // byval copies: allocate a stack slot, copy the value in, and pass the
+      // pointer.  The ABI itself passes a copy, so a fresh slot is correct.
+      //
+      // byref identity: a type that is not trivial for calls must arrive
+      // through the address of the argument object itself, because the
+      // callee mutates it in place (a move constructor empties it) and the
+      // caller destroys that same object after the call.  Passing a copied
+      // slot splits the object in two, so the caller destroys a value the
+      // callee never saw.  CIRGen materializes such an argument as a load
+      // from the argument temporary, so pass that temporary's address.
+      //
+      // The attribute distinction (llvm.byval vs llvm.byref) is applied by
       // updateArgAttrs.  byref does not receive llvm.noalias or llvm.noundef
       // because it does not assert exclusive ownership of the storage.
-      mlir::Type argTy = arg.getType();
-      auto ptrTy = cir::PointerType::get(argTy);
-      uint64_t align = ac.indirectAlign.value();
-      StringRef slotName = ac.byVal ? "byval" : "byref";
-      auto slot = cir::AllocaOp::create(builder, call.getLoc(), ptrTy,
-                                        builder.getStringAttr(slotName),
-                                        builder.getI64IntegerAttr(align));
-      cir::StoreOp::create(builder, call.getLoc(), arg, slot);
-      arg = slot;
-      newArgs.push_back(arg);
+      // The reused address has to be an ordinary load straight from an
+      // alloca, the argument temporary CIRGen materializes right before the
+      // call, so a volatile or atomic access is never elided and no other
+      // object's address is passed.  The address also only substitutes for
+      // the loaded value when nothing between the load and the call can
+      // write memory, since the callee reads the slot at call time.
+      // An alloca is only the argument temporary when nothing observes it
+      // past the call: every other user has to either dominate the call
+      // (its initialization) or be the destructor call the caller owes the
+      // argument object.  A later read would otherwise see the callee's
+      // mutation of what the source treats as a by-value copy.  A pointer
+      // derived from the slot before the call can carry such a read past
+      // it, so derived pointers get the same scrutiny, and a slot address
+      // stored to memory cannot be tracked at all.
+      cir::LoadOp load;
+      if (!ac.byVal) {
+        load = arg.getDefiningOp<cir::LoadOp>();
+        if (load && (load.getIsVolatile() || load.getMemOrder() ||
+                     !load.getAddr().getDefiningOp<cir::AllocaOp>() ||
+                     load->getBlock() != call->getBlock()))
+          load = cir::LoadOp();
+        for (mlir::Operation *it = load ? load->getNextNode() : nullptr;
+             it && it != call.getOperation(); it = it->getNextNode()) {
+          auto mem = mlir::dyn_cast<mlir::MemoryEffectOpInterface>(it);
+          if (mem && !mem.hasEffect<mlir::MemoryEffects::Write>() &&
+              !mem.hasEffect<mlir::MemoryEffects::Free>())
+            continue;
+          load = cir::LoadOp();
+          break;
+        }
+        if (load) {
+          mlir::Value slotAddr = load.getAddr();
+          auto isDtorCallOnSlot = [&](mlir::Operation *user) {
+            auto userCall = mlir::dyn_cast<cir::CallOp>(user);
+            if (!userCall || userCall.getArgOperands().size() != 1 ||
+                userCall.getArgOperands().front() != slotAddr ||
+                !userCall.getCallee())
+              return false;
+            auto callee =
+                mlir::SymbolTable::lookupNearestSymbolFrom<cir::FuncOp>(
+                    user, userCall.getCalleeAttr());
+            return callee && mlir::isa_and_nonnull<cir::CXXDtorAttr>(
+                                 callee.getFuncInfoAttr());
+          };
+          mlir::DominanceInfo dom;
+          llvm::SmallVector<mlir::Value, 4> worklist{slotAddr};
+          while (load && !worklist.empty()) {
+            mlir::Value view = worklist.pop_back_val();
+            for (mlir::Operation *user : view.getUsers()) {
+              if (user == load.getOperation() || isDtorCallOnSlot(user))
+                continue;
+              auto store = mlir::dyn_cast<cir::StoreOp>(user);
+              if (!dom.properlyDominates(user, call.getOperation()) ||
+                  (store && store.getValue() == view)) {
+                load = cir::LoadOp();
+                break;
+              }
+              // A pointer result is a view of the object and gets the same
+              // scrutiny. Any other result can carry the address as data,
+              // like a ptr_to_int cast an int_to_ptr resurrects past the
+              // call, so provenance is lost and reuse declines. A load is
+              // the exception since its result is the contents.
+              if (mlir::isa<cir::LoadOp>(user))
+                continue;
+              bool escapes = false;
+              for (mlir::Value result : user->getResults()) {
+                if (mlir::isa<cir::PointerType>(result.getType()))
+                  worklist.push_back(result);
+                else
+                  escapes = true;
+              }
+              if (escapes) {
+                load = cir::LoadOp();
+                break;
+              }
+            }
+          }
+        }
+      }
+      if (load) {
+        newArgs.push_back(load.getAddr());
+        replacedWholeLoads.push_back(load);
+      } else {
+        // A byref operand that is not such a load has no addressable
+        // original, so the slot itself is the argument object.
+        mlir::Type argTy = arg.getType();
+        auto ptrTy = cir::PointerType::get(argTy);
+        uint64_t align = ac.indirectAlign.value();
+        StringRef slotName = ac.byVal ? "byval" : "byref";
+        auto slot = cir::AllocaOp::create(builder, call.getLoc(), ptrTy,
+                                          builder.getStringAttr(slotName),
+                                          builder.getI64IntegerAttr(align));
+        cir::StoreOp::create(builder, call.getLoc(), arg, slot);
+        arg = slot;
+        newArgs.push_back(arg);
+      }
     } else {
       newArgs.push_back(arg);
     }

@@ -3,6 +3,7 @@
 
 !s32i = !cir.int<s, 32>
 !s64i = !cir.int<s, 64>
+!u64i = !cir.int<u, 64>
 !rec_Big = !cir.struct<"Big" {data !s64i, data !s64i, data !s64i, data !s64i}>
 
 #byval_arg = {
@@ -41,6 +42,11 @@
 #passthrough = {
   return = { kind = "direct" },
   args   = [ ]
+}
+
+#direct_ptr_arg = {
+  return = { kind = "direct" },
+  args   = [ { kind = "direct" } ]
 }
 
 module attributes {
@@ -294,5 +300,143 @@ module attributes {
   // CHECK-SAME:     llvm.byref = !rec_Big
   // CHECK-NOT:    llvm.noalias
   // CHECK-NOT:    llvm.noundef
+
+  // byref call site whose operand is loaded from the argument temporary: the
+  // temporary's own address is passed, with no fresh slot and no byte copy.
+  // The callee mutates the object in place and the caller destroys that same
+  // object, which is what a type that is not trivial for calls requires.
+  cir.func @caller_byref_from_temp() -> !rec_Big
+      attributes { test_classify = #passthrough } {
+    %0 = cir.alloca "agg.tmp" align(8) : !cir.ptr<!rec_Big>
+    %1 = cir.load %0 : !cir.ptr<!rec_Big>, !rec_Big
+    %r = cir.call @takes_big_byref(%1) : (!rec_Big) -> !rec_Big
+    cir.return %r : !rec_Big
+  }
+
+  // CHECK:      cir.func{{.*}} @caller_byref_from_temp() -> !rec_Big
+  // CHECK:        %[[TMP:.*]] = cir.alloca "agg.tmp" align(8) : !cir.ptr<!rec_Big>
+  // CHECK-NOT:    cir.alloca "byref"
+  // CHECK-NOT:    cir.store
+  // CHECK-NEXT:   %{{.*}} = cir.call @takes_big_byref(%[[TMP]]) :
+  // CHECK-SAME:     llvm.byref = !rec_Big
+// A byref operand loaded from something other than an alloca keeps the
+// slot copy, since another object's address must not be handed out.
+cir.func @caller_byref_nonalloca(%p: !cir.ptr<!rec_Big>) -> !rec_Big
+    attributes { test_classify = #passthrough } {
+  %v = cir.load %p : !cir.ptr<!rec_Big>, !rec_Big
+  %r = cir.call @takes_big_byref(%v) : (!rec_Big) -> !rec_Big
+  cir.return %r : !rec_Big
+}
+
+// CHECK:      cir.func{{.*}} @caller_byref_nonalloca(%[[P:.*]]: !cir.ptr<!rec_Big>)
+// CHECK:        %[[V:.*]] = cir.load %[[P]] : !cir.ptr<!rec_Big>, !rec_Big
+// CHECK:        %[[SLOT:.*]] = cir.alloca "byref" align(8) : !cir.ptr<!rec_Big>
+// CHECK-NEXT:   cir.store %[[V]], %[[SLOT]] : !rec_Big, !cir.ptr<!rec_Big>
+// CHECK-NEXT:   %{{.*}} = cir.call @takes_big_byref(%[[SLOT]]) :
+
+// A write to the temporary between the load and the call also keeps the
+// slot copy, so the callee still sees the loaded snapshot.
+cir.func @caller_byref_clobbered_temp(%v: !rec_Big, %w: !rec_Big) -> !rec_Big
+    attributes { test_classify = #passthrough } {
+  %0 = cir.alloca "agg.tmp" align(8) : !cir.ptr<!rec_Big>
+  cir.store %v, %0 : !rec_Big, !cir.ptr<!rec_Big>
+  %1 = cir.load %0 : !cir.ptr<!rec_Big>, !rec_Big
+  cir.store %w, %0 : !rec_Big, !cir.ptr<!rec_Big>
+  %r = cir.call @takes_big_byref(%1) : (!rec_Big) -> !rec_Big
+  cir.return %r : !rec_Big
+}
+
+// CHECK:      cir.func{{.*}} @caller_byref_clobbered_temp
+// CHECK:        %[[LOADED:.*]] = cir.load %{{.*}} : !cir.ptr<!rec_Big>, !rec_Big
+// CHECK:        %[[SLOT:.*]] = cir.alloca "byref" align(8) : !cir.ptr<!rec_Big>
+// CHECK-NEXT:   cir.store %[[LOADED]], %[[SLOT]] : !rec_Big, !cir.ptr<!rec_Big>
+// CHECK-NEXT:   %{{.*}} = cir.call @takes_big_byref(%[[SLOT]]) :
+
+// An ordinary local read again after the call also keeps the slot copy.
+// Reusing its address would let the callee's in place mutation reach the
+// later read, turning a by value argument into aliasing.
+cir.func @caller_byref_local_observed(%v: !rec_Big) -> !s64i
+    attributes { test_classify = #passthrough } {
+  %0 = cir.alloca "local" align(8) : !cir.ptr<!rec_Big>
+  cir.store %v, %0 : !rec_Big, !cir.ptr<!rec_Big>
+  %1 = cir.load %0 : !cir.ptr<!rec_Big>, !rec_Big
+  %r = cir.call @takes_big_byref(%1) : (!rec_Big) -> !rec_Big
+  %m = cir.get_member %0[0] {name = "a"} : !cir.ptr<!rec_Big> -> !cir.ptr<!s64i>
+  %x = cir.load %m : !cir.ptr<!s64i>, !s64i
+  cir.return %x : !s64i
+}
+
+// CHECK:      cir.func{{.*}} @caller_byref_local_observed
+// CHECK:        %[[LOADED:.*]] = cir.load %{{.*}} : !cir.ptr<!rec_Big>, !rec_Big
+// CHECK:        %[[SLOT:.*]] = cir.alloca "byref" align(8) : !cir.ptr<!rec_Big>
+// CHECK-NEXT:   cir.store %[[LOADED]], %[[SLOT]] : !rec_Big, !cir.ptr<!rec_Big>
+// CHECK-NEXT:   %{{.*}} = cir.call @takes_big_byref(%[[SLOT]]) :
+
+// A pointer derived from the local before the call and read after it also
+// keeps the slot copy, since the later read would otherwise see the
+// callee's in place mutation through the derived address.
+cir.func @caller_byref_derived_observed(%v: !rec_Big) -> !s64i
+    attributes { test_classify = #passthrough } {
+  %0 = cir.alloca "local" align(8) : !cir.ptr<!rec_Big>
+  cir.store %v, %0 : !rec_Big, !cir.ptr<!rec_Big>
+  %m = cir.get_member %0[0] {name = "a"} : !cir.ptr<!rec_Big> -> !cir.ptr<!s64i>
+  %1 = cir.load %0 : !cir.ptr<!rec_Big>, !rec_Big
+  %r = cir.call @takes_big_byref(%1) : (!rec_Big) -> !rec_Big
+  %x = cir.load %m : !cir.ptr<!s64i>, !s64i
+  cir.return %x : !s64i
+}
+
+// CHECK:      cir.func{{.*}} @caller_byref_derived_observed
+// CHECK:        %[[DLOADED:.*]] = cir.load %{{.*}} : !cir.ptr<!rec_Big>, !rec_Big
+// CHECK:        %[[DSLOT:.*]] = cir.alloca "byref" align(8) : !cir.ptr<!rec_Big>
+// CHECK-NEXT:   cir.store %[[DLOADED]], %[[DSLOT]] : !rec_Big, !cir.ptr<!rec_Big>
+// CHECK-NEXT:   %{{.*}} = cir.call @takes_big_byref(%[[DSLOT]]) :
+
+// An address laundered through an integer before the call loses its
+// provenance, so reuse declines when a pointer to the local flows into a
+// non-pointer value. The int_to_ptr resurrection after the call would
+// otherwise observe the callee's in place mutation.
+cir.func @caller_byref_intptr_escape(%v: !rec_Big) -> !s64i
+    attributes { test_classify = #passthrough } {
+  %0 = cir.alloca "local" align(8) : !cir.ptr<!rec_Big>
+  cir.store %v, %0 : !rec_Big, !cir.ptr<!rec_Big>
+  %a = cir.cast ptr_to_int %0 : !cir.ptr<!rec_Big> -> !u64i
+  %1 = cir.load %0 : !cir.ptr<!rec_Big>, !rec_Big
+  %r = cir.call @takes_big_byref(%1) : (!rec_Big) -> !rec_Big
+  %p = cir.cast int_to_ptr %a : !u64i -> !cir.ptr<!rec_Big>
+  %m = cir.get_member %p[0] {name = "a"} : !cir.ptr<!rec_Big> -> !cir.ptr<!s64i>
+  %x = cir.load %m : !cir.ptr<!s64i>, !s64i
+  cir.return %x : !s64i
+}
+
+// CHECK:      cir.func{{.*}} @caller_byref_intptr_escape
+// CHECK:        %[[ILOADED:.*]] = cir.load %{{.*}} : !cir.ptr<!rec_Big>, !rec_Big
+// CHECK:        %[[ISLOT:.*]] = cir.alloca "byref" align(8) : !cir.ptr<!rec_Big>
+// CHECK-NEXT:   cir.store %[[ILOADED]], %[[ISLOT]] : !rec_Big, !cir.ptr<!rec_Big>
+// CHECK-NEXT:   %{{.*}} = cir.call @takes_big_byref(%[[ISLOT]]) :
+
+// The destructor call the caller owes the argument object is the one use
+// past the call that keeps the temporary reusable, since the convention
+// requires the caller to destroy exactly that object.
+cir.func private @big_dtor(%arg0: !cir.ptr<!rec_Big>)
+    func_info<#cir.cxx_dtor<!rec_Big>>
+    attributes { test_classify = #direct_ptr_arg }
+
+cir.func @caller_byref_temp_with_dtor(%v: !rec_Big) -> !rec_Big
+    attributes { test_classify = #passthrough } {
+  %0 = cir.alloca "agg.tmp" align(8) : !cir.ptr<!rec_Big>
+  cir.store %v, %0 : !rec_Big, !cir.ptr<!rec_Big>
+  %1 = cir.load %0 : !cir.ptr<!rec_Big>, !rec_Big
+  %r = cir.call @takes_big_byref(%1) : (!rec_Big) -> !rec_Big
+  cir.call @big_dtor(%0) : (!cir.ptr<!rec_Big>) -> ()
+  cir.return %r : !rec_Big
+}
+
+// CHECK:      cir.func{{.*}} @caller_byref_temp_with_dtor
+// CHECK:        %[[TMP:.*]] = cir.alloca "agg.tmp" align(8) : !cir.ptr<!rec_Big>
+// CHECK-NOT:    cir.alloca "byref"
+// CHECK:        %{{.*}} = cir.call @takes_big_byref(%[[TMP]]) :
+// CHECK-SAME:     llvm.byref = !rec_Big
+// CHECK:        cir.call @big_dtor(%[[TMP]]) :
 
 }
