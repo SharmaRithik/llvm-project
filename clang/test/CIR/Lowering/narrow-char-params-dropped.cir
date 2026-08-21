@@ -1,0 +1,15 @@
+// RUN: cir-opt --cir-to-llvm %s | FileCheck %s
+
+!u8i = !cir.int<u, 8>
+
+module attributes {cir.triple = "x86_64-unknown-linux-gnu", cir.size_type_width = 64 : i32} {
+  cir.func private @_ZSt4findIPhhET_S1_S1_RKT0_(!cir.ptr<!u8i>, !cir.ptr<!u8i>, !cir.ptr<!u8i>) -> !cir.ptr<!u8i>
+
+  cir.func @f(%arg0: !cir.ptr<!u8i>, %arg1: !cir.ptr<!u8i>, %arg2: !cir.ptr<!u8i>) -> !cir.ptr<!u8i> {
+    %0 = cir.call @_ZSt4findIPhhET_S1_S1_RKT0_(%arg0, %arg1, %arg2) {cir.narrow_char_params} : (!cir.ptr<!u8i>, !cir.ptr<!u8i>, !cir.ptr<!u8i>) -> !cir.ptr<!u8i>
+    cir.return %0 : !cir.ptr<!u8i>
+  }
+// CHECK-LABEL: @f
+// CHECK: llvm.call @_ZSt4findIPhhET_S1_S1_RKT0_
+// CHECK-NOT: cir.narrow_char_params
+}

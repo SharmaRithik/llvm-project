@@ -1578,8 +1578,9 @@ def CIR_FuncIdentityAttr : CIR_Attr<"FuncIdentity", "func_identity"> {
     function named `find` in the `std` namespace, so a member function, a
     static member, or an operator can never carry the tag. Inline
     namespaces, such as the versioning namespace of libc++, count as part
-    of `std`. The tag never encodes signatures, and a function that
-    matches no known entity carries no attribute.
+    of `std`. The `kind` parameter identifies the known standard library
+    entity and never encodes signatures. A function that matches no known
+    entity carries no attribute.
 
     Example:
     ```

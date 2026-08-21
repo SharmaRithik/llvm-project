@@ -1,0 +1,21 @@
+// RUN: cir-opt --cir-lib-opt %s -o - | FileCheck %s
+
+!u8i = !cir.int<u, 8>
+!s32i = !cir.int<s, 32>
+!u64i = !cir.int<u, 64>
+!voidptr = !cir.ptr<!cir.void>
+
+module attributes {cir.triple = "x86_64-unknown-linux-gnu",
+                   cir.int_type_width = 32 : i32, cir.size_type_width = 64 : i32} {
+  cir.func private @_ZSt4findIPhhET_S1_S1_RKT0_(!cir.ptr<!u8i>, !cir.ptr<!u8i>, !cir.ptr<!u8i>) -> !cir.ptr<!u8i> func_info<#cir.func_identity<"std::find">>
+
+  cir.func @memchr(%s: !voidptr, %p: !s32i, %n: !u64i) -> !voidptr {
+    %f = cir.cast bitcast %s : !voidptr -> !cir.ptr<!u8i>
+    %0 = cir.std.find(%f : !cir.ptr<!u8i>, %f : !cir.ptr<!u8i>, %f : !cir.ptr<!u8i>, @_ZSt4findIPhhET_S1_S1_RKT0_) -> !cir.ptr<!u8i> {cir.narrow_char_params}
+    %r = cir.cast bitcast %0 : !cir.ptr<!u8i> -> !voidptr
+    cir.return %r : !voidptr
+  }
+// CHECK-LABEL: @memchr
+// CHECK: cir.std.find
+// CHECK-NOT: cir.libc.memchr
+}
