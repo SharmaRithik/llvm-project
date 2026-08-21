@@ -74,10 +74,11 @@ namespace {
 // SysV x86_64 classifier, and converts the result back into the
 // dialect-agnostic mlir::abi::FunctionClassification that CIRABIRewriteContext
 // consumes.  Integer (including `_BitInt` up to 128 bits) / pointer / bool /
-// floating-point scalars are handled, as are struct / union / array aggregates,
-// `_Complex`, and a fixed-width vector whose width is a power of two.  Other
-// vectors, packed records, a padded record that holds data, a union no member
-// of which spans its declared size, and a union with an empty-record member are
+// floating-point scalars are handled, as are struct / union / array aggregates
+// (padded and packed structs included), `_Complex`, and a fixed-width vector
+// whose width is a power of two.  Other vectors, a padded or packed struct
+// holding a bitfield access unit, a packed union, a union no member of which
+// spans its declared size, and a union with an empty-record member are
 // reported NYI by classifyX86_64Function so an unsupported signature fails the
 // pass instead of being misclassified.
 //===----------------------------------------------------------------------===//
@@ -184,11 +185,14 @@ static bool isSupportedType(mlir::Type ty, const DataLayout &dl) {
   if (auto arrTy = dyn_cast<cir::ArrayType>(ty))
     return isSupportedType(arrTy.getElementType(), dl);
   if (auto recTy = dyn_cast<cir::RecordType>(ty)) {
-    // An incomplete record has no layout to classify, and a packed one needs
-    // pad-aware eightbyte classification this bridge does not implement.
-    if (!recTy.isComplete() || recTy.getPacked())
+    // An incomplete record has no layout to classify.
+    if (!recTy.isComplete())
       return false;
     if (recTy.isUnion()) {
+      // A packed union's reduce-to-one-member coercion under align-1 layout
+      // is untested; structs handle packed through per-member offsets.
+      if (recTy.getPacked())
+        return false;
       // The classifier sizes a union's eightbytes from the union itself, which
       // is only sound when some member spans that size.  Short of that, the
       // remaining bytes are either tail padding or the rest of a bitfield
@@ -216,10 +220,15 @@ static bool isSupportedType(mlir::Type ty, const DataLayout &dl) {
         if (llvm::any_of(members, unionMemberIsEmpty))
           return false;
       }
-    } else if (recTy.getPadded() && !recTy.isEmptyForABI()) {
-      // A pad member the classifier would have to tell apart from data is not
-      // implemented.  An empty record has no data to confuse it with.
-      return false;
+    } else if (recTy.getPacked() || recTy.getPadded()) {
+      // Pad members are skipped by the mapper and every remaining field
+      // carries its layout offset, so padded and packed structs classify
+      // like classic CodeGen.  A bitfield access unit is the exception: the
+      // CIR member has lost the declared bit width, and at an offset the
+      // unit's storage type could not sit at naturally, the classifier's
+      // bitfield rule needs that width to split eightbytes correctly.
+      if (llvm::any_of(recTy.getMemberKinds(), cir::isBitFieldAccessUnit))
+        return false;
     }
     return llvm::all_of(recTy.getMembers(),
                         [&](mlir::Type m) { return isSupportedType(m, dl); });
@@ -352,19 +361,22 @@ static const llvm::abi::Type *mapCIRType(mlir::Type type,
                                  llvm::abi::StructPacking::Default, flags);
         }
 
-        // An accepted non-empty struct is never padded, so every field here
-        // sits at its naturally-aligned offset.
-        uint64_t offsetBits = 0;
-        for (mlir::Type fieldTy : recTy.getMembers()) {
-          const llvm::abi::Type *mappedField =
-              mapCIRType(fieldTy, typeMapper, dl, modOp);
-          offsetBits =
-              llvm::alignTo(offsetBits, dl.getTypeABIAlignment(fieldTy) * 8);
-          fields.push_back(llvm::abi::FieldInfo(mappedField, offsetBits));
-          offsetBits += dl.getTypeSizeInBits(fieldTy).getFixedValue();
+        // A pad member is not a field: padding classifies as nothing, which
+        // is how classic CodeGen sees only the declared fields at their
+        // offsets.  The record layout supplies each remaining field's offset,
+        // so padded and packed structs need no special casing here.
+        llvm::ArrayRef<cir::RecordMemberKind> kinds = recTy.getMemberKinds();
+        for (auto [idx, fieldTy] : llvm::enumerate(recTy.getMembers())) {
+          if (kinds[idx] == cir::RecordMemberKind::Pad)
+            continue;
+          fields.push_back(
+              llvm::abi::FieldInfo(mapCIRType(fieldTy, typeMapper, dl, modOp),
+                                   recTy.getElementOffset(dl, idx) * 8));
         }
         return tb.getRecordType(
-            fields, sizeBits, align, llvm::abi::StructPacking::Default,
+            fields, sizeBits, align,
+            recTy.getPacked() ? llvm::abi::StructPacking::Packed
+                              : llvm::abi::StructPacking::Default,
             /*BaseClasses=*/{}, /*VirtualBaseClasses=*/{}, flags);
       })
       .Default([](mlir::Type) -> const llvm::abi::Type * {

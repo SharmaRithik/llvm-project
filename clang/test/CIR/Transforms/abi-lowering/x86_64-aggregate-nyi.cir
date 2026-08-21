@@ -10,18 +10,14 @@
 !rec_UByteBlobs = !cir.union<"UByteBlobs" {data !u8i, data !u8i}, padding = {!cir.array<!u8i x 3>}>
 !rec_SWrapsOverAligned = !cir.struct<"SWrapsOverAligned" {data !cir.double, data !rec_UOverAligned}>
 !rec_UEmptyLarge = !cir.union<"UEmptyLarge" {}, padding = {!cir.array<!u8i x 32>}>
-!rec_P = !cir.struct<"P" packed {data !s8i, data !s32i}>
-!rec_Ov = !cir.struct<"Ov" {data !s32i, pad !cir.array<!u8i x 12>}>
 !rec_E = !cir.struct<"E" {pad !u8i}>
 !rec_EOver = !cir.struct<"EOver" {pad !cir.array<!u8i x 16>}>
-!rec_PadByte = !cir.struct<"PadByte" {data !u8i, pad !cir.array<!u8i x 3>}>
-!rec_PadByte2 = !cir.struct<"PadByte2" {data !u8i, pad !u8i}>
 !rec_UPadByte = !cir.union<"UPadByte" {data !u8i}, padding = {!cir.array<!u8i x 3>}>
 !rec_UEmptyOnly = !cir.union<"UEmptyOnly" {data !rec_E}>
 !rec_UEmptyOver = !cir.union<"UEmptyOver" {data !rec_EOver, data !s32i}, padding = {!cir.array<!u8i x 12>}>
 !rec_UArrEmpty = !cir.union<"UArrEmpty" {data !cir.array<!rec_E x 2>, data !s8i}>
-!rec_S1 = !cir.struct<"S1" {data !s16i, data !s16i, data !s16i}>
-!rec_AtomicWrapper = !cir.struct<{data !rec_S1, pad !cir.array<!s8i x 2>}>
+!rec_PackedBits = !cir.struct<"PackedBits" packed {bitfield !u8i, data !s32i}>
+!rec_PaddedBits = !cir.struct<"PaddedBits" {bitfield !u8i, pad !cir.array<!u8i x 3>}>
 
 module attributes {
   dlti.dl_spec = #dlti.dl_spec<
@@ -31,8 +27,9 @@ module attributes {
     #dlti.dl_entry<f64, dense<64>: vector<2xi64>>>
 } {
 
-  // A packed union is rejected for the same reason a packed struct is: its
-  // members no longer sit at their natural alignment.
+  // A packed union stays rejected: its reduce-to-one-member coercion under
+  // align-1 layout is untested, and unlike a struct it has no per-member
+  // offsets the classifier could lean on instead.
   cir.func @take_packed_union(%arg0: !rec_UPacked) {
     cir.return
   }
@@ -87,36 +84,21 @@ module attributes {
 
   // CHECK: not yet implemented for type '!cir.union<"UEmptyLarge"
 
-  // A packed struct is rejected: it needs pad-aware classification.
-  cir.func @take_packed(%arg0: !rec_P) {
+  // A padded or packed struct holding a bitfield access unit is rejected: the
+  // CIR member no longer carries the declared bit width, which the
+  // classifier's bitfield rule needs once the unit can sit at an offset its
+  // storage type could not reach naturally.
+  cir.func @take_packed_bits(%arg0: !rec_PackedBits) {
     cir.return
   }
 
-  // CHECK: not yet implemented for type '!cir.struct<"P" packed
+  // CHECK: not yet implemented for type '!cir.struct<"PackedBits" packed
 
-  // A padded (over-aligned) struct is rejected: it needs pad-aware
-  // classification.
-  cir.func @take_padded(%arg0: !rec_Ov) {
+  cir.func @take_padded_bits(%arg0: !rec_PaddedBits) {
     cir.return
   }
 
-  // CHECK: not yet implemented for type '!cir.struct<"Ov" {data !cir.int<s, 32>, pad
-
-  // `struct { unsigned char c; } __attribute__((aligned(4)))` is padded
-  // throughout, but it carries data, so it stays rejected.
-  cir.func @take_padded_byte(%arg0: !rec_PadByte) {
-    cir.return
-  }
-
-  // CHECK: not yet implemented for type '!cir.struct<"PadByte" {data
-
-  // The same at `aligned(2)`, where the padding is a scalar rather than an
-  // array.
-  cir.func @take_padded_byte2(%arg0: !rec_PadByte2) {
-    cir.return
-  }
-
-  // CHECK: not yet implemented for type '!cir.struct<"PadByte2" {data
+  // CHECK: not yet implemented for type '!cir.struct<"PaddedBits" {bitfield
 
   // A union holds padding in a slot of its own, so its lone byte member is
   // data.  Rejected by the union rule (no member spans the declared size), not
@@ -148,15 +130,6 @@ module attributes {
   }
 
   // CHECK: not yet implemented for type '!cir.union<"UArrEmpty"
-
-  // CIRGen wraps an atomic whose value is narrower than its lock-free size in
-  // an anonymous record with a trailing pad member, which the padded check
-  // rejects for the same reason.
-  cir.func @take_atomic_wrapper(%arg0: !rec_AtomicWrapper) {
-    cir.return
-  }
-
-  // CHECK: not yet implemented for type '!cir.struct<{{.*}}pad !cir.array<!cir.int<s, 8> x 2>}>'
 
   // A scalable vector has no size the eightbyte rules can read.
   cir.func @take_scalable(%arg0: !cir.vector<[4] x !cir.float>) {
