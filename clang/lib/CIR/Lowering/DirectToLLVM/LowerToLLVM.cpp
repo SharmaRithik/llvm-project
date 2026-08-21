@@ -48,6 +48,7 @@
 #include "llvm/ADT/MapVector.h"
 #include "llvm/ADT/StringMap.h"
 #include "llvm/ADT/TypeSwitch.h"
+#include "llvm/Analysis/TargetLibraryInfo.h"
 #include "llvm/IR/Module.h"
 #include "llvm/Support/Casting.h"
 #include "llvm/Support/ErrorHandling.h"
@@ -5698,11 +5699,50 @@ mlir::LogicalResult CIRToLLVMMemChrOpLowering::matchAndRewrite(
   mlir::DictionaryAttr noundefDict = mlir::DictionaryAttr::get(
       rewriter.getContext(), llvm::ArrayRef(noundefAttr));
   SmallVector<mlir::Attribute> argAttrVec(3, noundefDict);
+  // Targets like PowerPC64 and SystemZ pass an int widened to a full
+  // register, so the i32 pattern argument needs the extension attribute
+  // classic CodeGen and BuildLibCalls put on it.  The predicate is the
+  // library's, so the target list cannot drift from what classic uses.
+  // A module with no recorded triple gets no extension attribute, since
+  // there is no target to require one.
+  auto tripleAttr = mlir::dyn_cast_if_present<mlir::StringAttr>(
+      op->getParentOfType<mlir::ModuleOp>()->getAttr(
+          cir::CIRDialect::getTripleAttrName()));
+  llvm::Attribute::AttrKind extKind =
+      tripleAttr ? llvm::TargetLibraryInfo::getExtAttrForI32Param(
+                       llvm::Triple(tripleAttr.getValue()), /*Signed=*/true)
+                 : llvm::Attribute::None;
+  if (extKind != llvm::Attribute::None) {
+    mlir::NamedAttribute extAttr = b.getNamedAttr(
+        extKind == llvm::Attribute::SExt ? "llvm.signext" : "llvm.zeroext",
+        b.getUnitAttr());
+    argAttrVec[1] = mlir::DictionaryAttr::get(
+        rewriter.getContext(), llvm::ArrayRef({noundefAttr, extAttr}));
+  }
   mlir::ArrayAttr argAttrs =
       mlir::ArrayAttr::get(rewriter.getContext(), argAttrVec);
 
   createLLVMFuncOpIfNotExist(rewriter, symbolTables, op, fnName, fnTy,
                              argAttrs);
+
+  // On a target that widens int arguments, a memchr declaration from the
+  // source carries no extension attribute yet, so merge it in to match the
+  // classic declaration.  At this point the symbol is either the still
+  // unconverted cir.func or an already lowered llvm.func, and both carry
+  // argument attributes through the function interface.
+  if (extKind != llvm::Attribute::None) {
+    auto fn = mlir::dyn_cast_if_present<mlir::FunctionOpInterface>(
+        symbolTables.lookupSymbolIn(
+            op->getParentOfType<mlir::ModuleOp>(),
+            mlir::StringAttr::get(rewriter.getContext(), fnName)));
+    if (fn && fn.isExternal() && fn.getNumArguments() == 3)
+      rewriter.modifyOpInPlace(fn, [&] {
+        fn.setArgAttr(1,
+                      extKind == llvm::Attribute::SExt ? "llvm.signext"
+                                                       : "llvm.zeroext",
+                      b.getUnitAttr());
+      });
+  }
 
   mlir::LLVM::CallOp newCall = rewriter.replaceOpWithNewOp<mlir::LLVM::CallOp>(
       op, mlir::TypeRange{llvmPtrTy}, fnName,
