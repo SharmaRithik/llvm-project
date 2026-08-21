@@ -4131,6 +4131,19 @@ OpFoldResult RotateOp::fold(FoldAdaptor adaptor) {
 // InlineAsmOp
 //===----------------------------------------------------------------------===//
 
+void cir::InlineAsmOp::getEffects(
+    llvm::SmallVectorImpl<mlir::MemoryEffects::EffectInstance> &effects) {
+  // Inline asm can touch memory through an indirect operand or a clobber
+  // whatever its flags say, and LLVM never deletes an inline asm call even
+  // without the sideeffect flag, so report a read and a write on unknown
+  // state unconditionally.  This also fences register only asm off from
+  // memory optimization, which effects alone cannot avoid: an op the
+  // interface calls pure is deletable, and there is no way to say kept but
+  // memory inert.
+  effects.emplace_back(mlir::MemoryEffects::Read::get());
+  effects.emplace_back(mlir::MemoryEffects::Write::get());
+}
+
 void cir::InlineAsmOp::print(OpAsmPrinter &p) {
   p << '(' << getAsmFlavor() << ", ";
   p.increaseIndent();
