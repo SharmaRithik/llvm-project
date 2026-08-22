@@ -506,11 +506,6 @@ static std::optional<ArgClassification>
 convertABIArgInfo(const llvm::abi::ArgInfo &info, MLIRContext *ctx,
                   mlir::Type origTy) {
   if (info.isDirect()) {
-    // The rewriter reads a coercion from the start of the value's storage, so a
-    // classification naming an offset into it has no representation here.  The
-    // classifier names one when the low eightbyte holds no field.
-    if (info.getDirectOffset())
-      return std::nullopt;
     // The classifier names a coerce type even where it matches the natural
     // type, so a non-null coerce does not by itself mean a rewrite is needed.
     const llvm::abi::Type *coerceAbi = info.getCoerceToType();
@@ -529,20 +524,23 @@ convertABIArgInfo(const llvm::abi::ArgInfo &info, MLIRContext *ctx,
     bool coerceWidensScalar =
         origInt && coerceInt &&
         coerceInt->getSizeInBits().getFixedValue() > origInt.getWidth();
+    // A nonzero offset means only part of the original occupies registers,
+    // which always needs the coerced path regardless of the type shapes.
+    uint64_t directOffset = info.getDirectOffset();
     // Leaving the rest alone also avoids a lossy round trip: abiTypeToCIR
     // drops the LongDoubleType wrapper and a pointer's pointee, so comparing a
     // scalar against its own coerce would report a difference that is not one.
     if (!isAggregate && !comparesAgainstCoerce && !coerceIsRegisterTuple &&
-        !coerceWidensScalar)
+        !coerceWidensScalar && directOffset == 0)
       return ArgClassification::getDirect(nullptr);
     mlir::Type coerced = abiTypeToCIR(coerceAbi, ctx);
     if (!coerced)
       return std::nullopt;
     // Coercing a value to the type it already has would add a memory round
     // trip for nothing.
-    if (comparesAgainstCoerce && coerced == origTy)
+    if (comparesAgainstCoerce && coerced == origTy && directOffset == 0)
       return ArgClassification::getDirect(nullptr);
-    return ArgClassification::getDirect(coerced);
+    return ArgClassification::getDirect(coerced, directOffset);
   }
   if (info.isExtend()) {
     if (isa_and_present<cir::BoolType>(origTy))
