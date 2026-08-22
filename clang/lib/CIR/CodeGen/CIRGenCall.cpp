@@ -375,12 +375,15 @@ void CIRGenModule::constructAttributeList(
         if ((kind == cir::KnownFuncKind::StdFind &&
              hasNarrowCharParams(func)) ||
             (kind == cir::KnownFuncKind::StdRangesFind &&
-             hasNarrowCharRangesFindParams(func)))
+             hasNarrowCharRangesFindParams(func))) {
           addUnitAttr(cir::CIRDialect::getNarrowCharParamsAttrName());
-        else if ((kind == cir::KnownFuncKind::StdFindIf ||
-                  kind == cir::KnownFuncKind::StdFindIfNot) &&
-                 hasByteEqPredicate(func, *kind))
-          addUnitAttr(cir::CIRDialect::getByteEqPredAttrName());
+        } else if (kind == cir::KnownFuncKind::StdFindIf ||
+                   kind == cir::KnownFuncKind::StdFindIfNot) {
+          if (hasByteEqPredicate(func, *kind))
+            addUnitAttr(cir::CIRDialect::getByteEqPredAttrName());
+          else if (cir::IntAttr value = getByteEqPredicateValue(func, *kind))
+            attrs.set(cir::CIRDialect::getByteEqPredValueAttrName(), value);
+        }
       }
 
       // TODO(cir): When doing 'return attrs' we need to cover the 'NoAlias' for

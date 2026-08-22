@@ -421,9 +421,12 @@ module attributes {cir.triple = "x86_64-unknown-linux-gnu",
 // -----
 
 !u8i = !cir.int<u, 8>
+!s8i = !cir.int<s, 8>
+!s32i = !cir.int<s, 32>
 !byval_closure = !cir.struct<class "byval_closure" {data !u8i}>
 !byref_closure = !cir.struct<class "byref_closure" {data !cir.ptr<!u8i>}>
 !fat_closure = !cir.struct<class "fat_closure" {data !cir.ptr<!u8i>, data !u8i}>
+!empty_closure = !cir.struct<class "empty_closure" {}>
 
 module attributes {cir.triple = "x86_64-unknown-linux-gnu",
                    cir.int_type_width = 32 : i32, cir.size_type_width = 64 : i32} {
@@ -458,6 +461,40 @@ module attributes {cir.triple = "x86_64-unknown-linux-gnu",
 // CHECK-LABEL: @rewrites_find_if_not
 // CHECK: cir.libc.memchr
 // CHECK-NOT: cir.std.find_if_not
+  cir.func @rewrites_literal_value(%first: !cir.ptr<!u8i>, %last: !cir.ptr<!u8i>, %pred: !empty_closure) -> !cir.ptr<!u8i> {
+    %0 = cir.std.find_if(%first : !cir.ptr<!u8i>, %last : !cir.ptr<!u8i>, %pred : !empty_closure, @_ZSt7find_ifIPh1AET_S1_S1_T0_) -> !cir.ptr<!u8i> {cir.byte_eq_pred_value = #cir.int<128> : !u8i}
+    cir.return %0 : !cir.ptr<!u8i>
+  }
+// CHECK-LABEL: @rewrites_literal_value
+// CHECK-NOT: cir.extract_member
+// CHECK: %[[LITERAL_BYTE:.*]] = cir.const #cir.int<128> : !u8i
+// CHECK: %[[LITERAL_PATTERN:.*]] = cir.cast integral %[[LITERAL_BYTE]] : !u8i -> !s32i
+// CHECK: cir.libc.memchr(%{{.*}}, %[[LITERAL_PATTERN]], %{{.*}})
+// CHECK-NOT: cir.std.find_if
+
+  cir.func @keeps_memberless_closure(%first: !cir.ptr<!u8i>, %last: !cir.ptr<!u8i>, %pred: !empty_closure) -> !cir.ptr<!u8i> {
+    %0 = cir.std.find_if(%first : !cir.ptr<!u8i>, %last : !cir.ptr<!u8i>, %pred : !empty_closure, @_ZSt7find_ifIPh1AET_S1_S1_T0_) -> !cir.ptr<!u8i>
+    cir.return %0 : !cir.ptr<!u8i>
+  }
+// CHECK-LABEL: @keeps_memberless_closure
+// CHECK: cir.std.find_if
+// CHECK-NOT: cir.libc.memchr
+
+  cir.func @keeps_mismatched_value_type(%first: !cir.ptr<!u8i>, %last: !cir.ptr<!u8i>, %pred: !empty_closure) -> !cir.ptr<!u8i> {
+    %0 = cir.std.find_if(%first : !cir.ptr<!u8i>, %last : !cir.ptr<!u8i>, %pred : !empty_closure, @_ZSt7find_ifIPh1AET_S1_S1_T0_) -> !cir.ptr<!u8i> {cir.byte_eq_pred_value = #cir.int<120> : !s8i}
+    cir.return %0 : !cir.ptr<!u8i>
+  }
+// CHECK-LABEL: @keeps_mismatched_value_type
+// CHECK: cir.std.find_if
+// CHECK-NOT: cir.libc.memchr
+
+  cir.func @keeps_wide_value_type(%first: !cir.ptr<!u8i>, %last: !cir.ptr<!u8i>, %pred: !empty_closure) -> !cir.ptr<!u8i> {
+    %0 = cir.std.find_if(%first : !cir.ptr<!u8i>, %last : !cir.ptr<!u8i>, %pred : !empty_closure, @_ZSt7find_ifIPh1AET_S1_S1_T0_) -> !cir.ptr<!u8i> {cir.byte_eq_pred_value = #cir.int<120> : !s32i}
+    cir.return %0 : !cir.ptr<!u8i>
+  }
+// CHECK-LABEL: @keeps_wide_value_type
+// CHECK: cir.std.find_if
+// CHECK-NOT: cir.libc.memchr
 
   cir.func @keeps_unmarked_predicate(%first: !cir.ptr<!u8i>, %last: !cir.ptr<!u8i>, %pred: !byval_closure) -> !cir.ptr<!u8i> {
     %0 = cir.std.find_if(%first : !cir.ptr<!u8i>, %last : !cir.ptr<!u8i>, %pred : !byval_closure, @_ZSt7find_ifIPh1AET_S1_S1_T0_) -> !cir.ptr<!u8i>

@@ -836,6 +836,13 @@ public:
   static bool hasByteEqPredicate(const clang::FunctionDecl *funcDecl,
                                  cir::KnownFuncKind kind);
 
+  /// The typed constant a capture-free lambda compares the element
+  /// against, with == for find_if and != for find_if_not, when the value
+  /// is representable in the element's narrow character type. Null when
+  /// the predicate does not have that shape.
+  cir::IntAttr getByteEqPredicateValue(const clang::FunctionDecl *funcDecl,
+                                       cir::KnownFuncKind kind);
+
   cir::FuncOp createRuntimeFunction(cir::FuncType ty, llvm::StringRef name,
                                     mlir::NamedAttrList extraAttrs = {},
                                     bool isLocal = false,

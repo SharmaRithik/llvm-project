@@ -2163,9 +2163,10 @@ static void lowerCallAttributes(cir::CIRCallOpInterface op,
         attr.getName() == CIRDialect::getNoUnwindAttrName() ||
         attr.getName() == CIRDialect::getNoReturnAttrName() ||
         attr.getName() == op.getInlineKindAttrName() ||
-        // A marker the CIR rewrites read has no meaning past this point.
+        // Facts the CIR rewrites read have no meaning past this point.
         attr.getName() == CIRDialect::getNarrowCharParamsAttrName() ||
         attr.getName() == CIRDialect::getByteEqPredAttrName() ||
+        attr.getName() == CIRDialect::getByteEqPredValueAttrName() ||
         attr.getName() == CIRDialect::getMustTailAttrName())
       continue;
 

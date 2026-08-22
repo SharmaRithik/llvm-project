@@ -3909,24 +3909,97 @@ bool CIRGenModule::hasNarrowCharRangesFindParams(const FunctionDecl *funcDecl) {
          projRec->getName() == "identity";
 }
 
-bool CIRGenModule::hasByteEqPredicate(const FunctionDecl *funcDecl,
-                                      cir::KnownFuncKind kind) {
+namespace {
+// The shared shape of a byte equality predicate: the function takes a
+// narrow character iterator pair and a lambda whose body is a lone return
+// of a builtin comparison of its element parameter, == for find_if and !=
+// for find_if_not, in either operand order. The callers classify `other`,
+// the side opposite the element, as the single capture or a constant.
+struct ByteEqPredicateShape {
+  const clang::CXXRecordDecl *closure;
+  clang::QualType charTy;
+  const clang::Expr *other;
+};
+} // namespace
+
+/// Whether `side` is a direct reference to `decl`, looking through the
+/// implicit conversions a comparison wraps around it.
+static bool refersToDecl(const Expr *side, const ValueDecl *decl) {
+  const auto *ref = dyn_cast<DeclRefExpr>(side->IgnoreParenImpCasts());
+  return ref && ref->getDecl()->getCanonicalDecl() == decl->getCanonicalDecl();
+}
+
+static std::optional<ByteEqPredicateShape>
+byteEqPredicateShape(const FunctionDecl *funcDecl, cir::KnownFuncKind kind) {
   if (funcDecl->getNumParams() != 3)
-    return false;
+    return std::nullopt;
 
   clang::QualType charTy = narrowCharPointee(funcDecl->getParamDecl(0));
   if (charTy.isNull() || narrowCharPointee(funcDecl->getParamDecl(1)) != charTy)
-    return false;
+    return std::nullopt;
 
-  // The predicate has to be a lambda with a single capture of that same
-  // character type. A single comparison against it cannot observe anything
-  // the search would change, since neither the search nor the comparison
-  // writes, so a by-reference capture is as loop invariant as a copy.
   const CXXRecordDecl *closure =
       funcDecl->getParamDecl(2)->getType()->getAsCXXRecordDecl();
-  if (!closure || !closure->isLambda() || closure->capture_size() != 1)
+  if (!closure || !closure->isLambda())
+    return std::nullopt;
+
+  const CXXMethodDecl *callOp = closure->getLambdaCallOperator();
+  if (!callOp || callOp->getNumParams() != 1)
+    return std::nullopt;
+  const ParmVarDecl *element = callOp->getParamDecl(0);
+  // A generic lambda leaves the parameter dependent here, and the call
+  // shape instantiates it to the character the iterators designate, so the
+  // element side of the comparison is that narrow character either way. A
+  // concrete parameter has to be that character already, by value or by
+  // const reference.
+  clang::QualType elementTy = element->getType();
+  if (!elementTy->isDependentType()) {
+    if (elementTy.getNonReferenceType().isVolatileQualified())
+      return std::nullopt;
+    if (elementTy.getNonReferenceType()
+            .getCanonicalType()
+            .getUnqualifiedType() != charTy)
+      return std::nullopt;
+  }
+
+  // The body has to be a lone return of a comparison with the element on
+  // one side, == for find_if or != for find_if_not. Both make the search
+  // stop at the first equal byte.
+  const auto *body = dyn_cast_if_present<CompoundStmt>(callOp->getBody());
+  if (!body || body->size() != 1)
+    return std::nullopt;
+  const auto *ret = dyn_cast<ReturnStmt>(body->body_front());
+  if (!ret || !ret->getRetValue())
+    return std::nullopt;
+  const auto *cmp =
+      dyn_cast<BinaryOperator>(ret->getRetValue()->IgnoreParenImpCasts());
+  clang::BinaryOperatorKind wanted =
+      kind == cir::KnownFuncKind::StdFindIf ? BO_EQ : BO_NE;
+  if (!cmp || cmp->getOpcode() != wanted)
+    return std::nullopt;
+
+  const Expr *other = nullptr;
+  if (refersToDecl(cmp->getLHS(), element))
+    other = cmp->getRHS();
+  else if (refersToDecl(cmp->getRHS(), element))
+    other = cmp->getLHS();
+  else
+    return std::nullopt;
+  return ByteEqPredicateShape{closure, charTy, other};
+}
+
+bool CIRGenModule::hasByteEqPredicate(const FunctionDecl *funcDecl,
+                                      cir::KnownFuncKind kind) {
+  std::optional<ByteEqPredicateShape> shape =
+      byteEqPredicateShape(funcDecl, kind);
+  // The lambda has to hold a single capture of the element's character
+  // type, compared against the element. A single comparison against it
+  // cannot observe anything the search would change, since neither the
+  // search nor the comparison writes, so a by-reference capture is as loop
+  // invariant as a copy.
+  if (!shape || shape->closure->capture_size() != 1)
     return false;
-  const LambdaCapture &capture = *closure->captures().begin();
+  const LambdaCapture &capture = *shape->closure->captures().begin();
   if (!capture.capturesVariable())
     return false;
   // The captured variable may itself be a reference, as when the value
@@ -3934,53 +4007,40 @@ bool CIRGenModule::hasByteEqPredicate(const FunctionDecl *funcDecl,
   const ValueDecl *capturedVar = capture.getCapturedVar();
   clang::QualType capturedTy = capturedVar->getType().getNonReferenceType();
   if (capturedTy.isVolatileQualified() ||
-      capturedTy.getCanonicalType().getUnqualifiedType() != charTy)
+      capturedTy.getCanonicalType().getUnqualifiedType() != shape->charTy)
     return false;
+  return refersToDecl(shape->other, capturedVar);
+}
 
-  const CXXMethodDecl *callOp = closure->getLambdaCallOperator();
-  if (!callOp || callOp->getNumParams() != 1)
-    return false;
-  const ParmVarDecl *element = callOp->getParamDecl(0);
-  // A generic lambda leaves the parameter dependent here, and the call shape
-  // instantiates it to the character the iterators designate, so both
-  // comparison sides are the same narrow character and the comparison is
-  // the builtin one, since no operator== can take two builtin characters.
-  // A concrete parameter has to be that character already, by value or by
-  // const reference, so both sides promote identically.
-  clang::QualType elementTy = element->getType();
-  if (!elementTy->isDependentType()) {
-    if (elementTy.getNonReferenceType().isVolatileQualified())
-      return false;
-    if (elementTy.getNonReferenceType()
-            .getCanonicalType()
-            .getUnqualifiedType() != charTy)
-      return false;
-  }
+cir::IntAttr CIRGenModule::getByteEqPredicateValue(const FunctionDecl *funcDecl,
+                                                   cir::KnownFuncKind kind) {
+  std::optional<ByteEqPredicateShape> shape =
+      byteEqPredicateShape(funcDecl, kind);
+  // A capture-free lambda can only compare the element against a constant.
+  // The constant side may be any integer type, since soundness comes from
+  // the representability check and the normalization to the element's
+  // character type below, not from the operand types matching.
+  if (!shape || shape->closure->capture_size() != 0)
+    return {};
 
-  // The body has to be a lone return of element == capture for find_if, or
-  // element != capture for find_if_not, in either operand order. Both make
-  // the search stop at the first equal byte.
-  const auto *body = dyn_cast_if_present<CompoundStmt>(callOp->getBody());
-  if (!body || body->size() != 1)
-    return false;
-  const auto *ret = dyn_cast<ReturnStmt>(body->body_front());
-  if (!ret || !ret->getRetValue())
-    return false;
-  const auto *cmp =
-      dyn_cast<BinaryOperator>(ret->getRetValue()->IgnoreParenImpCasts());
-  clang::BinaryOperatorKind wanted =
-      kind == cir::KnownFuncKind::StdFindIf ? BO_EQ : BO_NE;
-  if (!cmp || cmp->getOpcode() != wanted)
-    return false;
-  auto refersTo = [](const Expr *side, const ValueDecl *decl) {
-    const auto *ref = dyn_cast<DeclRefExpr>(side->IgnoreParenImpCasts());
-    return ref &&
-           ref->getDecl()->getCanonicalDecl() == decl->getCanonicalDecl();
-  };
-  return (refersTo(cmp->getLHS(), element) &&
-          refersTo(cmp->getRHS(), capturedVar)) ||
-         (refersTo(cmp->getLHS(), capturedVar) &&
-          refersTo(cmp->getRHS(), element));
+  ASTContext &ctx = funcDecl->getASTContext();
+  clang::QualType charTy = shape->charTy;
+  std::optional<llvm::APSInt> value = shape->other->getIntegerConstantExpr(ctx);
+  // isRepresentableIntegerValue accepts a negative value for an unsigned
+  // type by bit width, but the source comparison happens at int, where a
+  // negative constant never equals an unsigned character, so it has to
+  // decline rather than record the wrapped byte.
+  if (!value || (value->isNegative() && charTy->isUnsignedIntegerType()) ||
+      !ctx.isRepresentableIntegerValue(*value, charTy))
+    return {};
+
+  unsigned width = ctx.getIntWidth(charTy);
+  bool isUnsigned = charTy->isUnsignedIntegerType();
+  llvm::APInt bits =
+      isUnsigned ? value->zextOrTrunc(width) : value->sextOrTrunc(width);
+  mlir::Type valueTy = isUnsigned ? mlir::Type(builder.getUIntNTy(width))
+                                  : mlir::Type(builder.getSIntNTy(width));
+  return cir::IntAttr::get(valueTy, llvm::APSInt(bits, isUnsigned));
 }
 
 static void setWindowsItaniumDLLImport(CIRGenModule &cgm, bool isLocal,

@@ -55,6 +55,11 @@ def CIR_Dialect : Dialect {
     static llvm::StringRef getByteEqPredAttrName() {
       return "cir.byte_eq_pred";
     }
+    // The capture-free variant of the marker above, carrying the compared
+    // constant as a typed value.
+    static llvm::StringRef getByteEqPredValueAttrName() {
+      return "cir.byte_eq_pred_value";
+    }
     static llvm::StringRef getOptInfoAttrName() { return "cir.opt_info"; }
     static llvm::StringRef getCalleeAttrName() { return "callee"; }
     static llvm::StringRef getNoThrowAttrName() { return "nothrow"; }
