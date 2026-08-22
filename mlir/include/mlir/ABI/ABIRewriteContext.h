@@ -72,6 +72,12 @@ struct ArgClassification {
   /// individual register-width arguments.
   bool canFlatten = true;
 
+  /// For Direct: byte offset of the coerced value within the original
+  /// value's memory.  Nonzero when only part of the original occupies
+  /// registers, such as an x86_64 aggregate whose low eightbyte holds no
+  /// data and whose high eightbyte passes as one integer at offset eight.
+  uint64_t directOffset = 0;
+
   /// For Indirect: whether the callee gets ownership (byval).
   bool byVal = false;
 
@@ -87,13 +93,15 @@ struct ArgClassification {
     return kind == other.kind && coercedType == other.coercedType &&
            indirectAlign == other.indirectAlign &&
            signExtend == other.signExtend && canFlatten == other.canFlatten &&
-           byVal == other.byVal;
+           byVal == other.byVal && directOffset == other.directOffset;
   }
 
-  static ArgClassification getDirect(Type coerced = nullptr) {
+  static ArgClassification getDirect(Type coerced = nullptr,
+                                     uint64_t offset = 0) {
     ArgClassification c;
     c.kind = ArgKind::Direct;
     c.coercedType = coerced;
+    c.directOffset = offset;
     return c;
   }
 

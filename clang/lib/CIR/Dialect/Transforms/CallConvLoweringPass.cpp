@@ -432,20 +432,23 @@ convertABIArgInfo(const llvm::abi::ArgInfo &info, MLIRContext *ctx,
     bool coerceWidensScalar =
         origInt && coerceInt &&
         coerceInt->getSizeInBits().getFixedValue() > origInt.getWidth();
+    // A nonzero offset means only part of the original occupies registers,
+    // which always needs the coerced path regardless of the type shapes.
+    uint64_t directOffset = info.getDirectOffset();
     // Leaving the rest alone also avoids a lossy round trip: abiTypeToCIR
     // drops the LongDoubleType wrapper and a pointer's pointee, so comparing a
     // scalar against its own coerce would report a difference that is not one.
     if (!isAggregate && !comparesAgainstCoerce && !coerceIsRegisterTuple &&
-        !coerceWidensScalar)
+        !coerceWidensScalar && directOffset == 0)
       return ArgClassification::getDirect(nullptr);
     mlir::Type coerced = abiTypeToCIR(coerceAbi, ctx);
     if (!coerced)
       return std::nullopt;
     // Coercing a value to the type it already has would add a memory round
     // trip for nothing.
-    if (comparesAgainstCoerce && coerced == origTy)
+    if (comparesAgainstCoerce && coerced == origTy && directOffset == 0)
       return ArgClassification::getDirect(nullptr);
-    return ArgClassification::getDirect(coerced);
+    return ArgClassification::getDirect(coerced, directOffset);
   }
   if (info.isExtend()) {
     if (isa_and_present<cir::BoolType>(origTy))
