@@ -97,10 +97,19 @@ static void rewriteFindLikeToMemchr(OpT findOp,
   if (!iterTy || iterTy.getAddrSpace())
     return;
   auto elemTy = mlir::dyn_cast<cir::IntType>(iterTy.getPointee());
-  if (!elemTy || elemTy.getWidth() != 8)
+  if (!elemTy)
     return;
-  // The byte to search for arrives behind the by-reference pattern for find.
-  // A predicate either holds it in its single capture, by value or through a
+  // A wider element rewrites to wmemchr, which only the plain find form
+  // licenses since the predicate and ranges proofs are byte facts. The
+  // recorded wchar_t width check below rejects every width that is not
+  // the target's wide character.
+  constexpr bool plainFind = std::is_same_v<OpT, StdFindOp>;
+  const bool wide = elemTy.getWidth() != 8;
+  if (wide && !plainFind)
+    return;
+  const llvm::StringRef libcallName = wide ? "wmemchr" : "memchr";
+  // The sought element arrives behind the pattern reference for find. A
+  // predicate either holds it in its single capture, by value or through a
   // reference, or carries it in the typed value attribute.
   bool captureByRef = false;
   cir::IntAttr predicateValue;
@@ -167,8 +176,8 @@ static void rewriteFindLikeToMemchr(OpT findOp,
 
   // No builtin state rides on the raised call and on the enclosing function.
   // A global initializer has no function to carry the list.
-  if (isNoBuiltin(findOp, "memchr") ||
-      (enclosing && noBuiltinListDisables(enclosing, "memchr")))
+  if (isNoBuiltin(findOp, libcallName) ||
+      (enclosing && noBuiltinListDisables(enclosing, libcallName)))
     return;
 
   // Only the CIRGen facts license the rewrite, since an enum or atomic element
@@ -179,7 +188,8 @@ static void rewriteFindLikeToMemchr(OpT findOp,
                                cir::CIRDialect::getByteEqPredAttrName()))
       return;
   } else if (!findOp->template getAttrOfType<mlir::UnitAttr>(
-                 cir::CIRDialect::getNarrowCharParamsAttrName())) {
+                 wide ? cir::CIRDialect::getWideCharParamsAttrName()
+                      : cir::CIRDialect::getNarrowCharParamsAttrName())) {
     return;
   }
 
@@ -196,35 +206,53 @@ static void rewriteFindLikeToMemchr(OpT findOp,
       cir::CIRDialect::getTripleAttrName());
   if (!tripleAttr)
     return;
-  llvm::TargetLibraryInfoImpl tliImpl(
-      llvm::Triple(tripleAttr.getValue().str()));
-  if (!llvm::TargetLibraryInfo(tliImpl).has(llvm::LibFunc_memchr))
+  llvm::Triple triple(tripleAttr.getValue().str());
+  llvm::TargetLibraryInfoImpl tliImpl(triple);
+  if (!llvm::TargetLibraryInfo(tliImpl).has(wide ? llvm::LibFunc_wmemchr
+                                                 : llvm::LibFunc_memchr))
     return;
 
-  // The introduced operands take the int and size_t widths the module
-  // records, which is what the cir.libc.memchr verifier checks them against.
-  std::optional<unsigned> intWidth = cir::getRecordedIntegerWidth(
-      moduleOp, cir::CIRDialect::getIntTypeWidthAttrName());
+  // The introduced operands take the widths the module records, which is
+  // what the introduced operation's verifier checks them against: int and
+  // size_t for memchr, wchar_t and size_t for wmemchr. An element that is
+  // not the target's wide character has no libcall and declines here.
+  std::optional<unsigned> patternWidth = cir::getRecordedIntegerWidth(
+      moduleOp, wide ? cir::CIRDialect::getWCharTypeWidthAttrName()
+                     : cir::CIRDialect::getIntTypeWidthAttrName());
   std::optional<unsigned> sizeWidth = cir::getRecordedIntegerWidth(
       moduleOp, cir::CIRDialect::getSizeTypeWidthAttrName());
-  if (!intWidth || !sizeWidth)
+  if (!patternWidth || !sizeWidth)
+    return;
+  // A program built with a nonstandard wchar_t width still links the C
+  // library selected by the triple, and that library's wmemchr walks the
+  // default width.
+  if (wide && *patternWidth != triple.getDefaultWCharSize() * 8)
+    return;
+  // Hand written IR can claim the wide character marker while using an
+  // element whose width disagrees with the recorded width.
+  if (wide && *patternWidth != elemTy.getWidth())
     return;
 
-  // A libc that implements memchr with std::find would call itself forever.
-  if (enclosing && enclosing.getName() == "memchr")
+  // A libc that implements the search with std::find would call itself
+  // forever.
+  if (enclosing && enclosing.getName() == libcallName)
     return;
 
   CIRBaseBuilderTy builder(*findOp.getContext());
 
   if (mlir::Operation *existing = symbolTables.lookupSymbolIn(
-          moduleOp, mlir::StringAttr::get(findOp.getContext(), "memchr"))) {
+          moduleOp, mlir::StringAttr::get(findOp.getContext(), libcallName))) {
     auto existingFn = mlir::dyn_cast<cir::FuncOp>(existing);
     if (!existingFn)
       return;
-    auto libcallTy = cir::FuncType::get({builder.getVoidPtrTy(),
-                                         builder.getSIntNTy(*intWidth),
-                                         builder.getUIntNTy(*sizeWidth)},
-                                        builder.getVoidPtrTy());
+    auto libcallTy =
+        wide ? cir::FuncType::get({mlir::Type(iterTy), mlir::Type(elemTy),
+                                   builder.getUIntNTy(*sizeWidth)},
+                                  iterTy)
+             : cir::FuncType::get({builder.getVoidPtrTy(),
+                                   builder.getSIntNTy(*patternWidth),
+                                   builder.getUIntNTy(*sizeWidth)},
+                                  builder.getVoidPtrTy());
     // An alias forwards to some other symbol, so a matching prototype says
     // nothing about what the call would reach.
     if (existingFn.getAliasee() || existingFn.getFunctionType() != libcallTy ||
@@ -270,28 +298,35 @@ static void rewriteFindLikeToMemchr(OpT findOp,
             builder.createYield(loc, last);
           },
           [&](mlir::OpBuilder &, mlir::Location) {
-            mlir::Value src =
-                builder.createBitcast(loc, first, builder.getVoidPtrTy());
-            mlir::Value byte;
+            mlir::Value sought;
             if constexpr (predOp) {
               if (predicateValue) {
-                byte = builder.getConstant(loc, predicateValue);
+                sought = builder.getConstant(loc, predicateValue);
               } else {
-                byte = cir::ExtractMemberOp::create(builder, loc,
-                                                    findOp.getPred(), 0);
+                sought = cir::ExtractMemberOp::create(builder, loc,
+                                                      findOp.getPred(), 0);
                 if (captureByRef)
-                  byte = builder.createLoad(loc, byte);
+                  sought = builder.createLoad(loc, sought);
               }
             } else {
-              byte = builder.createLoad(loc, findOp.getPattern());
+              sought = builder.createLoad(loc, findOp.getPattern());
             }
-            mlir::Value pattern =
-                builder.createIntCast(byte, builder.getSIntNTy(*intWidth));
             mlir::Value len = cir::PtrDiffOp::create(
                 builder, loc, builder.getUIntNTy(*sizeWidth), last, first);
-            mlir::Value res =
-                cir::MemChrOp::create(builder, loc, src, pattern, len);
-            res = builder.createBitcast(loc, res, iterTy);
+            mlir::Value res;
+            if (wide) {
+              // wmemchr takes and returns the wide type itself, so nothing
+              // is widened or cast at the boundary and len counts wide
+              // characters, which is what ptr_diff yields.
+              res = cir::WMemChrOp::create(builder, loc, first, sought, len);
+            } else {
+              mlir::Value src =
+                  builder.createBitcast(loc, first, builder.getVoidPtrTy());
+              mlir::Value pattern = builder.createIntCast(
+                  sought, builder.getSIntNTy(*patternWidth));
+              res = cir::MemChrOp::create(builder, loc, src, pattern, len);
+              res = builder.createBitcast(loc, res, iterTy);
+            }
             builder.createYield(
                 loc, builder.createSelect(loc, builder.createPtrIsNull(res),
                                           last, res));

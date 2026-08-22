@@ -141,6 +141,8 @@ CIRGenModule::CIRGenModule(mlir::MLIRContext &mlirContext,
                      builder.getI32IntegerAttr(sizeTypeSize));
   theModule->setAttr(cir::CIRDialect::getIntTypeWidthAttrName(),
                      builder.getI32IntegerAttr(target.getIntWidth()));
+  theModule->setAttr(cir::CIRDialect::getWCharTypeWidthAttrName(),
+                     builder.getI32IntegerAttr(target.getWCharWidth()));
 
   if (cgo.OptimizationLevel > 0 || cgo.OptimizeSize > 0)
     theModule->setAttr(cir::CIRDialect::getOptInfoAttrName(),
@@ -3876,17 +3878,44 @@ static clang::QualType narrowCharPointee(const ParmVarDecl *param) {
   return pointee.getCanonicalType().getUnqualifiedType();
 }
 
-bool CIRGenModule::hasNarrowCharParams(const FunctionDecl *funcDecl) {
+/// Like narrowCharPointee for the target's wchar_t: the pointee behind a
+/// pointer or std contiguous iterator parameter when it is non-volatile
+/// wchar_t, and a null type otherwise. Other wide characters have no libc
+/// search function, so only wchar_t counts.
+static clang::QualType wideCharPointee(const ParmVarDecl *param) {
+  clang::QualType pointee = param->getType()->getPointeeType();
+  if (pointee.isNull())
+    pointee = stdContiguousIteratorPointee(param->getType());
+  if (pointee.isNull() || pointee.isVolatileQualified() ||
+      !pointee->isWideCharType())
+    return {};
+  return pointee.getCanonicalType().getUnqualifiedType();
+}
+
+static bool hasCharacterParams(
+    const FunctionDecl *funcDecl,
+    llvm::function_ref<clang::QualType(const clang::ParmVarDecl *)>
+        classifyPointee) {
   clang::QualType firstPointee;
   return !funcDecl->parameters().empty() &&
          llvm::all_of(funcDecl->parameters(), [&](const ParmVarDecl *param) {
-           clang::QualType pointee = narrowCharPointee(param);
+           clang::QualType pointee = classifyPointee(param);
            if (pointee.isNull())
              return false;
            if (firstPointee.isNull())
              firstPointee = pointee;
+           // This check only distinguishes the narrow character flavors
+           // since each target has one wchar_t type.
            return pointee == firstPointee;
          });
+}
+
+bool CIRGenModule::hasWideCharParams(const FunctionDecl *funcDecl) {
+  return hasCharacterParams(funcDecl, wideCharPointee);
+}
+
+bool CIRGenModule::hasNarrowCharParams(const FunctionDecl *funcDecl) {
+  return hasCharacterParams(funcDecl, narrowCharPointee);
 }
 
 /// Whether `funcDecl` is a call operator taking a narrow character

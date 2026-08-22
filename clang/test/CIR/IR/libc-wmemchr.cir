@@ -1,0 +1,18 @@
+// RUN: cir-opt %s --verify-roundtrip | FileCheck %s
+
+!s32i = !cir.int<s, 32>
+!u32i = !cir.int<u, 32>
+!u64i = !cir.int<u, 64>
+module attributes {cir.wchar_type_width = 32 : i32,
+                   cir.size_type_width = 64 : i32} {
+  cir.func @f(%src : !cir.ptr<!s32i>, %pattern : !s32i, %len : !u64i) -> !cir.ptr<!s32i> {
+    // CHECK: cir.libc.wmemchr({{.*}}, {{.*}}, {{.*}}) : !cir.ptr<!s32i>, !s32i, !u64i
+    %ptr = cir.libc.wmemchr(%src, %pattern, %len) : !cir.ptr<!s32i>, !s32i, !u64i
+    cir.return %ptr : !cir.ptr<!s32i>
+  }
+  cir.func @g(%src : !cir.ptr<!u32i>, %pattern : !u32i, %len : !u64i) -> !cir.ptr<!u32i> {
+    // CHECK: cir.libc.wmemchr({{.*}}, {{.*}}, {{.*}}) : !cir.ptr<!u32i>, !u32i, !u64i
+    %ptr = cir.libc.wmemchr(%src, %pattern, %len) : !cir.ptr<!u32i>, !u32i, !u64i
+    cir.return %ptr : !cir.ptr<!u32i>
+  }
+}

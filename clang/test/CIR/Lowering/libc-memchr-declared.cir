@@ -1,0 +1,43 @@
+// RUN: cir-opt --cir-to-llvm %s | FileCheck %s
+
+// A source level declaration of the libcall leaves a cir.func in the symbol
+// table. The first lowered call creates the llvm.func and later lookups can
+// find the already replaced cir.func, which asserted before the retrofit was
+// narrowed to llvm.func symbols. The call site attributes alone carry the
+// extension fact on this triple and the declaration keeps none.
+
+!s32i = !cir.int<s, 32>
+!u64i = !cir.int<u, 64>
+!void = !cir.void
+
+module attributes {cir.triple = "powerpc64le-unknown-linux-gnu", cir.size_type_width = 64 : i32, cir.int_type_width = 32 : i32, cir.wchar_type_width = 32 : i32} {
+  cir.func @memchr_before(%s: !cir.ptr<!void>, %c: !s32i, %n: !u64i) -> !cir.ptr<!void> {
+    %q = cir.libc.memchr(%s, %c, %n) : !cir.ptr<!void>, !s32i, !u64i
+    cir.return %q : !cir.ptr<!void>
+  }
+  cir.func private @memchr(!cir.ptr<!void>, !s32i, !u64i) -> !cir.ptr<!void>
+  cir.func @memchr_after(%s: !cir.ptr<!void>, %c: !s32i, %n: !u64i) -> !cir.ptr<!void> {
+    %q = cir.libc.memchr(%s, %c, %n) : !cir.ptr<!void>, !s32i, !u64i
+    cir.return %q : !cir.ptr<!void>
+  }
+  cir.func @wmemchr_before(%s: !cir.ptr<!s32i>, %c: !s32i, %n: !u64i) -> !cir.ptr<!s32i> {
+    %q = cir.libc.wmemchr(%s, %c, %n) : !cir.ptr<!s32i>, !s32i, !u64i
+    cir.return %q : !cir.ptr<!s32i>
+  }
+  cir.func private @wmemchr(!cir.ptr<!s32i>, !s32i, !u64i) -> !cir.ptr<!s32i>
+  cir.func @wmemchr_after(%s: !cir.ptr<!s32i>, %c: !s32i, %n: !u64i) -> !cir.ptr<!s32i> {
+    %q = cir.libc.wmemchr(%s, %c, %n) : !cir.ptr<!s32i>, !s32i, !u64i
+    cir.return %q : !cir.ptr<!s32i>
+  }
+}
+
+// CHECK-LABEL: llvm.func @memchr_before
+// CHECK: llvm.call @memchr(%{{.*}}, %{{.*}}, %{{.*}}) : (!llvm.ptr {llvm.noundef}, i32 {llvm.noundef, llvm.signext}, i64 {llvm.noundef}) -> !llvm.ptr
+// CHECK: llvm.func @memchr(!llvm.ptr, i32, i64) -> !llvm.ptr attributes {sym_visibility = "private"}
+// CHECK-LABEL: llvm.func @memchr_after
+// CHECK: llvm.call @memchr(%{{.*}}, %{{.*}}, %{{.*}}) : (!llvm.ptr {llvm.noundef}, i32 {llvm.noundef, llvm.signext}, i64 {llvm.noundef}) -> !llvm.ptr
+// CHECK-LABEL: llvm.func @wmemchr_before
+// CHECK: llvm.call @wmemchr(%{{.*}}, %{{.*}}, %{{.*}}) : (!llvm.ptr {llvm.noundef}, i32 {llvm.noundef, llvm.signext}, i64 {llvm.noundef}) -> !llvm.ptr
+// CHECK: llvm.func @wmemchr(!llvm.ptr, i32, i64) -> !llvm.ptr attributes {sym_visibility = "private"}
+// CHECK-LABEL: llvm.func @wmemchr_after
+// CHECK: llvm.call @wmemchr(%{{.*}}, %{{.*}}, %{{.*}}) : (!llvm.ptr {llvm.noundef}, i32 {llvm.noundef, llvm.signext}, i64 {llvm.noundef}) -> !llvm.ptr

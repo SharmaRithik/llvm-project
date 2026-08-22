@@ -60,6 +60,14 @@ def CIR_Dialect : Dialect {
     static llvm::StringRef getByteEqPredValueAttrName() {
       return "cir.byte_eq_pred_value";
     }
+    // The wide sibling of cir.narrow_char_params, set when the same rules
+    // hold over the target's wchar_t instead of a narrow character.
+    static llvm::StringRef getWideCharParamsAttrName() {
+      return "cir.wide_char_params";
+    }
+    static llvm::StringRef getWCharTypeWidthAttrName() {
+      return "cir.wchar_type_width";
+    }
     static llvm::StringRef getOptInfoAttrName() { return "cir.opt_info"; }
     static llvm::StringRef getCalleeAttrName() { return "callee"; }
     static llvm::StringRef getNoThrowAttrName() { return "nothrow"; }
