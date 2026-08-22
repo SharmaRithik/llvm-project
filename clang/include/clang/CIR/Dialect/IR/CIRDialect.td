@@ -47,6 +47,14 @@ def CIR_Dialect : Dialect {
     static llvm::StringRef getNarrowCharParamsAttrName() {
       return "cir.narrow_char_params";
     }
+    // Set by CIRGen on a call to std::find_if or std::find_if_not whose
+    // iterators satisfy the narrow character rules above and whose
+    // predicate is a lambda proven to be a single equality comparison of
+    // the element against its only capture, with the polarity that makes
+    // the search look for an equal byte.
+    static llvm::StringRef getByteEqPredAttrName() {
+      return "cir.byte_eq_pred";
+    }
     static llvm::StringRef getOptInfoAttrName() { return "cir.opt_info"; }
     static llvm::StringRef getCalleeAttrName() { return "callee"; }
     static llvm::StringRef getNoThrowAttrName() { return "nothrow"; }

@@ -1559,6 +1559,8 @@ def CIR_CXXAssignAttr : CIR_Attr<"CXXAssign", "cxx_assign"> {
 def CIR_KnownFuncKind : CIR_I32EnumAttr<"KnownFuncKind",
     "known standard library entity", [
   I32EnumAttrCase<"StdFind", 1, "std::find">,
+  I32EnumAttrCase<"StdFindIf", 2, "std::find_if">,
+  I32EnumAttrCase<"StdFindIfNot", 3, "std::find_if_not">,
 ]> {
   let genSpecializedAttr = 0;
   // A name like std::find is not a bare identifier, so print it as a quoted

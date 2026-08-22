@@ -370,8 +370,15 @@ void CIRGenModule::constructAttributeList(
 
       // Source-level legality information for the bytewise equality
       // rewrites, not part of the callee identity.
-      if (attrOnCallSite && getKnownFuncKind(func) && hasNarrowCharParams(func))
-        addUnitAttr(cir::CIRDialect::getNarrowCharParamsAttrName());
+      if (attrOnCallSite) {
+        std::optional<cir::KnownFuncKind> kind = getKnownFuncKind(func);
+        if (kind == cir::KnownFuncKind::StdFind && hasNarrowCharParams(func))
+          addUnitAttr(cir::CIRDialect::getNarrowCharParamsAttrName());
+        else if ((kind == cir::KnownFuncKind::StdFindIf ||
+                  kind == cir::KnownFuncKind::StdFindIfNot) &&
+                 hasByteEqPredicate(func, *kind))
+          addUnitAttr(cir::CIRDialect::getByteEqPredAttrName());
+      }
 
       // TODO(cir): When doing 'return attrs' we need to cover the 'NoAlias' for
       // global allocation functions here.

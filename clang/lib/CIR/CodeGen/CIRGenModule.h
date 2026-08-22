@@ -823,10 +823,18 @@ public:
   static std::optional<cir::KnownFuncKind>
   getKnownFuncKind(const clang::FunctionDecl *funcDecl);
 
-  /// Whether each parameter of `funcDecl` is a pointer or reference to the
-  /// same non-volatile narrow character type, meaning char, signed char,
-  /// unsigned char or char8_t.
+  /// Whether each parameter of `funcDecl` is a pointer, reference or
+  /// standard library contiguous iterator designating the same non-volatile
+  /// narrow character type, meaning char, signed char, unsigned char or
+  /// char8_t.
   static bool hasNarrowCharParams(const clang::FunctionDecl *funcDecl);
+
+  /// Whether `funcDecl` takes two narrow character iterators and a lambda
+  /// proven to be a single equality comparison of the element against its
+  /// only capture, with the polarity that makes a search of `kind` stop at
+  /// the first equal byte.
+  static bool hasByteEqPredicate(const clang::FunctionDecl *funcDecl,
+                                 cir::KnownFuncKind kind);
 
   cir::FuncOp createRuntimeFunction(cir::FuncType ty, llvm::StringRef name,
                                     mlir::NamedAttrList extraAttrs = {},
