@@ -5866,6 +5866,81 @@ mlir::LogicalResult CIRToLLVMWMemChrOpLowering::matchAndRewrite(
                          symbolTables);
 }
 
+mlir::LogicalResult CIRToLLVMMemCmpOpLowering::matchAndRewrite(
+    cir::MemCmpOp op, OpAdaptor adaptor,
+    mlir::ConversionPatternRewriter &rewriter) const {
+  mlir::Type lhsTy = getTypeConverter()->convertType(op.getLhs().getType());
+  mlir::Type rhsTy = getTypeConverter()->convertType(op.getRhs().getType());
+  mlir::Type lenTy = getTypeConverter()->convertType(op.getLen().getType());
+  mlir::Type resultTy =
+      getTypeConverter()->convertType(op.getResult().getType());
+  auto fnTy = mlir::LLVM::LLVMFunctionType::get(resultTy, {lhsTy, rhsTy, lenTy},
+                                                /*isVarArg=*/false);
+  llvm::StringRef fnName = "memcmp";
+
+  mlir::Builder b(rewriter.getContext());
+  mlir::NamedAttribute noundefAttr =
+      b.getNamedAttr("llvm.noundef", b.getUnitAttr());
+  mlir::DictionaryAttr noundefDict = mlir::DictionaryAttr::get(
+      rewriter.getContext(), llvm::ArrayRef(noundefAttr));
+  SmallVector<mlir::Attribute> argAttrVec(3, noundefDict);
+
+  llvm::Attribute::AttrKind paramExtKind = llvm::Attribute::None;
+  auto tripleAttr = mlir::dyn_cast_if_present<mlir::StringAttr>(
+      op->getParentOfType<mlir::ModuleOp>()->getAttr(
+          cir::CIRDialect::getTripleAttrName()));
+  if (tripleAttr) {
+    bool shouldExtI32Param;
+    bool shouldExtI32Return;
+    bool shouldSignExtI32Param;
+    bool shouldSignExtI32Return;
+    llvm::TargetLibraryInfo::initExtensionsForTriple(
+        shouldExtI32Param, shouldExtI32Return, shouldSignExtI32Param,
+        shouldSignExtI32Return, llvm::Triple(tripleAttr.getValue()));
+    if (mlir::cast<cir::IntType>(op.getLen().getType()).getWidth() == 32) {
+      if (shouldExtI32Param)
+        paramExtKind = llvm::Attribute::ZExt;
+      else if (shouldSignExtI32Param)
+        paramExtKind = llvm::Attribute::SExt;
+    }
+  }
+
+  // The LoongArch32 rule is inherited from TargetLibraryInfo and is vacuous
+  // in a 32 bit register.
+  // The result has no extension because a callee lowered from CIR makes no
+  // extension promise and BuildLibCalls also omits one for memcmp.
+  auto extensionName = [](llvm::Attribute::AttrKind kind) {
+    return kind == llvm::Attribute::SExt ? "llvm.signext" : "llvm.zeroext";
+  };
+  if (paramExtKind != llvm::Attribute::None) {
+    mlir::NamedAttribute extAttr =
+        b.getNamedAttr(extensionName(paramExtKind), b.getUnitAttr());
+    argAttrVec[2] = mlir::DictionaryAttr::get(
+        rewriter.getContext(), llvm::ArrayRef({noundefAttr, extAttr}));
+  }
+  mlir::ArrayAttr argAttrs =
+      mlir::ArrayAttr::get(rewriter.getContext(), argAttrVec);
+
+  createLLVMFuncOpIfNotExist(rewriter, symbolTables, op, fnName, fnTy,
+                             argAttrs);
+
+  auto fn = mlir::dyn_cast_if_present<mlir::LLVM::LLVMFuncOp>(
+      symbolTables.lookupSymbolIn(
+          op->getParentOfType<mlir::ModuleOp>(),
+          mlir::StringAttr::get(rewriter.getContext(), fnName)));
+  if (fn && fn.isExternal() && fn.getNumArguments() == 3 &&
+      paramExtKind != llvm::Attribute::None)
+    rewriter.modifyOpInPlace(fn, [&] {
+      fn.setArgAttr(2, extensionName(paramExtKind), b.getUnitAttr());
+    });
+
+  mlir::LLVM::CallOp newCall = rewriter.replaceOpWithNewOp<mlir::LLVM::CallOp>(
+      op, mlir::TypeRange{resultTy}, fnName,
+      mlir::ValueRange{adaptor.getLhs(), adaptor.getRhs(), adaptor.getLen()});
+  newCall.setArgAttrsAttr(argAttrs);
+  return mlir::success();
+}
+
 // Function to do the clear-padding operation. This is a faithful translation of
 // CGBuiltin.cpp's ClearPadding function.
 static void clearPadding(mlir::ConversionPatternRewriter &rewriter,

@@ -141,6 +141,24 @@ def CIR_StdFindIfOp : CIR_StdFindPredOp<"find_if", "StdFindIf">;
 
 def CIR_StdFindIfNotOp : CIR_StdFindPredOp<"find_if_not", "StdFindIfNot">;
 
+def CIR_StdEqualOp : CIR_StdOp<"equal",
+  (ins CIR_AnyType:$first1, CIR_AnyType:$last1, CIR_AnyType:$first2),
+  (outs CIR_BoolType:$result),
+  [AllTypesMatch<["first1", "last1"]>], "StdEqual"> {
+  let summary = "std::equal()";
+  let description = [{
+    A raised `std::equal`. `cir.narrow_char_params` is carried here from the
+    call when CIRGen recorded it. It is discardable, so a pass that drops it
+    costs the rewrite rather than making it wrong.
+  }];
+  let assemblyFormat = [{
+    `(` $first1 `:` qualified(type($first1)) `,`
+        $last1 `:` qualified(type($last1)) `,`
+        $first2 `:` qualified(type($first2)) `,`
+        $original_fn `)` `->` qualified(type($result)) attr-dict
+  }];
+}
+
 def CIR_StdRangesFindOp : CIR_StdOp<"ranges.find",
   (ins CIR_AnyType:$cpo, CIR_AnyType:$first, CIR_AnyType:$last,
        CIR_AnyType:$pattern, CIR_AnyType:$proj),

@@ -1,0 +1,21 @@
+// RUN: cir-opt --cir-to-llvm %s | FileCheck %s
+
+// CHECK: llvm.func @memcmp(!llvm.ptr {llvm.noundef}, !llvm.ptr {llvm.noundef}, i32 {llvm.noundef, llvm.signext}) -> i32{{$}}
+// CHECK-LABEL: llvm.func @mips_n32
+// CHECK: %[[RESULT:.*]] = llvm.call @memcmp(%{{.*}}, %{{.*}}, %{{.*}}) : (!llvm.ptr {llvm.noundef}, !llvm.ptr {llvm.noundef}, i32 {llvm.noundef, llvm.signext}) -> i32{{$}}
+// CHECK: llvm.return %[[RESULT]] : i32
+
+!s32i = !cir.int<s, 32>
+!u32i = !cir.int<u, 32>
+!void = !cir.void
+
+module attributes {cir.triple = "mips64-unknown-linux-gnuabin32",
+                   cir.int_type_width = 32 : i32,
+                   cir.size_type_width = 32 : i32} {
+  cir.func @mips_n32(%lhs: !cir.ptr<!void>, %rhs: !cir.ptr<!void>,
+                     %len: !u32i) -> !s32i {
+    %0 = cir.libc.memcmp(%lhs, %rhs, %len) : !cir.ptr<!void>,
+         !cir.ptr<!void>, !u32i -> !s32i
+    cir.return %0 : !s32i
+  }
+}

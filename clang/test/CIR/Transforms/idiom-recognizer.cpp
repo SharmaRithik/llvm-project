@@ -26,6 +26,12 @@ template <class Iter, class T>
 __attribute__((pure)) Iter find(Iter, Iter, const T &) noexcept;
 template <class Iter1, class Iter2>
 Iter1 search(Iter1, Iter1, Iter2, Iter2);
+template <class Iter1, class Iter2>
+__attribute__((pure)) bool equal(Iter1, Iter1, Iter2) noexcept;
+template <class Iter1, class Iter2>
+__attribute__((pure)) bool equal(Iter1, Iter1, Iter2, Iter2) noexcept;
+template <class Iter1, class Iter2, class Pred>
+__attribute__((pure)) bool equal(Iter1, Iter1, Iter2, Pred) noexcept;
 // Real std::identity is empty and call convention lowering drops an
 // empty record argument, so this one carries a byte to keep the
 // projection operand visible in the lowered call.
@@ -105,6 +111,45 @@ char *test_search(char *first1, char *last1, char *first2, char *last2) {
 // FINAL: %[[QFIRST2:.*]] = cir.load
 // FINAL: %[[QLAST2:.*]] = cir.load
 // FINAL: cir.call @_ZSt6searchIPcS0_ET_S1_S1_T0_S2_(%[[QFIRST1]], %[[QLAST1]], %[[QFIRST2]], %[[QLAST2]])
+bool test_equal(char *first1, char *last1, char *first2) {
+  return std::equal(first1, last1, first2);
+}
+// RAISED-LABEL: @_Z10test_equalPcS_S_
+// RAISED: %[[EFIRST:.*]] = cir.load align(8)
+// RAISED: %[[ELAST:.*]] = cir.load align(8)
+// RAISED: %[[ESECOND:.*]] = cir.load align(8)
+// RAISED: cir.std.equal(%[[EFIRST]] : !cir.ptr<!{{[su]8i}}>, %[[ELAST]] : !cir.ptr<!{{[su]8i}}>, %[[ESECOND]] : !cir.ptr<!{{[su]8i}}>, @_ZSt5equalIPcS0_EbT_S1_T0_) -> !cir.bool
+// RAISED-SAME: cir.narrow_char_params
+// RAISED-NOT: cir.call @_ZSt5equalIPcS0_EbT_S1_T0_
+// FINAL-LABEL: @_Z10test_equalPcS_S_
+// FINAL: %[[QFIRST:.*]] = cir.load align(8)
+// FINAL: %[[QLAST:.*]] = cir.load align(8)
+// FINAL: %[[QSECOND:.*]] = cir.load align(8)
+// FINAL: cir.call @_ZSt5equalIPcS0_EbT_S1_T0_(%[[QFIRST]], %[[QLAST]], %[[QSECOND]]) nothrow
+// FINAL-SAME: cir.narrow_char_params
+
+bool test_equal_four(char *first1, char *last1, char *first2, char *last2) {
+  return std::equal(first1, last1, first2, last2);
+}
+// RAISED-LABEL: @_Z15test_equal_fourPcS_S_S_
+// RAISED-NOT: cir.std.equal
+// RAISED: cir.call @_ZSt5equalIPcS0_EbT_S1_T0_S2_
+// RAISED-SAME: cir.narrow_char_params
+
+struct EqualPredicate {
+  char state;
+  bool operator()(char lhs, char rhs) const;
+};
+
+bool test_equal_predicate(char *first1, char *last1, char *first2,
+                          EqualPredicate pred) {
+  return std::equal(first1, last1, first2, pred);
+}
+// RAISED-LABEL: @_Z20test_equal_predicatePcS_S_14EqualPredicate
+// RAISED-NOT: cir.std.equal
+// RAISED: cir.call @_ZSt5equalIPcS0_14EqualPredicateEbT_S2_T0_T1_
+// RAISED-NOT: cir.narrow_char_params
+
 unsigned char *test_ranges_find(unsigned char *first, unsigned char *last,
                                 const unsigned char &value) {
   return std::ranges::find(first, last, value);

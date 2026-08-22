@@ -9316,6 +9316,47 @@ def CIR_WMemChrOp : CIR_Op<"libc.wmemchr",
 }
 
 //===----------------------------------------------------------------------===//
+// MemCmpOp
+//===----------------------------------------------------------------------===//
+
+def CIR_MemCmpOp : CIR_Op<"libc.memcmp"> {
+  let summary = "libc's `memcmp`";
+  let description = [{
+    Compare the `len` bytes starting at `lhs` and `rhs`.
+
+    `len` has the width of the target size_t and `result` has the width of
+    the target int. The module records these widths as
+    `cir.size_type_width` and `cir.int_type_width`, each a signless i32
+    holding a fundamental integer width, and the verifier checks the
+    operand and result against them. Both pointers must be void pointers in
+    the default address space.
+
+    Example
+
+    ```
+    %r = cir.libc.memcmp(%lhs, %rhs, %len) : !cir.ptr<!void>,
+        !cir.ptr<!void>, !u64i -> !s32i
+    ```
+  }];
+
+  let arguments = (ins
+    Arg<CIR_VoidPtrType, "", [MemRead]>:$lhs,
+    Arg<CIR_VoidPtrType, "", [MemRead]>:$rhs,
+    CIR_AnyFundamentalUIntType:$len
+  );
+
+  let results = (outs CIR_AnyFundamentalSIntType:$result);
+
+  let assemblyFormat = [{
+    `(` $lhs `,` $rhs `,` $len `)` attr-dict
+    `:` qualified(type($lhs)) `,` qualified(type($rhs)) `,`
+    qualified(type($len)) `->` qualified(type($result))
+  }];
+
+  let hasVerifier = 1;
+}
+
+//===----------------------------------------------------------------------===//
 // LaunderOp
 //===----------------------------------------------------------------------===//
 
