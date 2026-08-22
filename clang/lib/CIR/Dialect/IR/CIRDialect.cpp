@@ -4917,6 +4917,24 @@ bool cir::StdRangesFindOp::signatureMatches(mlir::TypeRange operands,
          StdFindOp::signatureMatches(operands.slice(1, 3), results);
 }
 
+bool cir::StdRangesFindRangeOp::signatureMatches(mlir::TypeRange operands,
+                                                 mlir::TypeRange results) {
+  // Operand 0 is the customization point object and the last operand is
+  // the projection. The range arrives by reference, so its operand is a
+  // pointer to a record, the pattern stays a pointer to the element, and
+  // the result is the container's iterator, a raw pointer or a record
+  // wrapping one. The shape check stays structural; LibOpt re-proves the
+  // container identity and the element types before rewriting.
+  if (operands.size() != getNumArgs() || results.size() != 1)
+    return false;
+  auto rangePtrTy = mlir::dyn_cast<cir::PointerType>(operands[1]);
+  if (!rangePtrTy || !mlir::isa<cir::RecordType>(rangePtrTy.getPointee()))
+    return false;
+  return mlir::isa<cir::PointerType>(operands[2]) &&
+         (mlir::isa<cir::PointerType>(results[0]) ||
+          mlir::isa<cir::RecordType>(results[0]));
+}
+
 //===----------------------------------------------------------------------===//
 // TableGen'd op method definitions
 //===----------------------------------------------------------------------===//

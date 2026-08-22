@@ -66,18 +66,21 @@ mlir::LogicalResult LibOptPass::initializeOptions(
   return mlir::success();
 }
 
-// Rewrites cir.std.find, cir.std.ranges.find, and the
-// byte-equality-predicate forms of cir.std.find_if and
-// cir.std.find_if_not. All four search for the first equal byte, so they
-// share everything except where the byte comes from: the by-reference
-// pattern for the find forms, or a closure capture or recorded constant for
-// the predicate forms. The cpo and proj operands of cir.std.ranges.find are
-// carried only for lowering back and play no part here.
+// Rewrites cir.std.find, cir.std.ranges.find, cir.std.ranges.find_range,
+// and the byte-equality-predicate forms of cir.std.find_if and
+// cir.std.find_if_not. All five search for the first equal byte, so they
+// share everything except where the byte and the bounds come from: the
+// by-reference pattern for the find forms, a closure capture or recorded
+// constant for the predicate forms, and for the whole range form the
+// bounds are loaded through the member paths its record's standard
+// library identity carries. The cpo and proj operands of the ranges forms
+// are carried only for lowering back and play no part here.
 template <typename OpT>
 static void rewriteFindLikeToMemchr(OpT findOp,
                                     mlir::SymbolTableCollection &symbolTables) {
   constexpr bool predOp =
       std::is_same_v<OpT, StdFindIfOp> || std::is_same_v<OpT, StdFindIfNotOp>;
+  constexpr bool rangeOp = std::is_same_v<OpT, StdRangesFindRangeOp>;
   // A std contiguous iterator wraps the pointer as its only member.  The
   // narrow character fact CIRGen recorded is what licenses reading that
   // member as the address, so the rewrite runs on the wrapped pointer and
@@ -126,6 +129,32 @@ static void rewriteFindLikeToMemchr(OpT findOp,
     auto patternPtrTy =
         mlir::dyn_cast<cir::PointerType>(findOp.getPattern().getType());
     if (!patternPtrTy || patternPtrTy.getPointee() != elemTy)
+      return;
+  }
+
+  // The whole range form owns no bounds operands. Its record's standard
+  // library identity names the element and the member paths to the two
+  // pointers bounding the storage, and the rewrite re-proves that every
+  // path lands on a pointer to the searched element.
+  cir::StructType rangeRecTy;
+  cir::StdTypeInfoAttr rangeInfo;
+  if constexpr (rangeOp) {
+    auto rangePtrTy =
+        mlir::dyn_cast<cir::PointerType>(findOp.getRange().getType());
+    if (!rangePtrTy || rangePtrTy.getAddrSpace())
+      return;
+    rangeRecTy = mlir::dyn_cast<cir::StructType>(rangePtrTy.getPointee());
+    if (rangeRecTy)
+      rangeInfo = rangeRecTy.getStdTypeInfo();
+    if (!rangeInfo || rangeInfo.getKind() != cir::StdTypeKind::StdVector ||
+        rangeInfo.getElement() != mlir::Type(elemTy))
+      return;
+    auto pathLandsOnIter = [&](llvm::ArrayRef<uint32_t> path) {
+      return cir::StdTypeInfoAttr::resolvePath(rangeRecTy, path) ==
+             mlir::Type(iterTy);
+    };
+    if (!pathLandsOnIter(rangeInfo.getBeginPath()) ||
+        !pathLandsOnIter(rangeInfo.getEndPath()))
       return;
   }
 
@@ -204,12 +233,30 @@ static void rewriteFindLikeToMemchr(OpT findOp,
   }
 
   mlir::Location loc = findOp.getLoc();
-  mlir::Value first = findOp.getFirst();
-  mlir::Value last = findOp.getLast();
   builder.setInsertionPointAfter(findOp);
-  if (wrapperTy) {
-    first = cir::ExtractMemberOp::create(builder, loc, first, 0);
-    last = cir::ExtractMemberOp::create(builder, loc, last, 0);
+  mlir::Value first, last;
+  if constexpr (rangeOp) {
+    // The same walk that licensed the paths supplies each step's member
+    // type here, so the emitted accesses cannot drift from the proof.
+    auto loadBound = [&](llvm::ArrayRef<uint32_t> path) {
+      llvm::SmallVector<mlir::Type, 4> steps;
+      cir::StdTypeInfoAttr::resolvePath(rangeRecTy, path, &steps);
+      mlir::Value addr = findOp.getRange();
+      for (auto [idx, fieldTy] : llvm::zip_equal(path, steps))
+        addr = cir::GetMemberOp::create(builder, loc,
+                                        cir::PointerType::get(fieldTy), addr,
+                                        /*name=*/"", /*index=*/idx);
+      return builder.createLoad(loc, addr);
+    };
+    first = loadBound(rangeInfo.getBeginPath());
+    last = loadBound(rangeInfo.getEndPath());
+  } else {
+    first = findOp.getFirst();
+    last = findOp.getLast();
+    if (wrapperTy) {
+      first = cir::ExtractMemberOp::create(builder, loc, first, 0);
+      last = cir::ExtractMemberOp::create(builder, loc, last, 0);
+    }
   }
 
   // An empty std::find range is allowed to be a pair of null pointers, while
@@ -250,9 +297,18 @@ static void rewriteFindLikeToMemchr(OpT findOp,
                                           last, res));
           })
           .getResult();
-  if (wrapperTy)
-    result = cir::InsertMemberOp::create(builder, loc, findOp.getFirst(),
-                                         /*index=*/0, result);
+  if (wrapperTy) {
+    // The whole range form has no incoming wrapper value to rebuild
+    // around, so the result record starts from undef and the insert
+    // defines its only member.
+    mlir::Value seed;
+    if constexpr (rangeOp)
+      seed = builder.getConstant(loc, cir::UndefAttr::get(wrapperTy));
+    else
+      seed = findOp.getFirst();
+    result =
+        cir::InsertMemberOp::create(builder, loc, seed, /*index=*/0, result);
+  }
   findOp.getResult().replaceAllUsesWith(result);
   findOp.erase();
 }
@@ -261,7 +317,8 @@ void LibOptPass::runOnOperation() {
   mlir::SymbolTableCollection symbolTables;
   getOperation()->walk([&](mlir::Operation *op) {
     llvm::TypeSwitch<mlir::Operation *>(op)
-        .Case<StdFindOp, StdFindIfOp, StdFindIfNotOp, StdRangesFindOp>(
+        .Case<StdFindOp, StdFindIfOp, StdFindIfNotOp, StdRangesFindOp,
+              StdRangesFindRangeOp>(
             [&](auto find) { rewriteFindLikeToMemchr(find, symbolTables); });
   });
 }

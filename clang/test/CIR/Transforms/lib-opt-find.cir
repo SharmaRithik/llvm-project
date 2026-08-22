@@ -565,3 +565,117 @@ module attributes {cir.triple = "x86_64-unknown-linux-gnu",
 // CHECK: cir.std.ranges.find({{.*}}@_ZNKSt3__16ranges6__findclIPhhNS_8identityEEET_S4_S4_RKT0_T1_)
 // CHECK-NOT: cir.libc.memchr
 }
+
+// -----
+
+!s8i = !cir.int<s, 8>
+!u8i = !cir.int<u, 8>
+!layout = !cir.struct<"std::__1::__vector_layout<char>" {data !cir.ptr<!s8i>, data !cir.ptr<!s8i>, data !cir.ptr<!s8i>}>
+!vec = !cir.struct<class "std::__1::vector<char>" {data !layout}, std_type_info = #cir.std_type_info<"std::vector", !s8i, begin[0, 0], end[0, 1]>>
+!vec_bad_path = !cir.struct<class "std::__1::vector<signed char>" {data !cir.ptr<!s8i>}, std_type_info = #cir.std_type_info<"std::vector", !s8i, begin[7], end[0]>>
+!vec_wide = !cir.struct<class "std::__1::vector<int>" {data !cir.ptr<!cir.int<s, 32>>, data !cir.ptr<!cir.int<s, 32>>}, std_type_info = #cir.std_type_info<"std::vector", !cir.int<s, 32>, begin[0], end[1]>>
+!witer = !cir.struct<class "std::__1::__wrap_iter<char *>" {data !cir.ptr<!s8i>}>
+!impl_data = !cir.struct<"std::_Vector_impl_data" {data !cir.ptr<!s8i>, data !cir.ptr<!s8i>, data !cir.ptr<!s8i>}>
+!impl = !cir.struct<"std::_Vector_impl" {data !impl_data}>
+!vbase = !cir.struct<"std::_Vector_base" {data !impl}>
+!gvec = !cir.struct<class "std::vector<char>" {data !vbase}, std_type_info = #cir.std_type_info<"std::vector", !s8i, begin[0, 0, 0, 0], end[0, 0, 0, 1]>>
+!uinner = !cir.union<"inner_union" {data !cir.ptr<!s8i>, data !cir.ptr<!cir.int<u, 64>>}, padding = {!u8i}>
+!uvec = !cir.struct<class "std::__1::vector<char8_t>" {data !uinner}, std_type_info = #cir.std_type_info<"std::vector", !s8i, begin[0, 0], end[0, 1]>>
+!plainvec = !cir.struct<class "std::__1::vector<wchar_t>" {data !cir.ptr<!s8i>, data !cir.ptr<!s8i>}>
+!identity = !cir.struct<class "std::__1::identity" {pad !u8i}>
+!cpo = !cir.struct<class "std::__1::ranges::__find" {pad !u8i}>
+
+module attributes {cir.triple = "x86_64-unknown-linux-gnu",
+                   cir.int_type_width = 32 : i32, cir.size_type_width = 64 : i32} {
+  cir.func private @_ZNKSt3__16ranges6__findclIRNS_6vectorIcEEcNS_8identityEEE(!cir.ptr<!cpo>, !cir.ptr<!vec>, !cir.ptr<!s8i>, !identity) -> !witer
+  cir.func private @_ZNKSt3__16ranges6__findclIRNS_6vectorIaEEaNS_8identityEEE(!cir.ptr<!cpo>, !cir.ptr<!vec_bad_path>, !cir.ptr<!s8i>, !identity) -> !cir.ptr<!s8i>
+  cir.func private @_ZNKSt3__16ranges6__findclIRNS_6vectorIiEEiNS_8identityEEE(!cir.ptr<!cpo>, !cir.ptr<!vec_wide>, !cir.ptr<!s8i>, !identity) -> !cir.ptr<!s8i>
+
+  cir.func @rewrites_range_find(%this: !cir.ptr<!cpo>, %range: !cir.ptr<!vec>, %value: !cir.ptr<!s8i>, %proj: !identity) -> !witer {
+    %0 = cir.std.ranges.find_range(%this : !cir.ptr<!cpo>, %range : !cir.ptr<!vec>, %value : !cir.ptr<!s8i>, %proj : !identity, @_ZNKSt3__16ranges6__findclIRNS_6vectorIcEEcNS_8identityEEE) -> !witer {cir.narrow_char_params}
+    cir.return %0 : !witer
+  }
+// CHECK-LABEL: @rewrites_range_find(
+// CHECK-SAME: %[[RANGE:[^ ]*]]: !cir.ptr<!rec_std3A3A__13A3Avector3Cchar3E>
+// CHECK-SAME: %[[VALUE:[^ ]*]]: !cir.ptr<!s8i>
+// CHECK: %[[L0:.*]] = cir.get_member %[[RANGE]][0] {{.*}} -> !cir.ptr<!rec_std3A3A__13A3A__vector_layout3Cchar3E>
+// CHECK: %[[BEGINP:.*]] = cir.get_member %[[L0]][0] {{.*}} -> !cir.ptr<!cir.ptr<!s8i>>
+// CHECK: %[[FIRST:.*]] = cir.load %[[BEGINP]] : !cir.ptr<!cir.ptr<!s8i>>, !cir.ptr<!s8i>
+// CHECK: %[[L1:.*]] = cir.get_member %[[RANGE]][0] {{.*}} -> !cir.ptr<!rec_std3A3A__13A3A__vector_layout3Cchar3E>
+// CHECK: %[[ENDP:.*]] = cir.get_member %[[L1]][1] {{.*}} -> !cir.ptr<!cir.ptr<!s8i>>
+// CHECK: %[[LAST:.*]] = cir.load %[[ENDP]] : !cir.ptr<!cir.ptr<!s8i>>, !cir.ptr<!s8i>
+// CHECK: %[[EMPTY:.*]] = cir.cmp eq %[[FIRST]], %[[LAST]] : !cir.ptr<!s8i>
+// CHECK: cir.ternary(%[[EMPTY]], true {
+// CHECK: cir.yield %[[LAST]] : !cir.ptr<!s8i>
+// CHECK: }, false {
+// CHECK: %[[SRC:.*]] = cir.cast bitcast %[[FIRST]] : !cir.ptr<!s8i> -> !cir.ptr<!void>
+// CHECK: %[[BYTE:.*]] = cir.load %[[VALUE]] : !cir.ptr<!s8i>, !s8i
+// CHECK: %[[PATTERN:.*]] = cir.cast integral %[[BYTE]] : !s8i -> !s32i
+// CHECK: %[[LEN:.*]] = cir.ptr_diff %[[LAST]], %[[FIRST]] : !cir.ptr<!s8i> -> !u64i
+// CHECK: %[[PTR:.*]] = cir.libc.memchr(%[[SRC]], %[[PATTERN]], %[[LEN]]) : !cir.ptr<!void>, !s32i, !u64i
+// CHECK: %[[RES:.*]] = cir.cast bitcast %[[PTR]] : !cir.ptr<!void> -> !cir.ptr<!s8i>
+// CHECK: %[[MISS:.*]] = cir.cmp eq %[[RES]], %{{.*}}
+// CHECK: cir.select if %[[MISS]] then %[[LAST]] else %[[RES]]
+// CHECK: %[[SEED:.*]] = cir.const #cir.undef : !rec_std3A3A__13A3A__wrap_iter3Cchar_2A3E
+// CHECK: %[[WRAPPED:.*]] = cir.insert_member %[[SEED]][0], %{{.*}}
+// CHECK: cir.return %[[WRAPPED]]
+// CHECK-NOT: cir.std.ranges.find_range
+
+  cir.func @keeps_unmarked_range_find(%this: !cir.ptr<!cpo>, %range: !cir.ptr<!vec>, %value: !cir.ptr<!s8i>, %proj: !identity) -> !witer {
+    %0 = cir.std.ranges.find_range(%this : !cir.ptr<!cpo>, %range : !cir.ptr<!vec>, %value : !cir.ptr<!s8i>, %proj : !identity, @_ZNKSt3__16ranges6__findclIRNS_6vectorIcEEcNS_8identityEEE) -> !witer
+    cir.return %0 : !witer
+  }
+// CHECK-LABEL: @keeps_unmarked_range_find
+// CHECK: cir.std.ranges.find_range
+// CHECK-NOT: cir.libc.memchr
+
+  cir.func @keeps_bad_path_range_find(%this: !cir.ptr<!cpo>, %range: !cir.ptr<!vec_bad_path>, %value: !cir.ptr<!s8i>, %proj: !identity) -> !cir.ptr<!s8i> {
+    %0 = cir.std.ranges.find_range(%this : !cir.ptr<!cpo>, %range : !cir.ptr<!vec_bad_path>, %value : !cir.ptr<!s8i>, %proj : !identity, @_ZNKSt3__16ranges6__findclIRNS_6vectorIaEEaNS_8identityEEE) -> !cir.ptr<!s8i> {cir.narrow_char_params}
+    cir.return %0 : !cir.ptr<!s8i>
+  }
+// CHECK-LABEL: @keeps_bad_path_range_find
+// CHECK: cir.std.ranges.find_range
+// CHECK-NOT: cir.libc.memchr
+
+  cir.func @keeps_wide_range_find(%this: !cir.ptr<!cpo>, %range: !cir.ptr<!vec_wide>, %value: !cir.ptr<!s8i>, %proj: !identity) -> !cir.ptr<!s8i> {
+    %0 = cir.std.ranges.find_range(%this : !cir.ptr<!cpo>, %range : !cir.ptr<!vec_wide>, %value : !cir.ptr<!s8i>, %proj : !identity, @_ZNKSt3__16ranges6__findclIRNS_6vectorIiEEiNS_8identityEEE) -> !cir.ptr<!s8i> {cir.narrow_char_params}
+    cir.return %0 : !cir.ptr<!s8i>
+  }
+// CHECK-LABEL: @keeps_wide_range_find
+// CHECK: cir.std.ranges.find_range
+// CHECK-NOT: cir.libc.memchr
+
+  cir.func private @gnu_range_find(!cir.ptr<!cpo>, !cir.ptr<!gvec>, !cir.ptr<!s8i>, !identity) -> !cir.ptr<!s8i>
+  cir.func private @union_range_find(!cir.ptr<!cpo>, !cir.ptr<!uvec>, !cir.ptr<!s8i>, !identity) -> !cir.ptr<!s8i>
+  cir.func private @plain_range_find(!cir.ptr<!cpo>, !cir.ptr<!plainvec>, !cir.ptr<!s8i>, !identity) -> !cir.ptr<!s8i>
+
+  cir.func @rewrites_base_chain_range_find(%this: !cir.ptr<!cpo>, %range: !cir.ptr<!gvec>, %value: !cir.ptr<!s8i>, %proj: !identity) -> !cir.ptr<!s8i> {
+    %0 = cir.std.ranges.find_range(%this : !cir.ptr<!cpo>, %range : !cir.ptr<!gvec>, %value : !cir.ptr<!s8i>, %proj : !identity, @gnu_range_find) -> !cir.ptr<!s8i> {cir.narrow_char_params}
+    cir.return %0 : !cir.ptr<!s8i>
+  }
+// CHECK-LABEL: @rewrites_base_chain_range_find(
+// CHECK-SAME: %[[GRANGE:[^ ]*]]: !cir.ptr<!rec_std3A3Avector3Cchar3E>
+// CHECK: %[[G0:.*]] = cir.get_member %[[GRANGE]][0] {{.*}} -> !cir.ptr<!rec_std3A3A_Vector_base>
+// CHECK: %[[G1:.*]] = cir.get_member %[[G0]][0] {{.*}} -> !cir.ptr<!rec_std3A3A_Vector_impl>
+// CHECK: %[[G2:.*]] = cir.get_member %[[G1]][0] {{.*}} -> !cir.ptr<!rec_std3A3A_Vector_impl_data>
+// CHECK: %[[G3:.*]] = cir.get_member %[[G2]][0] {{.*}} -> !cir.ptr<!cir.ptr<!s8i>>
+// CHECK: cir.load %[[G3]] : !cir.ptr<!cir.ptr<!s8i>>, !cir.ptr<!s8i>
+// CHECK: cir.libc.memchr
+// CHECK-NOT: cir.std.ranges.find_range
+
+  cir.func @keeps_union_path_range_find(%this: !cir.ptr<!cpo>, %range: !cir.ptr<!uvec>, %value: !cir.ptr<!s8i>, %proj: !identity) -> !cir.ptr<!s8i> {
+    %0 = cir.std.ranges.find_range(%this : !cir.ptr<!cpo>, %range : !cir.ptr<!uvec>, %value : !cir.ptr<!s8i>, %proj : !identity, @union_range_find) -> !cir.ptr<!s8i> {cir.narrow_char_params}
+    cir.return %0 : !cir.ptr<!s8i>
+  }
+// CHECK-LABEL: @keeps_union_path_range_find
+// CHECK: cir.std.ranges.find_range
+// CHECK-NOT: cir.libc.memchr
+
+  cir.func @keeps_infoless_range_find(%this: !cir.ptr<!cpo>, %range: !cir.ptr<!plainvec>, %value: !cir.ptr<!s8i>, %proj: !identity) -> !cir.ptr<!s8i> {
+    %0 = cir.std.ranges.find_range(%this : !cir.ptr<!cpo>, %range : !cir.ptr<!plainvec>, %value : !cir.ptr<!s8i>, %proj : !identity, @plain_range_find) -> !cir.ptr<!s8i> {cir.narrow_char_params}
+    cir.return %0 : !cir.ptr<!s8i>
+  }
+// CHECK-LABEL: @keeps_infoless_range_find
+// CHECK: cir.std.ranges.find_range
+// CHECK-NOT: cir.libc.memchr
+}
