@@ -66,6 +66,85 @@ mlir::LogicalResult LibOptPass::initializeOptions(
   return mlir::success();
 }
 
+// The facts every rewrite checks before it may introduce the named libcall.
+struct LibCallEnv {
+  cir::FuncOp enclosing;
+  cir::GlobalOp enclosingGlobal;
+  mlir::ModuleOp moduleOp;
+  llvm::Triple triple;
+};
+
+// Checks the environment shared by every libcall rewrite. LibOpt runs before
+// LoweringPrepare, so a global initializer is still a cir.global here, and
+// anything else is not a shape CIRGen produces. No builtin state rides on the
+// raised call and on the enclosing function, while a global initializer has
+// no function to carry the list. The rewrite introduces a libcall the program
+// never named, so the target has to provide it. TargetLibraryInfo is the
+// availability oracle LLVM transforms consult before creating a libcall, and
+// it answers from the triple. The ABI attributes of the introduced call stay
+// with the general call ABI work. A libc that implements the routine with the
+// raised algorithm would call itself forever, so the enclosing function must
+// not be the libcall.
+static std::optional<LibCallEnv> checkLibCallEnv(mlir::Operation *op,
+                                                 llvm::StringRef libcallName,
+                                                 llvm::LibFunc libFunc) {
+  LibCallEnv env;
+  env.enclosing = op->getParentOfType<cir::FuncOp>();
+  env.enclosingGlobal = op->getParentOfType<cir::GlobalOp>();
+  if (!env.enclosing && !env.enclosingGlobal)
+    return std::nullopt;
+  if (isNoBuiltin(op, libcallName) ||
+      (env.enclosing && noBuiltinListDisables(env.enclosing, libcallName)))
+    return std::nullopt;
+  env.moduleOp = op->getParentOfType<mlir::ModuleOp>();
+  if (!env.moduleOp)
+    return std::nullopt;
+  auto tripleAttr = env.moduleOp->getAttrOfType<mlir::StringAttr>(
+      cir::CIRDialect::getTripleAttrName());
+  if (!tripleAttr)
+    return std::nullopt;
+  env.triple = llvm::Triple(tripleAttr.getValue().str());
+  llvm::TargetLibraryInfoImpl tliImpl(env.triple);
+  if (!llvm::TargetLibraryInfo(tliImpl).has(libFunc))
+    return std::nullopt;
+  if (env.enclosing && env.enclosing.getName() == libcallName)
+    return std::nullopt;
+  return env;
+}
+
+// Whether the module lets the rewrite name the libcall. An existing symbol
+// can be shared only when it is exactly the C function with the expected
+// prototype. An alias forwards to some other symbol, so a matching prototype
+// says nothing about what the call would reach.
+static bool sharesLibCallSymbol(mlir::ModuleOp moduleOp,
+                                mlir::SymbolTableCollection &symbolTables,
+                                llvm::StringRef libcallName,
+                                cir::FuncType libcallTy) {
+  mlir::Operation *existing = symbolTables.lookupSymbolIn(
+      moduleOp, mlir::StringAttr::get(moduleOp.getContext(), libcallName));
+  if (!existing)
+    return true;
+  auto existingFn = mlir::dyn_cast<cir::FuncOp>(existing);
+  return existingFn && !existingFn.getAliasee() &&
+         existingFn.getFunctionType() == libcallTy &&
+         existingFn.getCallingConv() == cir::CallingConv::C;
+}
+
+// A raised contiguous iterator is a raw pointer or a complete record wrapping
+// the pointer as its only member, the shape the CIRGen marker licensed.
+// wrapperTy reports the record when one wrapped the pointer.
+static cir::PointerType unwrapContiguousIterator(mlir::Type ty,
+                                                 cir::RecordType &wrapperTy) {
+  auto iterTy = mlir::dyn_cast<cir::PointerType>(ty);
+  wrapperTy = mlir::dyn_cast<cir::RecordType>(ty);
+  if (!wrapperTy)
+    return iterTy;
+  if (wrapperTy.isUnion() || !wrapperTy.isComplete() ||
+      wrapperTy.getMembers().size() != 1)
+    return cir::PointerType();
+  return mlir::dyn_cast<cir::PointerType>(wrapperTy.getMembers()[0]);
+}
+
 // Rewrites cir.std.find, cir.std.ranges.find, cir.std.ranges.find_range,
 // and the byte-equality-predicate forms of cir.std.find_if and
 // cir.std.find_if_not. All five search for the first equal byte, so they
@@ -86,14 +165,8 @@ static void rewriteFindLikeToMemchr(OpT findOp,
   // member as the address, so the rewrite runs on the wrapped pointer and
   // rebuilds the record around its result.
   mlir::Type resultTy = findOp.getResult().getType();
-  auto wrapperTy = mlir::dyn_cast<cir::RecordType>(resultTy);
-  auto iterTy = mlir::dyn_cast<cir::PointerType>(resultTy);
-  if (wrapperTy) {
-    if (wrapperTy.isUnion() || !wrapperTy.isComplete() ||
-        wrapperTy.getMembers().size() != 1)
-      return;
-    iterTy = mlir::dyn_cast<cir::PointerType>(wrapperTy.getMembers()[0]);
-  }
+  cir::RecordType wrapperTy;
+  cir::PointerType iterTy = unwrapContiguousIterator(resultTy, wrapperTy);
   if (!iterTy || iterTy.getAddrSpace())
     return;
   auto elemTy = mlir::dyn_cast<cir::IntType>(iterTy.getPointee());
@@ -167,17 +240,9 @@ static void rewriteFindLikeToMemchr(OpT findOp,
       return;
   }
 
-  // LibOpt runs before LoweringPrepare, so a global initializer is still a
-  // cir.global here. Anything else is not a shape CIRGen produces.
-  auto enclosing = findOp->template getParentOfType<cir::FuncOp>();
-  auto enclosingGlobal = findOp->template getParentOfType<cir::GlobalOp>();
-  if (!enclosing && !enclosingGlobal)
-    return;
-
-  // No builtin state rides on the raised call and on the enclosing function.
-  // A global initializer has no function to carry the list.
-  if (isNoBuiltin(findOp, libcallName) ||
-      (enclosing && noBuiltinListDisables(enclosing, libcallName)))
+  std::optional<LibCallEnv> env = checkLibCallEnv(
+      findOp, libcallName, wide ? llvm::LibFunc_wmemchr : llvm::LibFunc_memchr);
+  if (!env)
     return;
 
   // Only the CIRGen facts license the rewrite, since an enum or atomic element
@@ -193,24 +258,7 @@ static void rewriteFindLikeToMemchr(OpT findOp,
     return;
   }
 
-  auto moduleOp = findOp->template getParentOfType<mlir::ModuleOp>();
-  if (!moduleOp)
-    return;
-
-  // The rewrite introduces a libcall the program never named, so the target
-  // has to provide it. TargetLibraryInfo is the availability oracle LLVM
-  // transforms consult before creating a libcall, and it answers from the
-  // triple. The ABI attributes of the introduced call stay with the general
-  // call ABI work.
-  auto tripleAttr = moduleOp->template getAttrOfType<mlir::StringAttr>(
-      cir::CIRDialect::getTripleAttrName());
-  if (!tripleAttr)
-    return;
-  llvm::Triple triple(tripleAttr.getValue().str());
-  llvm::TargetLibraryInfoImpl tliImpl(triple);
-  if (!llvm::TargetLibraryInfo(tliImpl).has(wide ? llvm::LibFunc_wmemchr
-                                                 : llvm::LibFunc_memchr))
-    return;
+  mlir::ModuleOp moduleOp = env->moduleOp;
 
   // The introduced operands take the widths the module records, which is
   // what the introduced operation's verifier checks them against: int and
@@ -226,39 +274,25 @@ static void rewriteFindLikeToMemchr(OpT findOp,
   // A program built with a nonstandard wchar_t width still links the C
   // library selected by the triple, and that library's wmemchr walks the
   // default width.
-  if (wide && *patternWidth != triple.getDefaultWCharSize() * 8)
+  if (wide && *patternWidth != env->triple.getDefaultWCharSize() * 8)
     return;
   // Hand written IR can claim the wide character marker while using an
   // element whose width disagrees with the recorded width.
   if (wide && *patternWidth != elemTy.getWidth())
     return;
 
-  // A libc that implements the search with std::find would call itself
-  // forever.
-  if (enclosing && enclosing.getName() == libcallName)
-    return;
-
   CIRBaseBuilderTy builder(*findOp.getContext());
 
-  if (mlir::Operation *existing = symbolTables.lookupSymbolIn(
-          moduleOp, mlir::StringAttr::get(findOp.getContext(), libcallName))) {
-    auto existingFn = mlir::dyn_cast<cir::FuncOp>(existing);
-    if (!existingFn)
-      return;
-    auto libcallTy =
-        wide ? cir::FuncType::get({mlir::Type(iterTy), mlir::Type(elemTy),
-                                   builder.getUIntNTy(*sizeWidth)},
-                                  iterTy)
-             : cir::FuncType::get({builder.getVoidPtrTy(),
-                                   builder.getSIntNTy(*patternWidth),
-                                   builder.getUIntNTy(*sizeWidth)},
-                                  builder.getVoidPtrTy());
-    // An alias forwards to some other symbol, so a matching prototype says
-    // nothing about what the call would reach.
-    if (existingFn.getAliasee() || existingFn.getFunctionType() != libcallTy ||
-        existingFn.getCallingConv() != cir::CallingConv::C)
-      return;
-  }
+  cir::FuncType libcallTy =
+      wide ? cir::FuncType::get({mlir::Type(iterTy), mlir::Type(elemTy),
+                                 builder.getUIntNTy(*sizeWidth)},
+                                iterTy)
+           : cir::FuncType::get({builder.getVoidPtrTy(),
+                                 builder.getSIntNTy(*patternWidth),
+                                 builder.getUIntNTy(*sizeWidth)},
+                                builder.getVoidPtrTy());
+  if (!sharesLibCallSymbol(moduleOp, symbolTables, libcallName, libcallTy))
+    return;
 
   mlir::Location loc = findOp.getLoc();
   builder.setInsertionPointAfter(findOp);
@@ -353,21 +387,10 @@ static void rewriteSearchToMemmem(StdSearchOp searchOp,
                                   mlir::SymbolTableCollection &symbolTables) {
   cir::RecordType haystackWrapperTy;
   cir::RecordType needleWrapperTy;
-  auto unwrapIterator = [](mlir::Type ty, cir::RecordType &wrapperTy) {
-    auto iterTy = mlir::dyn_cast<cir::PointerType>(ty);
-    wrapperTy = mlir::dyn_cast<cir::RecordType>(ty);
-    if (!wrapperTy)
-      return iterTy;
-    if (wrapperTy.isUnion() || !wrapperTy.isComplete() ||
-        wrapperTy.getMembers().size() != 1)
-      return cir::PointerType();
-    return mlir::dyn_cast<cir::PointerType>(wrapperTy.getMembers()[0]);
-  };
-
-  cir::PointerType haystackIterTy =
-      unwrapIterator(searchOp.getFirst1().getType(), haystackWrapperTy);
+  cir::PointerType haystackIterTy = unwrapContiguousIterator(
+      searchOp.getFirst1().getType(), haystackWrapperTy);
   cir::PointerType needleIterTy =
-      unwrapIterator(searchOp.getFirst2().getType(), needleWrapperTy);
+      unwrapContiguousIterator(searchOp.getFirst2().getType(), needleWrapperTy);
   if (!haystackIterTy || !needleIterTy ||
       static_cast<bool>(haystackWrapperTy) !=
           static_cast<bool>(needleWrapperTy) ||
@@ -381,56 +404,29 @@ static void rewriteSearchToMemmem(StdSearchOp searchOp,
       needleElemTy != haystackElemTy)
     return;
 
-  auto enclosing = searchOp->getParentOfType<cir::FuncOp>();
-  auto enclosingGlobal = searchOp->getParentOfType<cir::GlobalOp>();
-  if (!enclosing && !enclosingGlobal)
-    return;
-
   constexpr llvm::StringLiteral libcallName = "memmem";
-
-  if (isNoBuiltin(searchOp, libcallName) ||
-      (enclosing && noBuiltinListDisables(enclosing, libcallName)))
+  std::optional<LibCallEnv> env =
+      checkLibCallEnv(searchOp, libcallName, llvm::LibFunc_memmem);
+  if (!env)
     return;
 
   if (!searchOp->getAttrOfType<mlir::UnitAttr>(
           cir::CIRDialect::getNarrowCharParamsAttrName()))
     return;
 
-  auto moduleOp = searchOp->getParentOfType<mlir::ModuleOp>();
-  if (!moduleOp)
-    return;
-  auto tripleAttr = moduleOp->getAttrOfType<mlir::StringAttr>(
-      cir::CIRDialect::getTripleAttrName());
-  if (!tripleAttr)
-    return;
-  llvm::TargetLibraryInfoImpl tliImpl(
-      llvm::Triple(tripleAttr.getValue().str()));
-  if (!llvm::TargetLibraryInfo(tliImpl).has(llvm::LibFunc_memmem))
-    return;
-
   std::optional<unsigned> sizeWidth = cir::getRecordedIntegerWidth(
-      moduleOp, cir::CIRDialect::getSizeTypeWidthAttrName());
+      env->moduleOp, cir::CIRDialect::getSizeTypeWidthAttrName());
   if (!sizeWidth)
-    return;
-
-  if (enclosing && enclosing.getName() == libcallName)
     return;
 
   CIRBaseBuilderTy builder(*searchOp.getContext());
   auto voidPtrTy = builder.getVoidPtrTy();
   auto sizeTy = builder.getUIntNTy(*sizeWidth);
-  if (mlir::Operation *existing = symbolTables.lookupSymbolIn(
-          moduleOp,
-          mlir::StringAttr::get(searchOp.getContext(), libcallName))) {
-    auto existingFn = mlir::dyn_cast<cir::FuncOp>(existing);
-    if (!existingFn)
-      return;
-    auto libcallTy =
-        cir::FuncType::get({voidPtrTy, sizeTy, voidPtrTy, sizeTy}, voidPtrTy);
-    if (existingFn.getAliasee() || existingFn.getFunctionType() != libcallTy ||
-        existingFn.getCallingConv() != cir::CallingConv::C)
-      return;
-  }
+  if (!sharesLibCallSymbol(
+          env->moduleOp, symbolTables, libcallName,
+          cir::FuncType::get({voidPtrTy, sizeTy, voidPtrTy, sizeTy},
+                             voidPtrTy)))
+    return;
 
   mlir::Location loc = searchOp.getLoc();
   builder.setInsertionPointAfter(searchOp);
@@ -502,17 +498,9 @@ static void rewriteSearchToMemmem(StdSearchOp searchOp,
 static void rewriteEqualToMemcmp(StdEqualOp equalOp,
                                  mlir::SymbolTableCollection &symbolTables) {
   constexpr llvm::StringLiteral libcallName = "memcmp";
-  // LibOpt runs before LoweringPrepare so a global initializer is still a
-  // cir.global here. Anything else is not a shape CIRGen produces.
-  auto enclosing = equalOp->getParentOfType<cir::FuncOp>();
-  auto enclosingGlobal = equalOp->getParentOfType<cir::GlobalOp>();
-  if (!enclosing && !enclosingGlobal)
-    return;
-
-  // No builtin state rides on the raised call and on the enclosing function.
-  // A global initializer has no function to carry the list.
-  if (isNoBuiltin(equalOp, libcallName) ||
-      (enclosing && noBuiltinListDisables(enclosing, libcallName)))
+  std::optional<LibCallEnv> env =
+      checkLibCallEnv(equalOp, libcallName, llvm::LibFunc_memcmp);
+  if (!env)
     return;
 
   // Only the CIRGen fact licenses the rewrite because an enum or atomic
@@ -521,71 +509,32 @@ static void rewriteEqualToMemcmp(StdEqualOp equalOp,
           cir::CIRDialect::getNarrowCharParamsAttrName()))
     return;
 
-  // The module owns the target facts and symbol table used below.
-  auto moduleOp = equalOp->getParentOfType<mlir::ModuleOp>();
-  if (!moduleOp)
-    return;
-
-  // The rewrite introduces a libcall the program never named so the target
-  // has to provide it. TargetLibraryInfo is the availability oracle used by
-  // LLVM transforms and it answers from the triple.
-  auto tripleAttr = moduleOp->getAttrOfType<mlir::StringAttr>(
-      cir::CIRDialect::getTripleAttrName());
-  if (!tripleAttr)
-    return;
-  llvm::TargetLibraryInfoImpl tliImpl(
-      llvm::Triple(tripleAttr.getValue().str()));
-  if (!llvm::TargetLibraryInfo(tliImpl).has(llvm::LibFunc_memcmp))
-    return;
-
   // The introduced operation uses the recorded int and size_t widths which
   // its verifier checks against the result and length.
   std::optional<unsigned> intWidth = cir::getRecordedIntegerWidth(
-      moduleOp, cir::CIRDialect::getIntTypeWidthAttrName());
+      env->moduleOp, cir::CIRDialect::getIntTypeWidthAttrName());
   std::optional<unsigned> sizeWidth = cir::getRecordedIntegerWidth(
-      moduleOp, cir::CIRDialect::getSizeTypeWidthAttrName());
+      env->moduleOp, cir::CIRDialect::getSizeTypeWidthAttrName());
   if (!intWidth || !sizeWidth)
     return;
 
-  // A libc that implements memcmp with std::equal would call itself forever.
-  if (enclosing && enclosing.getName() == libcallName)
+  CIRBaseBuilderTy builder(*equalOp.getContext());
+  if (!sharesLibCallSymbol(
+          env->moduleOp, symbolTables, libcallName,
+          cir::FuncType::get({builder.getVoidPtrTy(), builder.getVoidPtrTy(),
+                              builder.getUIntNTy(*sizeWidth)},
+                             builder.getSIntNTy(*intWidth))))
     return;
 
-  CIRBaseBuilderTy builder(*equalOp.getContext());
-  // An existing symbol can be shared only when it is the exact C function.
-  // A matching declaration or definition is the symbol the call names.
-  if (mlir::Operation *existing = symbolTables.lookupSymbolIn(
-          moduleOp, mlir::StringAttr::get(equalOp.getContext(), libcallName))) {
-    auto existingFn = mlir::dyn_cast<cir::FuncOp>(existing);
-    if (!existingFn)
-      return;
-    auto libcallTy =
-        cir::FuncType::get({builder.getVoidPtrTy(), builder.getVoidPtrTy(),
-                            builder.getUIntNTy(*sizeWidth)},
-                           builder.getSIntNTy(*intWidth));
-    // An alias forwards to another symbol so a matching prototype says
-    // nothing about what the call would reach.
-    if (existingFn.getAliasee() || existingFn.getFunctionType() != libcallTy ||
-        existingFn.getCallingConv() != cir::CallingConv::C)
-      return;
-  }
-
   // The CIRGen marker licenses trusting a one member record as a contiguous
-  // iterator that wraps its pointer.
-  auto pointerForIterator = [](mlir::Type type) -> cir::PointerType {
-    if (auto ptrTy = mlir::dyn_cast<cir::PointerType>(type))
-      return ptrTy;
-    auto recordTy = mlir::dyn_cast<cir::RecordType>(type);
-    if (!recordTy || recordTy.isUnion() || !recordTy.isComplete() ||
-        recordTy.getMembers().size() != 1)
-      return {};
-    return mlir::dyn_cast<cir::PointerType>(recordTy.getMembers()[0]);
-  };
-
+  // iterator that wraps its pointer. The two ranges are independent, so one
+  // may be wrapped while the other is raw.
+  cir::RecordType firstWrapperTy;
+  cir::RecordType secondWrapperTy;
   cir::PointerType firstPtrTy =
-      pointerForIterator(equalOp.getFirst1().getType());
+      unwrapContiguousIterator(equalOp.getFirst1().getType(), firstWrapperTy);
   cir::PointerType secondPtrTy =
-      pointerForIterator(equalOp.getFirst2().getType());
+      unwrapContiguousIterator(equalOp.getFirst2().getType(), secondWrapperTy);
   // The libc interface cannot represent other address spaces and the two
   // byte sequences must share an element type.
   if (!firstPtrTy || !secondPtrTy || firstPtrTy.getAddrSpace() ||
