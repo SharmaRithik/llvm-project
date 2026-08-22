@@ -60,6 +60,8 @@
 // NOXFORM: cir.call @_ZSt4findIPhhET_S1_S1_RKT0_
 // NOXFORM: cir.call @_ZSt4findIPccET_S1_S1_RKT0_
 // NOXFORM: cir.call @_ZSt4findIPaaET_S1_S1_RKT0_
+// NOXFORM: cir.call @_ZSt7find_ifIPhZ20test_literal_find_ifS0_S0_E3$_0ET_S2_S2_T0_
+// NOXFORM: cir.call @_ZSt11find_if_notIPaZ24test_literal_find_if_notS0_S0_E3$_0ET_S2_S2_T0_
 // NOXFORM: cir.call @_ZSt4findIPaaET_S1_S1_RKT0_
 
 #ifdef MEMCHR_NORETURN
@@ -76,6 +78,19 @@ const void *force_memchr(const void *p) { return memchr(p, 'x', 4); }
 
 namespace std {
 template <class Iter, class T> Iter find(Iter, Iter, const T &);
+template <class Iter, class Pred> Iter find_if(Iter first, Iter last, Pred pred) {
+  for (; first != last; ++first)
+    if (pred(*first))
+      break;
+  return first;
+}
+template <class Iter, class Pred>
+Iter find_if_not(Iter first, Iter last, Pred pred) {
+  for (; first != last; ++first)
+    if (!pred(*first))
+      break;
+  return first;
+}
 struct identity {
   template <class T> T &&operator()(T &&t) const;
 };
@@ -162,6 +177,27 @@ signed char *test_high_bit_find(signed char *first, signed char *last) {
 // CHECK: %[[HBYTE:.*]] = cir.load %[[SLOT]] : !cir.ptr<!s8i>, !s8i
 // CHECK: %[[HPATTERN:.*]] = cir.cast integral %[[HBYTE]] : !s8i -> !s32i
 // CHECK: cir.libc.memchr(%{{.*}}, %[[HPATTERN]], %{{.*}}) : !cir.ptr<!void>, !s32i, !u64i
+
+unsigned char *test_literal_find_if(unsigned char *first,
+                                    unsigned char *last) {
+  return std::find_if(
+      first, last, [](unsigned char element) { return element == 0x80; });
+}
+// CHECK-LABEL: @_Z20test_literal_find_ifPhS_
+// CHECK: %[[LITERAL_BYTE:.*]] = cir.const #cir.int<128> : !u8i
+// CHECK: %[[LITERAL_PATTERN:.*]] = cir.cast integral %[[LITERAL_BYTE]] : !u8i -> !s32i
+// CHECK: cir.libc.memchr(%{{.*}}, %[[LITERAL_PATTERN]], %{{.*}}) : !cir.ptr<!void>, !s32i, !u64i
+// CHECK-NOT: cir.call @_ZSt7find_if
+
+signed char *test_literal_find_if_not(signed char *first, signed char *last) {
+  return std::find_if_not(
+      first, last, [](signed char element) { return element != -128; });
+}
+// CHECK-LABEL: @_Z24test_literal_find_if_notPaS_
+// CHECK: %[[NOT_LITERAL_BYTE:.*]] = cir.const #cir.int<-128> : !s8i
+// CHECK: %[[NOT_LITERAL_PATTERN:.*]] = cir.cast integral %[[NOT_LITERAL_BYTE]] : !s8i -> !s32i
+// CHECK: cir.libc.memchr(%{{.*}}, %[[NOT_LITERAL_PATTERN]], %{{.*}}) : !cir.ptr<!void>, !s32i, !u64i
+// CHECK-NOT: cir.call @_ZSt11find_if_not
 
 signed char *test_signed_char_find(signed char *first, signed char *last,
                                    const signed char &value) {

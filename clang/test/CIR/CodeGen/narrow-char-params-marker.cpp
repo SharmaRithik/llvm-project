@@ -1,5 +1,7 @@
 // RUN: %clang_cc1 -std=c++20 -triple x86_64-unknown-linux-gnu -fclangir -emit-cir %s -o %t.cir
 // RUN: FileCheck --input-file=%t.cir %s
+// RUN: %clang_cc1 -std=c++20 -triple aarch64-unknown-linux-gnu -fno-signed-char -fclangir -emit-cir %s -o %t.uchar.cir
+// RUN: FileCheck --input-file=%t.uchar.cir --check-prefix=UCHAR %s
 
 namespace std {
 inline namespace __1 {
@@ -129,19 +131,20 @@ char *find_if_ref_capture(char *first, char *last, const char &value) {
   return std::find_if(first, last, [&](char element) { return element == value; });
 }
 // CHECK-LABEL: cir.func{{.*}} @_Z19find_if_ref_capture
-// CHECK: cir.call @_ZNSt3__17find_ifIPcZ19find_if_ref_capture{{.*}} {{{.*}}cir.byte_eq_pred
+// CHECK: cir.call @_ZNSt3__17find_ifIPcZ19find_if_ref_capture{{.*}} {{{.*}}cir.byte_eq_pred}
 
 char *find_if_value_capture(char *first, char *last, char value) {
   return std::find_if(first, last, [value](char element) { return value == element; });
 }
 // CHECK-LABEL: cir.func{{.*}} @_Z21find_if_value_capture
-// CHECK: cir.call @_ZNSt3__17find_ifIPcZ21find_if_value_capture{{.*}} {{{.*}}cir.byte_eq_pred
+// CHECK: cir.call @_ZNSt3__17find_ifIPcZ21find_if_value_capture{{.*}} {{{.*}}cir.byte_eq_pred}
+// CHECK-NOT: cir.byte_eq_pred_value
 
 char *find_if_not_ne(char *first, char *last, const char &value) {
   return std::find_if_not(first, last, [&](char element) { return element != value; });
 }
 // CHECK-LABEL: cir.func{{.*}} @_Z14find_if_not_ne
-// CHECK: cir.call @_ZNSt3__111find_if_notIPcZ14find_if_not_ne{{.*}} {{{.*}}cir.byte_eq_pred
+// CHECK: cir.call @_ZNSt3__111find_if_notIPcZ14find_if_not_ne{{.*}} {{{.*}}cir.byte_eq_pred}
 
 char *find_if_wrong_polarity(char *first, char *last, const char &value) {
   return std::find_if(first, last, [&](char element) { return element != value; });
@@ -180,21 +183,154 @@ char *find_if_generic_lambda(char *first, char *last, const char &value) {
   return std::find_if(first, last, [&](auto element) { return element == value; });
 }
 // CHECK-LABEL: cir.func{{.*}} @_Z22find_if_generic_lambda
-// CHECK: cir.call @_ZNSt3__17find_ifIPcZ22find_if_generic_lambda{{.*}} {{{.*}}cir.byte_eq_pred
+// CHECK: cir.call @_ZNSt3__17find_ifIPcZ22find_if_generic_lambda{{.*}} {{{.*}}cir.byte_eq_pred}
 
 char *find_if_mutable_lambda(char *first, char *last, char value) {
   return std::find_if(first, last,
                       [value](char element) mutable { return element == value; });
 }
 // CHECK-LABEL: cir.func{{.*}} @_Z22find_if_mutable_lambda
-// CHECK: cir.call @_ZNSt3__17find_ifIPcZ22find_if_mutable_lambda{{.*}} {{{.*}}cir.byte_eq_pred
+// CHECK: cir.call @_ZNSt3__17find_ifIPcZ22find_if_mutable_lambda{{.*}} {{{.*}}cir.byte_eq_pred}
 
 char *find_if_init_capture(char *first, char *last, const char &value) {
   return std::find_if(first, last,
                       [v = value](char element) { return element == v; });
 }
 // CHECK-LABEL: cir.func{{.*}} @_Z20find_if_init_capture
-// CHECK: cir.call @_ZNSt3__17find_ifIPcZ20find_if_init_capture{{.*}} {{{.*}}cir.byte_eq_pred
+// CHECK: cir.call @_ZNSt3__17find_ifIPcZ20find_if_init_capture{{.*}} {{{.*}}cir.byte_eq_pred}
+
+char *find_if_literal_char(char *first, char *last) {
+  return std::find_if(first, last,
+                      [](char element) { return element == 'x'; });
+}
+// CHECK-LABEL: cir.func{{.*}} @_Z20find_if_literal_charPcS_
+// CHECK: cir.call @_ZNSt3__17find_ifIPcZ20find_if_literal_char{{.*}} {cir.byte_eq_pred_value = #cir.int<120> : !s8i}
+
+unsigned char *find_if_not_literal_unsigned(unsigned char *first,
+                                             unsigned char *last) {
+  return std::find_if_not(
+      first, last, [](unsigned char element) { return element != 0x80; });
+}
+// CHECK-LABEL: cir.func{{.*}} @_Z28find_if_not_literal_unsignedPhS_
+// CHECK: cir.call @_ZNSt3__111find_if_notIPhZ28find_if_not_literal_unsigned{{.*}} {cir.byte_eq_pred_value = #cir.int<128> : !u8i}
+
+signed char *find_if_literal_negative(signed char *first, signed char *last) {
+  return std::find_if(first, last,
+                      [](signed char element) { return element == -128; });
+}
+// CHECK-LABEL: cir.func{{.*}} @_Z24find_if_literal_negativePaS_
+// CHECK: cir.call @_ZNSt3__17find_ifIPaZ24find_if_literal_negative{{.*}} {cir.byte_eq_pred_value = #cir.int<-128> : !s8i}
+
+unsigned char *find_if_literal_generic(unsigned char *first,
+                                       unsigned char *last) {
+  return std::find_if(first, last,
+                      [](auto element) { return 0x7f == element; });
+}
+// CHECK-LABEL: cir.func{{.*}} @_Z23find_if_literal_genericPhS_
+// CHECK: cir.call @_ZNSt3__17find_ifIPhZ23find_if_literal_generic{{.*}} {cir.byte_eq_pred_value = #cir.int<127> : !u8i}
+
+char *find_if_literal_mutable(char *first, char *last) {
+  return std::find_if(
+      first, last, [](char element) mutable { return element == 'm'; });
+}
+// CHECK-LABEL: cir.func{{.*}} @_Z23find_if_literal_mutablePcS_
+// CHECK: cir.call @_ZNSt3__17find_ifIPcZ23find_if_literal_mutable{{.*}} {cir.byte_eq_pred_value = #cir.int<109> : !s8i}
+
+char *find_if_literal_wrong_polarity(char *first, char *last) {
+  return std::find_if(first, last,
+                      [](char element) { return element != 'x'; });
+}
+// CHECK-LABEL: cir.func{{.*}} @_Z30find_if_literal_wrong_polarityPcS_
+// CHECK: cir.call @_ZNSt3__17find_ifIPcZ30find_if_literal_wrong_polarity
+// CHECK-NOT: cir.byte_eq_pred_value
+
+unsigned char *find_if_literal_negative_unsigned(unsigned char *first,
+                                                  unsigned char *last) {
+  return std::find_if(first, last,
+                      [](unsigned char element) { return element == -1; });
+}
+// CHECK-LABEL: cir.func{{.*}} @_Z33find_if_literal_negative_unsignedPhS_
+// CHECK: cir.call @_ZNSt3__17find_ifIPhZ33find_if_literal_negative_unsigned
+// CHECK-NOT: cir.byte_eq_pred_value
+
+unsigned char *find_if_literal_out_of_range(unsigned char *first,
+                                            unsigned char *last) {
+  return std::find_if(first, last,
+                      [](unsigned char element) { return element == 256; });
+}
+// CHECK-LABEL: cir.func{{.*}} @_Z28find_if_literal_out_of_rangePhS_
+// CHECK: cir.call @_ZNSt3__17find_ifIPhZ28find_if_literal_out_of_range
+// CHECK-NOT: cir.byte_eq_pred_value
+
+char literal_call();
+char *find_if_literal_two_calls(char *first, char *last) {
+  return std::find_if(first, last, [](char) {
+    return literal_call() == literal_call();
+  });
+}
+// CHECK-LABEL: cir.func{{.*}} @_Z25find_if_literal_two_callsPcS_
+// CHECK: cir.call @_ZNSt3__17find_ifIPcZ25find_if_literal_two_calls
+// CHECK-NOT: cir.byte_eq_pred_value
+
+constexpr char kSentinelChar = 'q';
+char *find_if_literal_constexpr_var(char *first, char *last) {
+  return std::find_if(first, last,
+                      [](char element) { return element == kSentinelChar; });
+}
+// CHECK-LABEL: cir.func{{.*}} @_Z29find_if_literal_constexpr_varPcS_
+// CHECK: cir.call @_ZNSt3__17find_ifIPcZ29find_if_literal_constexpr_var{{.*}} {cir.byte_eq_pred_value = #cir.int<113> : !s8i}
+
+enum ByteMarker : unsigned char { kByteMarker = 0x7e };
+unsigned char *find_if_literal_enum(unsigned char *first,
+                                    unsigned char *last) {
+  return std::find_if(first, last, [](unsigned char element) {
+    return element == kByteMarker;
+  });
+}
+// CHECK-LABEL: cir.func{{.*}} @_Z20find_if_literal_enumPhS_
+// CHECK: cir.call @_ZNSt3__17find_ifIPhZ20find_if_literal_enum{{.*}} {cir.byte_eq_pred_value = #cir.int<126> : !u8i}
+
+char8_t *find_if_literal_char8(char8_t *first, char8_t *last) {
+  return std::find_if(first, last,
+                      [](char8_t element) { return element == u8'z'; });
+}
+// CHECK-LABEL: cir.func{{.*}} @_Z21find_if_literal_char8PDuS_
+// CHECK: cir.call @_ZNSt3__17find_ifIPDuZ21find_if_literal_char8{{.*}} {cir.byte_eq_pred_value = #cir.int<122> : !u8i}
+
+char *find_if_literal_dependent(char *first, char *last) {
+  return std::find_if(
+      first, last, [](auto element) { return element == sizeof(element); });
+}
+// CHECK-LABEL: cir.func{{.*}} @_Z25find_if_literal_dependentPcS_
+// CHECK: cir.call @_ZNSt3__17find_ifIPcZ25find_if_literal_dependent
+// CHECK-NOT: cir.byte_eq_pred_value
+
+signed char *find_if_literal_signed_overflow(signed char *first,
+                                             signed char *last) {
+  return std::find_if(first, last,
+                      [](signed char element) { return element == 200; });
+}
+// CHECK-LABEL: cir.func{{.*}} @_Z31find_if_literal_signed_overflowPaS_
+// CHECK: cir.call @_ZNSt3__17find_ifIPaZ31find_if_literal_signed_overflow
+// CHECK-NOT: cir.byte_eq_pred_value
+
+char *find_if_literal_wrong_param(char *first, char *last) {
+  return std::find_if(first, last,
+                      [](int element) { return element == 'x'; });
+}
+// CHECK-LABEL: cir.func{{.*}} @_Z27find_if_literal_wrong_paramPcS_
+// CHECK: cir.call @_ZNSt3__17find_ifIPcZ27find_if_literal_wrong_param
+// CHECK-NOT: cir.byte_eq_pred_value
+
+char *find_if_plain_negative(char *first, char *last) {
+  return std::find_if(first, last,
+                      [](char element) { return element == -1; });
+}
+// CHECK-LABEL: cir.func{{.*}} @_Z22find_if_plain_negativePcS_
+// CHECK: cir.call @_ZNSt3__17find_ifIPcZ22find_if_plain_negative{{.*}} {cir.byte_eq_pred_value = #cir.int<-1> : !s8i}
+// UCHAR-LABEL: cir.func{{.*}} @_Z22find_if_plain_negativePcS_
+// UCHAR: cir.call @_ZNSt3__17find_ifIPcZ22find_if_plain_negative
+// UCHAR-NOT: cir.byte_eq_pred_value
 
 struct EqFunctor {
   char value;

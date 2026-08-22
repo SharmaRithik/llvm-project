@@ -102,8 +102,10 @@ class CIR_StdFindPredOp<string functionName, string knownKind>
   let description = [{
     A raised `std::}] # functionName # [{`. `cir.byte_eq_pred` is carried
     here from the call when CIRGen proved the predicate is a byte equality
-    against the closure's single capture. It is discardable, so a pass that
-    drops it costs the rewrite rather than making it wrong.
+    against the closure's single capture. `cir.byte_eq_pred_value` instead
+    carries the typed constant from a capture-free predicate, and it takes
+    precedence when both are present. Both are discardable, so a pass that
+    drops them costs the rewrite rather than making it wrong.
   }];
   let assemblyFormat = [{
     `(` $first `:` qualified(type($first)) `,`

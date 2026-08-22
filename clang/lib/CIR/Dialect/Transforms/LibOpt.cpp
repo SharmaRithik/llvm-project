@@ -70,8 +70,8 @@ mlir::LogicalResult LibOptPass::initializeOptions(
 // byte-equality-predicate forms of cir.std.find_if and
 // cir.std.find_if_not. All four search for the first equal byte, so they
 // share everything except where the byte comes from: the by-reference
-// pattern for the find forms and the closure's single capture for the
-// predicate forms. The cpo and proj operands of cir.std.ranges.find are
+// pattern for the find forms, or a closure capture or recorded constant for
+// the predicate forms. The cpo and proj operands of cir.std.ranges.find are
 // carried only for lowering back and play no part here.
 template <typename OpT>
 static void rewriteFindLikeToMemchr(OpT findOp,
@@ -96,23 +96,31 @@ static void rewriteFindLikeToMemchr(OpT findOp,
   auto elemTy = mlir::dyn_cast<cir::IntType>(iterTy.getPointee());
   if (!elemTy || elemTy.getWidth() != 8)
     return;
-  // The byte to search for arrives behind the by-reference pattern for
-  // find, and as the closure's single capture for the predicate forms,
-  // stored by value or through a reference the capture holds.
+  // The byte to search for arrives behind the by-reference pattern for find.
+  // A predicate either holds it in its single capture, by value or through a
+  // reference, or carries it in the typed value attribute.
   bool captureByRef = false;
+  cir::IntAttr predicateValue;
   if constexpr (predOp) {
-    auto closureTy =
-        mlir::dyn_cast<cir::RecordType>(findOp.getPred().getType());
-    if (!closureTy || closureTy.isUnion() || !closureTy.isComplete() ||
-        closureTy.getMembers().size() != 1)
-      return;
-    mlir::Type capTy = closureTy.getMembers()[0];
-    if (auto capPtrTy = mlir::dyn_cast<cir::PointerType>(capTy)) {
-      if (capPtrTy.getAddrSpace() || capPtrTy.getPointee() != elemTy)
+    predicateValue = findOp->template getAttrOfType<cir::IntAttr>(
+        cir::CIRDialect::getByteEqPredValueAttrName());
+    if (predicateValue) {
+      if (predicateValue.getType() != elemTy)
         return;
-      captureByRef = true;
-    } else if (capTy != elemTy) {
-      return;
+    } else {
+      auto closureTy =
+          mlir::dyn_cast<cir::RecordType>(findOp.getPred().getType());
+      if (!closureTy || closureTy.isUnion() || !closureTy.isComplete() ||
+          closureTy.getMembers().size() != 1)
+        return;
+      mlir::Type capTy = closureTy.getMembers()[0];
+      if (auto capPtrTy = mlir::dyn_cast<cir::PointerType>(capTy)) {
+        if (capPtrTy.getAddrSpace() || capPtrTy.getPointee() != elemTy)
+          return;
+        captureByRef = true;
+      } else if (capTy != elemTy) {
+        return;
+      }
     }
   } else {
     auto patternPtrTy =
@@ -134,14 +142,17 @@ static void rewriteFindLikeToMemchr(OpT findOp,
       (enclosing && noBuiltinListDisables(enclosing, "memchr")))
     return;
 
-  // Only the unit attribute CIRGen recorded licenses the rewrite, since an
-  // enum or atomic element also lowers to a byte-wide integer and a closure
-  // of the right shape can compute anything.
-  llvm::StringRef marker = predOp
-                               ? cir::CIRDialect::getByteEqPredAttrName()
-                               : cir::CIRDialect::getNarrowCharParamsAttrName();
-  if (!findOp->template getAttrOfType<mlir::UnitAttr>(marker))
+  // Only the CIRGen facts license the rewrite, since an enum or atomic element
+  // also lowers to a byte-wide integer and a closure of the right shape can
+  // compute anything.
+  if constexpr (predOp) {
+    if (!predicateValue && !findOp->template getAttrOfType<mlir::UnitAttr>(
+                               cir::CIRDialect::getByteEqPredAttrName()))
+      return;
+  } else if (!findOp->template getAttrOfType<mlir::UnitAttr>(
+                 cir::CIRDialect::getNarrowCharParamsAttrName())) {
     return;
+  }
 
   auto moduleOp = findOp->template getParentOfType<mlir::ModuleOp>();
   if (!moduleOp)
@@ -216,10 +227,14 @@ static void rewriteFindLikeToMemchr(OpT findOp,
                 builder.createBitcast(loc, first, builder.getVoidPtrTy());
             mlir::Value byte;
             if constexpr (predOp) {
-              byte = cir::ExtractMemberOp::create(builder, loc,
-                                                  findOp.getPred(), 0);
-              if (captureByRef)
-                byte = builder.createLoad(loc, byte);
+              if (predicateValue) {
+                byte = builder.getConstant(loc, predicateValue);
+              } else {
+                byte = cir::ExtractMemberOp::create(builder, loc,
+                                                    findOp.getPred(), 0);
+                if (captureByRef)
+                  byte = builder.createLoad(loc, byte);
+              }
             } else {
               byte = builder.createLoad(loc, findOp.getPattern());
             }
