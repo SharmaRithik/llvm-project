@@ -1170,6 +1170,10 @@ def memchr : TargetLibCall<"memchr", Ptr, [Ptr, Int, SizeT]>;
 /// int memcmp(const void *s1, const void *s2, size_t n);
 def memcmp : TargetLibCall<"memcmp", Int, [Ptr, Ptr, SizeT]>;
 
+/// void *memmem(const void *haystack, size_t haystacklen,
+///              const void *needle, size_t needlelen);
+def memmem : TargetLibCall<"memmem", Ptr, [Ptr, SizeT, Ptr, SizeT]>;
+
 /// void *memcpy(void *s1, const void *s2, size_t n);
 def memcpy : TargetLibCall<"memcpy", Ptr, [Ptr, Ptr, SizeT]>;
 
