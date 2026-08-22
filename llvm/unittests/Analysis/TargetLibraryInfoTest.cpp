@@ -286,6 +286,7 @@ TEST_F(TargetLibraryInfoTest, ValidProto) {
       "declare ptr @memccpy(ptr, ptr, i32, i64)\n"
       "declare ptr @memchr(ptr, i32, i64)\n"
       "declare i32 @memcmp(ptr, ptr, i64)\n"
+      "declare ptr @memmem(ptr, i64, ptr, i64)\n"
       "declare ptr @memcpy(ptr, ptr, i64)\n"
       "declare ptr @memmove(ptr, ptr, i64)\n"
       "declare ptr @memset(ptr, i32, i64)\n"
