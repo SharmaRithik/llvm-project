@@ -102,7 +102,7 @@ public:
 
 // The library calls the recognizer knows how to raise, tried in order.
 using RecognizedStdOps =
-    StdRecognizer<StdFindOp, StdSearchOp, StdFindIfOp, StdFindIfNotOp,
+    StdRecognizer<StdFindOp, StdSearchOp, StdFindIfOp, StdFindIfNotOp, StdEqualOp,
                   StdRangesFindOp, StdRangesFindRangeOp, StrLenOp>;
 
 struct IdiomRecognizerPass

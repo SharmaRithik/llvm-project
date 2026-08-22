@@ -4737,6 +4737,24 @@ LogicalResult cir::WMemChrOp::verify() {
                             cir::CIRDialect::getSizeTypeWidthAttrName());
 }
 
+LogicalResult cir::MemCmpOp::verify() {
+  auto moduleOp = (*this)->getParentOfType<mlir::ModuleOp>();
+  if (!moduleOp)
+    return emitOpError("expects an enclosing module");
+
+  if (mlir::cast<cir::PointerType>(getLhs().getType()).getAddrSpace())
+    return emitOpError("lhs must be in the default address space");
+  if (mlir::cast<cir::PointerType>(getRhs().getType()).getAddrSpace())
+    return emitOpError("rhs must be in the default address space");
+
+  if (failed(checkRecordedWidth(
+          *this, moduleOp, mlir::cast<cir::IntType>(getResult().getType()),
+          "result", cir::CIRDialect::getIntTypeWidthAttrName())))
+    return failure();
+  return checkRecordedWidth(*this, moduleOp, getLen().getType(), "len",
+                            cir::CIRDialect::getSizeTypeWidthAttrName());
+}
+
 //===----------------------------------------------------------------------===//
 // ConstructCatchParamOp
 //===----------------------------------------------------------------------===//
@@ -4968,6 +4986,17 @@ bool cir::StdFindIfOp::signatureMatches(mlir::TypeRange operands,
 bool cir::StdFindIfNotOp::signatureMatches(mlir::TypeRange operands,
                                            mlir::TypeRange results) {
   return stdFindPredSignatureMatches(operands, results, getNumArgs());
+}
+
+bool cir::StdEqualOp::signatureMatches(mlir::TypeRange operands,
+                                       mlir::TypeRange results) {
+  if (operands.size() != getNumArgs() || results.size() != 1 ||
+      !mlir::isa<cir::BoolType>(results[0]) || operands[0] != operands[1])
+    return false;
+  auto isIterator = [](mlir::Type type) {
+    return mlir::isa<cir::PointerType, cir::RecordType>(type);
+  };
+  return isIterator(operands[0]) && isIterator(operands[2]);
 }
 
 bool cir::StdRangesFindOp::signatureMatches(mlir::TypeRange operands,

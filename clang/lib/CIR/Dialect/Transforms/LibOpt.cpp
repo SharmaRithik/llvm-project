@@ -499,6 +499,147 @@ static void rewriteSearchToMemmem(StdSearchOp searchOp,
   searchOp.erase();
 }
 
+static void rewriteEqualToMemcmp(StdEqualOp equalOp,
+                                 mlir::SymbolTableCollection &symbolTables) {
+  constexpr llvm::StringLiteral libcallName = "memcmp";
+  // LibOpt runs before LoweringPrepare so a global initializer is still a
+  // cir.global here. Anything else is not a shape CIRGen produces.
+  auto enclosing = equalOp->getParentOfType<cir::FuncOp>();
+  auto enclosingGlobal = equalOp->getParentOfType<cir::GlobalOp>();
+  if (!enclosing && !enclosingGlobal)
+    return;
+
+  // No builtin state rides on the raised call and on the enclosing function.
+  // A global initializer has no function to carry the list.
+  if (isNoBuiltin(equalOp, libcallName) ||
+      (enclosing && noBuiltinListDisables(enclosing, libcallName)))
+    return;
+
+  // Only the CIRGen fact licenses the rewrite because an enum or atomic
+  // element also lowers to a byte wide integer.
+  if (!equalOp->getAttrOfType<mlir::UnitAttr>(
+          cir::CIRDialect::getNarrowCharParamsAttrName()))
+    return;
+
+  // The module owns the target facts and symbol table used below.
+  auto moduleOp = equalOp->getParentOfType<mlir::ModuleOp>();
+  if (!moduleOp)
+    return;
+
+  // The rewrite introduces a libcall the program never named so the target
+  // has to provide it. TargetLibraryInfo is the availability oracle used by
+  // LLVM transforms and it answers from the triple.
+  auto tripleAttr = moduleOp->getAttrOfType<mlir::StringAttr>(
+      cir::CIRDialect::getTripleAttrName());
+  if (!tripleAttr)
+    return;
+  llvm::TargetLibraryInfoImpl tliImpl(
+      llvm::Triple(tripleAttr.getValue().str()));
+  if (!llvm::TargetLibraryInfo(tliImpl).has(llvm::LibFunc_memcmp))
+    return;
+
+  // The introduced operation uses the recorded int and size_t widths which
+  // its verifier checks against the result and length.
+  std::optional<unsigned> intWidth = cir::getRecordedIntegerWidth(
+      moduleOp, cir::CIRDialect::getIntTypeWidthAttrName());
+  std::optional<unsigned> sizeWidth = cir::getRecordedIntegerWidth(
+      moduleOp, cir::CIRDialect::getSizeTypeWidthAttrName());
+  if (!intWidth || !sizeWidth)
+    return;
+
+  // A libc that implements memcmp with std::equal would call itself forever.
+  if (enclosing && enclosing.getName() == libcallName)
+    return;
+
+  CIRBaseBuilderTy builder(*equalOp.getContext());
+  // An existing symbol can be shared only when it is the exact C function.
+  // A matching declaration or definition is the symbol the call names.
+  if (mlir::Operation *existing = symbolTables.lookupSymbolIn(
+          moduleOp, mlir::StringAttr::get(equalOp.getContext(), libcallName))) {
+    auto existingFn = mlir::dyn_cast<cir::FuncOp>(existing);
+    if (!existingFn)
+      return;
+    auto libcallTy =
+        cir::FuncType::get({builder.getVoidPtrTy(), builder.getVoidPtrTy(),
+                            builder.getUIntNTy(*sizeWidth)},
+                           builder.getSIntNTy(*intWidth));
+    // An alias forwards to another symbol so a matching prototype says
+    // nothing about what the call would reach.
+    if (existingFn.getAliasee() || existingFn.getFunctionType() != libcallTy ||
+        existingFn.getCallingConv() != cir::CallingConv::C)
+      return;
+  }
+
+  // The CIRGen marker licenses trusting a one member record as a contiguous
+  // iterator that wraps its pointer.
+  auto pointerForIterator = [](mlir::Type type) -> cir::PointerType {
+    if (auto ptrTy = mlir::dyn_cast<cir::PointerType>(type))
+      return ptrTy;
+    auto recordTy = mlir::dyn_cast<cir::RecordType>(type);
+    if (!recordTy || recordTy.isUnion() || !recordTy.isComplete() ||
+        recordTy.getMembers().size() != 1)
+      return {};
+    return mlir::dyn_cast<cir::PointerType>(recordTy.getMembers()[0]);
+  };
+
+  cir::PointerType firstPtrTy =
+      pointerForIterator(equalOp.getFirst1().getType());
+  cir::PointerType secondPtrTy =
+      pointerForIterator(equalOp.getFirst2().getType());
+  // The libc interface cannot represent other address spaces and the two
+  // byte sequences must share an element type.
+  if (!firstPtrTy || !secondPtrTy || firstPtrTy.getAddrSpace() ||
+      secondPtrTy.getAddrSpace() ||
+      firstPtrTy.getPointee() != secondPtrTy.getPointee())
+    return;
+  // BitInt belongs to a separate type family and the rewrite is licensed only
+  // for fundamental eight bit characters.
+  auto elementTy = mlir::dyn_cast<cir::IntType>(firstPtrTy.getPointee());
+  if (!elementTy || elementTy.isBitInt() || elementTy.getWidth() != 8)
+    return;
+
+  mlir::Location loc = equalOp.getLoc();
+  builder.setInsertionPointAfter(equalOp);
+  mlir::Value first1 = equalOp.getFirst1();
+  mlir::Value last1 = equalOp.getLast1();
+  mlir::Value first2 = equalOp.getFirst2();
+  if (mlir::isa<cir::RecordType>(first1.getType())) {
+    first1 = cir::ExtractMemberOp::create(builder, loc, first1, 0);
+    last1 = cir::ExtractMemberOp::create(builder, loc, last1, 0);
+  }
+  if (mlir::isa<cir::RecordType>(first2.getType()))
+    first2 = cir::ExtractMemberOp::create(builder, loc, first2, 0);
+
+  // An empty range may use null pointers while C requires valid pointers even
+  // when the memcmp length is zero.
+  mlir::Value isEmpty =
+      builder.createCompare(loc, cir::CmpOpKind::eq, first1, last1);
+  mlir::Value result =
+      cir::TernaryOp::create(
+          builder, loc, isEmpty,
+          [&](mlir::OpBuilder &, mlir::Location) {
+            builder.createYield(loc, builder.getTrue(loc).getResult());
+          },
+          [&](mlir::OpBuilder &, mlir::Location) {
+            mlir::Value lhs =
+                builder.createBitcast(loc, first1, builder.getVoidPtrTy());
+            mlir::Value rhs =
+                builder.createBitcast(loc, first2, builder.getVoidPtrTy());
+            mlir::Value len = cir::PtrDiffOp::create(
+                builder, loc, builder.getUIntNTy(*sizeWidth), last1, first1);
+            mlir::Value cmp = cir::MemCmpOp::create(
+                builder, loc, builder.getSIntNTy(*intWidth), lhs, rhs, len);
+            mlir::Value zero =
+                builder.getNullValue(builder.getSIntNTy(*intWidth), loc);
+            builder.createYield(
+                loc, builder.createCompare(loc, cir::CmpOpKind::eq, cmp, zero)
+                         .getResult());
+          })
+          .getResult();
+  equalOp.getResult().replaceAllUsesWith(result);
+  equalOp.erase();
+}
+
 void LibOptPass::runOnOperation() {
   mlir::SymbolTableCollection symbolTables;
   getOperation()->walk([&](mlir::Operation *op) {
@@ -507,7 +648,9 @@ void LibOptPass::runOnOperation() {
               StdRangesFindRangeOp>(
             [&](auto find) { rewriteFindLikeToMemchr(find, symbolTables); })
         .Case<StdSearchOp>(
-            [&](auto search) { rewriteSearchToMemmem(search, symbolTables); });
+            [&](auto search) { rewriteSearchToMemmem(search, symbolTables); })
+        .Case<StdEqualOp>(
+            [&](auto equal) { rewriteEqualToMemcmp(equal, symbolTables); });
   });
 }
 

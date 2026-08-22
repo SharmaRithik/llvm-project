@@ -8,6 +8,12 @@ inline namespace __1 {
 template <class Iter, class T> Iter find(Iter first, Iter last, const T &value);
 template <class Iter1, class Iter2>
 Iter1 search(Iter1 first1, Iter1 last1, Iter2 first2, Iter2 last2);
+template <class Iter1, class Iter2>
+bool equal(Iter1 first1, Iter1 last1, Iter2 first2);
+template <class Iter1, class Iter2>
+bool equal(Iter1 first1, Iter1 last1, Iter2 first2, Iter2 last2);
+template <class Iter1, class Iter2, class Pred>
+bool equal(Iter1 first1, Iter1 last1, Iter2 first2, Pred pred);
 }
 }
 
@@ -30,6 +36,71 @@ char8_t *char8_eligible(char8_t *first, char8_t *last, const char8_t &value) {
 }
 // CHECK-LABEL: cir.func{{.*}} @_Z14char8_eligible
 // CHECK: cir.call @_ZNSt3__14findIPDuDuEET_S2_S2_RKT0_({{.*}}) {{{.*}}cir.narrow_char_params
+
+bool equal_char(char *first1, char *last1, char *first2) {
+  return std::equal(first1, last1, first2);
+}
+// CHECK-LABEL: cir.func{{.*}} @_Z10equal_char
+// CHECK: cir.call @_ZNSt3__15equalIPcS1_EEbT_S2_T0_({{.*}}) {{{.*}}cir.narrow_char_params
+
+bool equal_unsigned_char(unsigned char *first1, unsigned char *last1,
+                         unsigned char *first2) {
+  return std::equal(first1, last1, first2);
+}
+// CHECK-LABEL: cir.func{{.*}} @_Z19equal_unsigned_char
+// CHECK: cir.call @_ZNSt3__15equalIPhS1_EEbT_S2_T0_({{.*}}) {{{.*}}cir.narrow_char_params
+
+bool equal_int(int *first1, int *last1, int *first2) {
+  return std::equal(first1, last1, first2);
+}
+// CHECK-LABEL: cir.func{{.*}} @_Z9equal_int
+// CHECK: cir.call @_ZNSt3__15equalIPiS1_EEbT_S2_T0_
+// CHECK-NOT: cir.narrow_char_params
+
+bool equal_mixed(char *first1, char *last1, unsigned char *first2) {
+  return std::equal(first1, last1, first2);
+}
+// CHECK-LABEL: cir.func{{.*}} @_Z11equal_mixed
+// CHECK: cir.call @_ZNSt3__15equalIPcPhEEbT_S3_T0_
+// CHECK-NOT: cir.narrow_char_params
+
+bool equal_volatile(volatile char *first1, volatile char *last1,
+                    volatile char *first2) {
+  return std::equal(first1, last1, first2);
+}
+// CHECK-LABEL: cir.func{{.*}} @_Z14equal_volatile
+// CHECK: cir.call @_ZNSt3__15equalIPVcS2_EEbT_S3_T0_
+// CHECK-NOT: cir.narrow_char_params
+
+bool equal_wide(wchar_t *first1, wchar_t *last1, wchar_t *first2) {
+  return std::equal(first1, last1, first2);
+}
+
+bool equal_four_ranges(char *first1, char *last1, char *first2, char *last2) {
+  return std::equal(first1, last1, first2, last2);
+}
+
+struct EqualPredicate {
+  char state;
+  bool operator()(char lhs, char rhs) const;
+};
+
+bool equal_predicate(char *first1, char *last1, char *first2,
+                     EqualPredicate pred) {
+  return std::equal(first1, last1, first2, pred);
+}
+// CHECK-LABEL: cir.func{{.*}} @_Z10equal_wide
+// CHECK: cir.call @_ZNSt3__15equalIPwS1_EEbT_S2_T0_
+// CHECK-NOT: cir.narrow_char_params
+
+// CHECK-LABEL: cir.func{{.*}} @_Z17equal_four_ranges
+// CHECK: cir.call @_ZNSt3__15equalIPcS1_EEbT_S2_T0_S3_({{.*}}) {cir.narrow_char_params}
+// CHECK-NOT: cir.std.equal
+
+// CHECK-LABEL: cir.func{{.*}} @_Z15equal_predicate
+// CHECK: cir.call @_ZNSt3__15equalIPcS1_14EqualPredicateEEbT_S3_T0_T1_
+// CHECK-NOT: cir.narrow_char_params
+// CHECK-NOT: cir.std.equal
 
 namespace std {
 inline namespace __1 {
@@ -64,6 +135,14 @@ char *wrapped_eligible(std::span_iter<char *> first, std::span_iter<char *> last
 }
 // CHECK-LABEL: cir.func{{.*}} @_Z16wrapped_eligible
 // CHECK: cir.call @_ZNSt3__14findINS_9span_iterIPcEEcEET_S4_S4_RKT0_({{.*}}) {{{.*}}cir.narrow_char_params
+
+bool equal_wrapped(std::span_iter<char *> first1,
+                   std::span_iter<char *> last1,
+                   std::span_iter<char *> first2) {
+  return std::equal(first1, last1, first2);
+}
+// CHECK-LABEL: cir.func{{.*}} @_Z13equal_wrapped
+// CHECK: cir.call @_ZNSt3__15equalINS_9span_iterIPcEES3_EEbT_S4_T0_({{.*}}) {{{.*}}cir.narrow_char_params
 
 int *wrapped_wide(std::span_iter<int *> first, std::span_iter<int *> last,
                   const int &value) {
@@ -111,6 +190,14 @@ char *gnu_wrapped_eligible(__gnu_cxx::normal_iter<char *, int> first,
 }
 // CHECK-LABEL: cir.func{{.*}} @_Z20gnu_wrapped_eligible
 // CHECK: cir.call @_ZNSt3__14findIN9__gnu_cxx11normal_iterIPciEEcEET_S5_S5_RKT0_({{.*}}) {{{.*}}cir.narrow_char_params
+
+bool equal_gnu_wrapped(__gnu_cxx::normal_iter<unsigned char *, int> first1,
+                       __gnu_cxx::normal_iter<unsigned char *, int> last1,
+                       __gnu_cxx::normal_iter<unsigned char *, int> first2) {
+  return std::equal(first1, last1, first2);
+}
+// CHECK-LABEL: cir.func{{.*}} @_Z17equal_gnu_wrapped
+// CHECK: cir.call @_ZNSt3__15equalIN9__gnu_cxx11normal_iterIPhiEES4_EEbT_S5_T0_({{.*}}) {{{.*}}cir.narrow_char_params
 
 namespace std {
 inline namespace __1 {

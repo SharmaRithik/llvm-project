@@ -1,0 +1,93 @@
+// RUN: cir-opt %s -verify-diagnostics -split-input-file
+
+!s16i = !cir.int<s, 16>
+!s32i = !cir.int<s, 32>
+!s64i = !cir.int<s, 64>
+!u32i = !cir.int<u, 32>
+!u64i = !cir.int<u, 64>
+!voidptr = !cir.ptr<!cir.void>
+!asptr = !cir.ptr<!cir.void, target_address_space(1)>
+module attributes {cir.int_type_width = 32 : i32, cir.size_type_width = 64 : i32} {
+  cir.func @signed_len(%lhs: !voidptr, %rhs: !voidptr, %len: !s64i) {
+    // expected-error@+1 {{'cir.libc.memcmp' op operand #2 must be fundamental unsigned integer type}}
+    %r = cir.libc.memcmp(%lhs, %rhs, %len) : !voidptr, !voidptr, !s64i -> !s32i
+    cir.return
+  }
+  cir.func @unsigned_result(%lhs: !voidptr, %rhs: !voidptr, %len: !u64i) {
+    // expected-error@+1 {{'cir.libc.memcmp' op result #0 must be fundamental signed integer type}}
+    %r = cir.libc.memcmp(%lhs, %rhs, %len) : !voidptr, !voidptr, !u64i -> !u32i
+    cir.return
+  }
+  cir.func @wrong_result_width(%lhs: !voidptr, %rhs: !voidptr, %len: !u64i) {
+    // expected-error@+1 {{'cir.libc.memcmp' op result must have the width recorded in cir.int_type_width}}
+    %r = cir.libc.memcmp(%lhs, %rhs, %len) : !voidptr, !voidptr, !u64i -> !s16i
+    cir.return
+  }
+  cir.func @wrong_len_width(%lhs: !voidptr, %rhs: !voidptr, %len: !u32i) {
+    // expected-error@+1 {{'cir.libc.memcmp' op len must have the width recorded in cir.size_type_width}}
+    %r = cir.libc.memcmp(%lhs, %rhs, %len) : !voidptr, !voidptr, !u32i -> !s32i
+    cir.return
+  }
+  cir.func @lhs_address_space(%lhs: !asptr, %rhs: !voidptr, %len: !u64i) {
+    // expected-error@+1 {{'cir.libc.memcmp' op lhs must be in the default address space}}
+    %r = "cir.libc.memcmp"(%lhs, %rhs, %len) : (!asptr, !voidptr, !u64i) -> !s32i
+    cir.return
+  }
+  cir.func @rhs_address_space(%lhs: !voidptr, %rhs: !asptr, %len: !u64i) {
+    // expected-error@+1 {{'cir.libc.memcmp' op rhs must be in the default address space}}
+    %r = "cir.libc.memcmp"(%lhs, %rhs, %len) : (!voidptr, !asptr, !u64i) -> !s32i
+    cir.return
+  }
+}
+
+// -----
+
+!s32i = !cir.int<s, 32>
+!u64i = !cir.int<u, 64>
+!voidptr = !cir.ptr<!cir.void>
+module attributes {cir.size_type_width = 64 : i32} {
+  cir.func @missing_int(%lhs: !voidptr, %rhs: !voidptr, %len: !u64i) {
+    // expected-error@+1 {{'cir.libc.memcmp' op expects the module to record cir.int_type_width}}
+    %r = cir.libc.memcmp(%lhs, %rhs, %len) : !voidptr, !voidptr, !u64i -> !s32i
+    cir.return
+  }
+}
+
+// -----
+
+!s32i = !cir.int<s, 32>
+!u64i = !cir.int<u, 64>
+!voidptr = !cir.ptr<!cir.void>
+module attributes {cir.int_type_width = 32 : i32} {
+  cir.func @missing_size(%lhs: !voidptr, %rhs: !voidptr, %len: !u64i) {
+    // expected-error@+1 {{'cir.libc.memcmp' op expects the module to record cir.size_type_width}}
+    %r = cir.libc.memcmp(%lhs, %rhs, %len) : !voidptr, !voidptr, !u64i -> !s32i
+    cir.return
+  }
+}
+
+// -----
+
+!s32i = !cir.int<s, 32>
+!u64i = !cir.int<u, 64>
+!voidptr = !cir.ptr<!cir.void>
+module attributes {cir.int_type_width = "32", cir.size_type_width = 64 : i32} {
+  cir.func @string_int(%lhs: !voidptr, %rhs: !voidptr, %len: !u64i) {
+    // expected-error@+1 {{'cir.libc.memcmp' op requires cir.int_type_width to be a signless i32 holding a fundamental integer width}}
+    %r = cir.libc.memcmp(%lhs, %rhs, %len) : !voidptr, !voidptr, !u64i -> !s32i
+    cir.return
+  }
+}
+
+// -----
+
+!s32i = !cir.int<s, 32>
+!u64i = !cir.int<u, 64>
+!voidptr = !cir.ptr<!cir.void>
+module attributes {cir.int_type_width = 32 : i32, cir.size_type_width = "64"} {
+  cir.func @string_size(%lhs: !voidptr, %rhs: !voidptr, %len: !u64i) {
+    // expected-error@+1 {{'cir.libc.memcmp' op requires cir.size_type_width to be a signless i32 holding a fundamental integer width}}
+    %r = cir.libc.memcmp(%lhs, %rhs, %len) : !voidptr, !voidptr, !u64i -> !s32i
+    cir.return
+  }
+}

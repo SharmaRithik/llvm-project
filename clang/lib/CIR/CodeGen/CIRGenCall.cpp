@@ -380,7 +380,8 @@ void CIRGenModule::constructAttributeList(
           // misaligned false positive.
           narrowSearch = func->getNumParams() == 4 && hasNarrowCharParams(func);
         }
-        if ((kind == cir::KnownFuncKind::StdFind &&
+        if (((kind == cir::KnownFuncKind::StdFind ||
+              kind == cir::KnownFuncKind::StdEqual) &&
              hasNarrowCharParams(func)) ||
             narrowSearch ||
             (kind == cir::KnownFuncKind::StdRangesFind &&

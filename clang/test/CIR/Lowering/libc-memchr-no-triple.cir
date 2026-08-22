@@ -33,4 +33,12 @@ module attributes {cir.int_type_width = 32 : i32,
 // CHECK: llvm.call @memmem(%{{.*}}, %{{.*}}, %{{.*}}, %{{.*}})
 // CHECK-NOT: llvm.signext
 // CHECK-NOT: llvm.zeroext
+
+  cir.func @i(%lhs: !cir.ptr<!void>, %rhs: !cir.ptr<!void>, %len: !u64i) -> !s32i {
+    %0 = cir.libc.memcmp(%lhs, %rhs, %len) : !cir.ptr<!void>, !cir.ptr<!void>, !u64i -> !s32i
+    cir.return %0 : !s32i
+  }
+// CHECK-LABEL: @i
+// CHECK: llvm.call @memcmp(%{{.*}}, %{{.*}}, %{{.*}})
+// CHECK-NOT: llvm.signext
 }
