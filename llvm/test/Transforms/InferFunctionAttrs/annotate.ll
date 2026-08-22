@@ -729,6 +729,10 @@ declare ptr @memchr(ptr, i32, i64)
 ; CHECK: declare i32 @memcmp(ptr captures(none), ptr captures(none), i64) [[ARGMEMONLY_NOFREE_NOUNWIND_READONLY]]
 declare i32 @memcmp(ptr, ptr, i64)
 
+; CHECK-LINUX:   declare ptr @memmem(ptr, i64, ptr, i64) [[ARGMEMONLY_NOFREE_NOUNWIND_READONLY]]
+; CHECK-UNKNOWN: declare ptr @memmem(ptr, i64, ptr, i64) [[ARGMEMONLY_NOFREE_NOUNWIND_READONLY]]
+declare ptr @memmem(ptr, i64, ptr, i64)
+
 ; CHECK: declare ptr @memcpy(ptr noalias returned writeonly, ptr noalias readonly captures(none), i64) [[ARGMEMONLY_NOFREE_NOSYNC_NOUNWIND_WILLRETURN]]
 declare ptr @memcpy(ptr, ptr, i64)
 
