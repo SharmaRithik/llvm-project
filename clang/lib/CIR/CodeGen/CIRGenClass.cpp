@@ -1295,6 +1295,36 @@ Address CIRGenFunction::getAddressOfBaseClass(
 
   assert(!cir::MissingFeatures::sanitizers());
 
+  // The virtual base offset is loaded through the vptr, so a source pointer
+  // that may be null must skip that load and convert to a null result.
+  // cir.base_class_addr owns this check on the static offset path, while the
+  // virtual path emits the vptr load inline, so the guard is an explicit
+  // ternary around it.
+  if (vBase && nullCheckValue) {
+    mlir::Value srcPtr = value.getPointer();
+    mlir::Value isNull = builder.createPtrIsNull(srcPtr);
+    CharUnits alignment;
+    auto ternary = cir::TernaryOp::create(
+        builder, getLoc(loc), isNull,
+        /*thenBuilder=*/
+        [&](mlir::OpBuilder &, mlir::Location l) {
+          cir::YieldOp::create(
+              builder, l, builder.getNullPtr(srcPtr.getType(), l).getRes());
+        },
+        /*elseBuilder=*/
+        [&](mlir::OpBuilder &, mlir::Location l) {
+          mlir::Value virtualOffset = cgm.getCXXABI().getVirtualBaseClassOffset(
+              l, *this, value, derived, vBase);
+          Address adjusted = applyNonVirtualAndVirtualOffset(
+              l, *this, value, nonVirtualOffset, virtualOffset, derived, vBase,
+              baseValueTy, /*assumeNotNull=*/true);
+          alignment = adjusted.getAlignment();
+          cir::YieldOp::create(builder, l, adjusted.getPointer());
+        });
+    return Address(ternary.getResult(), alignment)
+        .withElementType(builder, baseValueTy);
+  }
+
   // Compute the virtual offset.
   mlir::Value virtualOffset = nullptr;
   if (vBase) {
