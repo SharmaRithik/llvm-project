@@ -501,3 +501,30 @@ module attributes {cir.triple = "x86_64-unknown-linux-gnu",
 // CHECK: cir.insert_member %[[FIRSTW]][0], %{{.*}}
 // CHECK-NOT: cir.std.find_if
 }
+
+// -----
+
+!u8i = !cir.int<u, 8>
+!cpo = !cir.struct<class "std::__1::ranges::__find" {pad !u8i}>
+!identity = !cir.struct<class "std::__1::identity" {pad !u8i}>
+
+module attributes {cir.triple = "x86_64-unknown-linux-gnu",
+                   cir.int_type_width = 32 : i32, cir.size_type_width = 64 : i32} {
+  cir.func private @_ZNKSt3__16ranges6__findclIPhhNS_8identityEEET_S4_S4_RKT0_T1_(!cir.ptr<!cpo>, !cir.ptr<!u8i>, !cir.ptr<!u8i>, !cir.ptr<!u8i>, !identity) -> !cir.ptr<!u8i> func_info<#cir.func_identity<"std::ranges::find">>
+
+  cir.func @rewrites_ranges_find(%this: !cir.ptr<!cpo>, %first: !cir.ptr<!u8i>, %last: !cir.ptr<!u8i>, %value: !cir.ptr<!u8i>, %proj: !identity) -> !cir.ptr<!u8i> {
+    %0 = cir.std.ranges.find(%this : !cir.ptr<!cpo>, %first : !cir.ptr<!u8i>, %last : !cir.ptr<!u8i>, %value : !cir.ptr<!u8i>, %proj : !identity, @_ZNKSt3__16ranges6__findclIPhhNS_8identityEEET_S4_S4_RKT0_T1_) -> !cir.ptr<!u8i> {cir.narrow_char_params}
+    cir.return %0 : !cir.ptr<!u8i>
+  }
+// CHECK-LABEL: @rewrites_ranges_find
+// CHECK: cir.libc.memchr
+// CHECK-NOT: cir.std.ranges.find
+
+  cir.func @keeps_unmarked_ranges_find(%this: !cir.ptr<!cpo>, %first: !cir.ptr<!u8i>, %last: !cir.ptr<!u8i>, %value: !cir.ptr<!u8i>, %proj: !identity) -> !cir.ptr<!u8i> {
+    %0 = cir.std.ranges.find(%this : !cir.ptr<!cpo>, %first : !cir.ptr<!u8i>, %last : !cir.ptr<!u8i>, %value : !cir.ptr<!u8i>, %proj : !identity, @_ZNKSt3__16ranges6__findclIPhhNS_8identityEEET_S4_S4_RKT0_T1_) -> !cir.ptr<!u8i>
+    cir.return %0 : !cir.ptr<!u8i>
+  }
+// CHECK-LABEL: @keeps_unmarked_ranges_find
+// CHECK: cir.std.ranges.find({{.*}}@_ZNKSt3__16ranges6__findclIPhhNS_8identityEEET_S4_S4_RKT0_T1_)
+// CHECK-NOT: cir.libc.memchr
+}

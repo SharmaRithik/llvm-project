@@ -66,15 +66,18 @@ mlir::LogicalResult LibOptPass::initializeOptions(
   return mlir::success();
 }
 
-// Rewrites cir.std.find and the byte-equality-predicate forms of
-// cir.std.find_if and cir.std.find_if_not. All three search for the first
-// equal byte, so they share everything except where the byte comes from:
-// the by-reference pattern for find and the closure's single capture for
-// the predicate forms.
+// Rewrites cir.std.find, cir.std.ranges.find, and the
+// byte-equality-predicate forms of cir.std.find_if and
+// cir.std.find_if_not. All four search for the first equal byte, so they
+// share everything except where the byte comes from: the by-reference
+// pattern for the find forms and the closure's single capture for the
+// predicate forms. The cpo and proj operands of cir.std.ranges.find are
+// carried only for lowering back and play no part here.
 template <typename OpT>
 static void rewriteFindLikeToMemchr(OpT findOp,
                                     mlir::SymbolTableCollection &symbolTables) {
-  constexpr bool predOp = !std::is_same_v<OpT, StdFindOp>;
+  constexpr bool predOp =
+      std::is_same_v<OpT, StdFindIfOp> || std::is_same_v<OpT, StdFindIfNotOp>;
   // A std contiguous iterator wraps the pointer as its only member.  The
   // narrow character fact CIRGen recorded is what licenses reading that
   // member as the address, so the rewrite runs on the wrapped pointer and
@@ -243,7 +246,7 @@ void LibOptPass::runOnOperation() {
   mlir::SymbolTableCollection symbolTables;
   getOperation()->walk([&](mlir::Operation *op) {
     llvm::TypeSwitch<mlir::Operation *>(op)
-        .Case<StdFindOp, StdFindIfOp, StdFindIfNotOp>(
+        .Case<StdFindOp, StdFindIfOp, StdFindIfNotOp, StdRangesFindOp>(
             [&](auto find) { rewriteFindLikeToMemchr(find, symbolTables); });
   });
 }

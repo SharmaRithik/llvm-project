@@ -39,6 +39,20 @@ module {
   }
 }
 
+// -----
+
+!s8i = !cir.int<s, 8>
+!s32i = !cir.int<s, 32>
+!cpo = !cir.struct<class "std::__1::ranges::__find" {pad !s8i}>
+!identity = !cir.struct<class "std::__1::identity" {pad !s8i}>
+
+module {
+  cir.func @bad_ranges_find(%c: !cir.ptr<!cpo>, %f: !cir.ptr<!s8i>, %l: !cir.ptr<!s8i>, %v: !cir.ptr<!s8i>, %p: !identity) -> !s32i {
+    // expected-error@below {{'cir.std.ranges.find' op failed to verify that all of {first, last, result} have same type}}
+    %0 = cir.std.ranges.find(%c : !cir.ptr<!cpo>, %f : !cir.ptr<!s8i>, %l : !cir.ptr<!s8i>, %v : !cir.ptr<!s8i>, %p : !identity, @x) -> !s32i
+    cir.return %0 : !s32i
+  }
+}
 
 // -----
 

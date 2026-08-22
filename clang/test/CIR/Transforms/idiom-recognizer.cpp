@@ -5,12 +5,12 @@
 // an error in the post-pass dump, so the test only passes if it was raised to
 // cir.std.find. The FINAL run checks the lowered output and its implicit-check-not
 // proves no raised operation leaked past LoweringPrepare.
-// RUN: %clang_cc1 -std=c++17 -triple x86_64-unknown-linux-gnu -fclangir -clangir-enable-idiom-recognizer -emit-cir -mmlir --mlir-print-ir-after=cir-idiom-recognizer %s -o %t.cir 2>&1 | FileCheck %s --check-prefix=RAISED '--implicit-check-not=cir.call @_ZSt4find'
+// RUN: %clang_cc1 -std=c++17 -triple x86_64-unknown-linux-gnu -fclangir -clangir-enable-idiom-recognizer -emit-cir -mmlir --mlir-print-ir-after=cir-idiom-recognizer %s -o %t.cir 2>&1 | FileCheck %s --check-prefix=RAISED '--implicit-check-not=cir.call @_ZSt4find' '--implicit-check-not=cir.call @_ZNKSt6ranges'
 // RUN: FileCheck %s --check-prefix=FINAL --input-file=%t.cir --implicit-check-not=cir.std.
 
 // On targets where plain char is unsigned the pointer lowers to !u8i, and
 // recognition works the same.
-// RUN: %clang_cc1 -std=c++17 -triple aarch64-unknown-linux-gnu -fno-signed-char -fclangir -clangir-enable-idiom-recognizer -emit-cir -mmlir --mlir-print-ir-after=cir-idiom-recognizer %s -o %t.aarch64.cir 2>&1 | FileCheck %s --check-prefix=RAISED
+// RUN: %clang_cc1 -std=c++17 -triple aarch64-unknown-linux-gnu -fno-signed-char -fclangir -clangir-enable-idiom-recognizer -emit-cir -mmlir --mlir-print-ir-after=cir-idiom-recognizer %s -o %t.aarch64.cir 2>&1 | FileCheck %s --check-prefix=RAISED '--implicit-check-not=cir.call @_ZNKSt6ranges'
 
 // A no builtin list for another function survives the round trip on the
 // rebuilt call.
@@ -24,6 +24,25 @@
 namespace std {
 template <class Iter, class T>
 __attribute__((pure)) Iter find(Iter, Iter, const T &) noexcept;
+// Real std::identity is empty and call convention lowering drops an
+// empty record argument, so this one carries a byte to keep the
+// projection operand visible in the lowered call.
+struct identity {
+  unsigned char state;
+  template <class T> T &&operator()(T &&t) const;
+};
+namespace ranges {
+namespace __find {
+struct __fn {
+  template <class Iter, class Sent, class T, class Proj = identity>
+  Iter operator()(Iter first, Sent last, const T &value,
+                  Proj proj = {}) const noexcept;
+};
+}
+inline namespace __cpo {
+inline constexpr __find::__fn find{};
+}
+}
 }
 extern "C" unsigned long strlen(const char *);
 
@@ -47,6 +66,27 @@ char *test_find(char *first, char *last, const char &value) {
 // FINAL-SAME: {llvm.noundef}
 // FINAL-SAME: -> (!cir.ptr<!s8i> {llvm.noundef})
 // FINAL-NOT: cir.call @_ZSt4find
+
+unsigned char *test_ranges_find(unsigned char *first, unsigned char *last,
+                                const unsigned char &value) {
+  return std::ranges::find(first, last, value);
+}
+// The call through the customization point object raises with all five
+// operands and lowers back to the exact same call with them in order.
+// RAISED: %[[CPO:.*]] = cir.get_global @_ZNSt6ranges5__cpo4findE
+// RAISED: %[[FIRST:.*]] = cir.load align(8)
+// RAISED: %[[LAST:.*]] = cir.load align(8)
+// RAISED: %[[VALUE:.*]] = cir.load %
+// RAISED: %[[PROJ:.*]] = cir.load align(1)
+// RAISED: cir.std.ranges.find(%[[CPO]] : !cir.ptr<!rec_std3A3Aranges3A3A__find3A3A__fn>, %[[FIRST]] : !cir.ptr<!u8i>, %[[LAST]] : !cir.ptr<!u8i>, %[[VALUE]] : !cir.ptr<!u8i>, %[[PROJ]] : !rec_std3A3Aidentity, @_ZNKSt6ranges6__find4__fnclIPhS3_hSt8identityEET_S5_T0_RKT1_T2_)
+// RAISED-SAME: cir.narrow_char_params
+// FINAL: %[[RCPO:.*]] = cir.get_global @_ZNSt6ranges5__cpo4findE
+// FINAL: %[[RFIRST:.*]] = cir.load align(8)
+// FINAL: %[[RLAST:.*]] = cir.load align(8)
+// FINAL: %[[RVALUE:.*]] = cir.load %
+// FINAL: %[[RPROJ:.*]] = cir.load %
+// FINAL: cir.call @_ZNKSt6ranges6__find4__fnclIPhS3_hSt8identityEET_S5_T0_RKT1_T2_(%[[RCPO]], %[[RFIRST]], %[[RLAST]], %[[RVALUE]], %[[RPROJ]]) nothrow
+// FINAL-SAME: cir.narrow_char_params
 
 unsigned long test_strlen(const char *s) { return strlen(s); }
 // RAISED: cir.std.strlen(

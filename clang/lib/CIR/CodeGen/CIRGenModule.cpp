@@ -3730,23 +3730,60 @@ void CIRGenModule::setFuncInfoAttr(cir::FuncOp funcOp,
   funcOp.setFuncInfoAttr(cir::FuncIdentityAttr::get(&getMLIRContext(), *kind));
 }
 
+/// Whether `rec` is the class of the customization point object declared
+/// as `name` in std::ranges. The class itself is implementation detail
+/// with a reserved name, so the identity comes from the object's declared
+/// name and type. Members of an inline namespace are visible in the
+/// enclosing namespace's lookup, so one lookup in ranges finds the object
+/// whether it is declared there directly or inside an inline namespace
+/// like libc++'s __cpo, and a using declaration resolves through its
+/// underlying declaration.
+static bool isStdRangesCpo(const clang::CXXRecordDecl *rec,
+                           llvm::StringRef name) {
+  const clang::NamespaceDecl *rangesNs = nullptr;
+  for (const clang::DeclContext *ctx = rec->getDeclContext(); ctx;
+       ctx = ctx->getParent()) {
+    const auto *ns = dyn_cast<clang::NamespaceDecl>(ctx);
+    if (ns && ns->getIdentifier() && ns->getName() == "ranges") {
+      rangesNs = ns;
+      break;
+    }
+  }
+  if (!rangesNs || !rangesNs->isInStdNamespace())
+    return false;
+
+  clang::ASTContext &astCtx = rec->getASTContext();
+  clang::DeclarationName dn(&astCtx.Idents.get(name));
+  for (const clang::NamedDecl *found : rangesNs->lookup(dn)) {
+    const auto *var = dyn_cast<clang::VarDecl>(found->getUnderlyingDecl());
+    const clang::CXXRecordDecl *varRec =
+        var ? var->getType()->getAsCXXRecordDecl() : nullptr;
+    if (varRec && varRec->getCanonicalDecl() == rec->getCanonicalDecl())
+      return true;
+  }
+  return false;
+}
+
 std::optional<cir::KnownFuncKind>
 CIRGenModule::getKnownFuncKind(const FunctionDecl *funcDecl) {
-  // A known entity is named by a plain identifier in std. For a member the
-  // record decides std membership. Inline namespaces, like the versioning
-  // namespace of libc++, count as part of std.
-  if (!funcDecl->getIdentifier())
-    return std::nullopt;
   const auto *method = dyn_cast<CXXMethodDecl>(funcDecl);
-  bool inStdNamespace = method ? method->getParent()->isInStdNamespace()
-                               : funcDecl->isInStdNamespace();
-  if (!inStdNamespace)
-    return std::nullopt;
 
-  // The names and the tags come from CIRStdOps.td, and the recognizer checks
-  // the shape of each call. Only free functions name a known entity today, so
-  // a member like char_traits::find never shares the tag of the free std::find.
-  if (method)
+  // A member almost never names a known entity, so char_traits::find never
+  // shares the tag of the free std::find. The exception is the call
+  // operator of a customization point object, whose identity is the
+  // object's declared name.
+  if (method) {
+    if (method->getOverloadedOperator() == clang::OO_Call &&
+        isStdRangesCpo(method->getParent(), "find"))
+      return cir::StdRangesFindOp::getFuncKind();
+    return std::nullopt;
+  }
+
+  // A known free function is named by a plain identifier in std. Inline
+  // namespaces, like the versioning namespace of libc++, count as part of
+  // std. The names and the tags come from CIRStdOps.td, and the recognizer
+  // checks the shape of each call.
+  if (!funcDecl->getIdentifier() || !funcDecl->isInStdNamespace())
     return std::nullopt;
   return llvm::StringSwitch<std::optional<cir::KnownFuncKind>>(
              funcDecl->getName())
@@ -3850,6 +3887,26 @@ bool CIRGenModule::hasNarrowCharParams(const FunctionDecl *funcDecl) {
              firstPointee = pointee;
            return pointee == firstPointee;
          });
+}
+
+/// Whether `funcDecl` is a call operator taking a narrow character
+/// iterator pair and value like std::find, plus a projection parameter
+/// that has to be std::identity, so projecting changes nothing and the
+/// search compares raw bytes. Every implementation declares the
+/// defaulted projection as a real parameter, so the operator has
+/// exactly four.
+bool CIRGenModule::hasNarrowCharRangesFindParams(const FunctionDecl *funcDecl) {
+  if (funcDecl->getNumParams() != 4)
+    return false;
+  clang::QualType charTy = narrowCharPointee(funcDecl->getParamDecl(0));
+  if (charTy.isNull() ||
+      narrowCharPointee(funcDecl->getParamDecl(1)) != charTy ||
+      narrowCharPointee(funcDecl->getParamDecl(2)) != charTy)
+    return false;
+  const clang::CXXRecordDecl *projRec =
+      funcDecl->getParamDecl(3)->getType()->getAsCXXRecordDecl();
+  return projRec && projRec->isInStdNamespace() && projRec->getIdentifier() &&
+         projRec->getName() == "identity";
 }
 
 bool CIRGenModule::hasByteEqPredicate(const FunctionDecl *funcDecl,
