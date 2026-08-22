@@ -139,6 +139,12 @@ public:
 
   const CIRGenRecordLayout &getCIRGenRecordLayout(const clang::RecordDecl *rd);
 
+  /// Attach the standard library identity to a completed record type when
+  /// the declaration names a known std type with a recognized layout.
+  void attachStdTypeInfo(const clang::RecordDecl *rd, cir::RecordType entry);
+  bool findFieldPath(const clang::RecordDecl *rd, llvm::StringRef name,
+                     llvm::SmallVectorImpl<uint32_t> &path);
+
   /// Convert type T into an mlir::Type. This differs from convertType in that
   /// it is used to convert to the memory representation for a type. For
   /// example, the scalar representation for bool is i1, but the memory

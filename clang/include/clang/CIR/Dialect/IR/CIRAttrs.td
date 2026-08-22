@@ -1544,6 +1544,75 @@ def CIR_FuncInfoAttr : AnyAttrOf<[
   CIR_FuncIdentityAttr
 ], "function information attribute">;
 
+// The standard library types the type info can name.
+def CIR_StdTypeKind : CIR_I32EnumAttr<"StdTypeKind",
+    "known standard library type", [
+  I32EnumAttrCase<"StdVector", 1, "std::vector">,
+]> {
+  let genSpecializedAttr = 0;
+  // A name like std::vector is not a bare identifier, so print it as a
+  // quoted string. The enum parser already reads a quoted string back.
+  let parameterPrinter =
+      "$_printer.printKeywordOrString(" # symbolToStringFnName # "($_self))";
+}
+
+def CIR_StdTypeInfoAttr : CIR_Attr<"StdTypeInfo", "std_type_info"> {
+  let summary = "Identifies a record as a known standard library type";
+  let description = [{
+    Names the standard library type a record represents, the type analog
+    of `#cir.func_identity`, so that transformations can recognize the
+    objects of well known library types without decoding mangled record
+    names. CIRGen only attaches the tag after verifying the record has
+    the member layout the roles describe, and a consumer owns proving
+    everything else it needs.
+
+    `element` is the type of the objects the container owns. `begin_path`
+    and `end_path` are member index paths from the record to the two
+    pointers bounding the owned storage, since an implementation may nest
+    them inside implementation detail records. The paths are the roles a
+    contiguous container kind carries; another kind of type would carry
+    the roles its consumers need instead, with `kind` and `element` as
+    the common core.
+
+    A consumer has to run before ABI lowering rewrites record types,
+    which re-creates records and carries the identity over but may
+    change the member types behind the paths, so the recorded facts are
+    only re-provable against the CIRGen emitted record.
+
+    Example:
+    ```
+    #cir.std_type_info<"std::vector", !s8i,
+                       begin [0, 0], end [0, 1]>
+    ```
+  }];
+
+  let parameters = (ins
+    EnumParameter<CIR_StdTypeKind>:$kind,
+    "mlir::Type":$element,
+    ArrayRefParameter<"uint32_t">:$begin_path,
+    ArrayRefParameter<"uint32_t">:$end_path
+  );
+
+  let assemblyFormat = [{
+    `<` $kind `,` $element `,`
+    `begin` `` `[` $begin_path `]` `,`
+    `end` `` `[` $end_path `]` `>`
+  }];
+
+  let extraClassDeclaration = [{
+    /// The member type a path resolves to through `root`, walking complete
+    /// non-union records only, or null when the path leaves that shape.
+    /// `steps` receives the member type of every path step when supplied,
+    /// so a consumer emitting member accesses uses the same walk that
+    /// validated the path.
+    static mlir::Type
+    resolvePath(cir::RecordType root, llvm::ArrayRef<uint32_t> path,
+                llvm::SmallVectorImpl<mlir::Type> *steps = nullptr);
+  }];
+
+  let canHaveIllegalCXXABIType = 0;
+}
+
 //===----------------------------------------------------------------------===//
 // BitfieldInfoAttr
 //===----------------------------------------------------------------------===//

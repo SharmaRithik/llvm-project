@@ -49,6 +49,10 @@ struct StructTypeStorage : public mlir::TypeStorage {
   bool packed;
   llvm::ArrayRef<RecordMemberKind> member_kinds;
   bool is_class;
+  // The standard library identity of the record, when CIRGen attached one.
+  // Not part of the key: a named record is unique by name, and the identity
+  // is a fact about that record rather than a distinguishing parameter.
+  mlir::Attribute std_type_info;
 
   StructTypeStorage(llvm::ArrayRef<mlir::Type> members, mlir::StringAttr name,
                     bool incomplete, bool packed,
@@ -112,6 +116,18 @@ struct StructTypeStorage : public mlir::TypeStorage {
     this->packed = packed;
     this->member_kinds = allocator.copyInto(memberKinds);
     incomplete = false;
+    return llvm::success();
+  }
+
+  /// Attaches the standard library identity. Only a complete named record
+  /// can carry one, and a second attachment must agree with the first.
+  llvm::LogicalResult mutate(mlir::TypeStorageAllocator &allocator,
+                             mlir::Attribute stdTypeInfo) {
+    if (!name || incomplete)
+      return llvm::failure();
+    if (std_type_info && std_type_info != stdTypeInfo)
+      return llvm::failure();
+    std_type_info = stdTypeInfo;
     return llvm::success();
   }
 };

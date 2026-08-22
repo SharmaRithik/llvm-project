@@ -238,6 +238,124 @@ bool CIRGenModule::isPaddedAtomicType(const AtomicType *type) {
 }
 
 /// Lay out a tagged decl type like struct or union.
+
+/// Finds the field spelled `name` in `rd`, descending into the record typed
+/// fields an implementation nests its data in, and appends the CIR member
+/// index of every step to `path`.
+bool CIRGenTypes::findFieldPath(const clang::RecordDecl *rd,
+                                llvm::StringRef name,
+                                llvm::SmallVectorImpl<uint32_t> &path) {
+  const CIRGenRecordLayout &layout = getCIRGenRecordLayout(rd);
+  for (const clang::FieldDecl *field : rd->fields()) {
+    if (field->isBitField() || !layout.hasCIRField(field))
+      continue;
+    if (field->getIdentifier() && field->getName() == name) {
+      path.push_back(layout.getCIRFieldNo(field));
+      return true;
+    }
+    // A union member holds alternatives rather than subobjects the paths
+    // could describe, so the descent skips it.
+    if (const auto *nested = field->getType()->getAsCXXRecordDecl();
+        nested && !nested->isUnion()) {
+      path.push_back(layout.getCIRFieldNo(field));
+      if (findFieldPath(nested->getDefinitionOrSelf(), name, path))
+        return true;
+      path.pop_back();
+    }
+  }
+  // An implementation may keep the data in a base class subobject, like
+  // libstdc++'s _Vector_base chain. An empty base owns no slot and holds
+  // no field either way.
+  const auto *cxxrd = dyn_cast<CXXRecordDecl>(rd);
+  if (!cxxrd)
+    return false;
+  for (const clang::CXXBaseSpecifier &base : cxxrd->bases()) {
+    // A virtual base has no stable member index a path could record.
+    if (base.isVirtual())
+      continue;
+    const clang::CXXRecordDecl *baseDecl = base.getType()->getAsCXXRecordDecl();
+    if (!baseDecl)
+      continue;
+    baseDecl = baseDecl->getDefinitionOrSelf();
+    if (!layout.hasNonVirtualBaseCIRField(baseDecl))
+      continue;
+    path.push_back(layout.getNonVirtualBaseCIRFieldNo(baseDecl));
+    if (findFieldPath(baseDecl, name, path))
+      return true;
+    path.pop_back();
+  }
+  return false;
+}
+
+/// Attaches the standard library identity to a just completed record when
+/// the declaration is a std::vector specialization over a narrow character
+/// type and the layout stores its bounds under the field names a known
+/// implementation uses. The names pin the begin and end roles, so member
+/// order proves nothing here, and a layout matching no known implementation
+/// gets no identity. Rewrites re-verify the member types behind the paths.
+void CIRGenTypes::attachStdTypeInfo(const clang::RecordDecl *rd,
+                                    cir::RecordType entry) {
+  auto structTy = mlir::dyn_cast<cir::StructType>(mlir::Type(entry));
+  if (!structTy || structTy.getStdTypeInfo())
+    return;
+
+  const auto *spec = dyn_cast<clang::ClassTemplateSpecializationDecl>(rd);
+  if (!spec || !spec->isInStdNamespace() || !spec->getIdentifier() ||
+      spec->getName() != "vector")
+    return;
+  // A program may legally specialize std::vector for a program defined
+  // allocator, and such a specialization owes this layout nothing, so only
+  // an instantiation of the primary template gets the identity.
+  if (!isa<clang::ClassTemplateDecl *>(
+          spec->getSpecializedTemplateOrPartial()) ||
+      spec->getSpecializationKind() == clang::TSK_ExplicitSpecialization)
+    return;
+  const clang::TemplateArgumentList &args = spec->getTemplateArgs();
+  if (args.size() == 0 || args[0].getKind() != clang::TemplateArgument::Type)
+    return;
+  clang::QualType elemQt = args[0].getAsType();
+  if (elemQt.isVolatileQualified() ||
+      (!elemQt->isCharType() && !elemQt->isChar8Type()))
+    return;
+  elemQt = elemQt.getCanonicalType().getUnqualifiedType();
+
+  // The bounds pair of each verified implementation, by field name, libc++
+  // then libstdc++. The MSVC standard library has no entry because it nests
+  // its pair inside a compressed pair member and no path through that layout
+  // has been verified against the real headers.
+  static constexpr struct {
+    llvm::StringLiteral begin;
+    llvm::StringLiteral end;
+  } boundsNames[] = {
+      {"__begin_", "__end_"},
+      {"_M_start", "_M_finish"},
+  };
+
+  mlir::Type elemTy = convertType(elemQt);
+  auto elemPtrTy = cir::PointerType::get(elemTy);
+  auto memberAt = [&](llvm::ArrayRef<uint32_t> path) {
+    return cir::StdTypeInfoAttr::resolvePath(structTy, path);
+  };
+
+  for (const auto &names : boundsNames) {
+    llvm::SmallVector<uint32_t, 4> beginPath, endPath;
+    if (!findFieldPath(rd, names.begin, beginPath) ||
+        !findFieldPath(rd, names.end, endPath))
+      continue;
+    // The two names have to be siblings of one subobject and land on
+    // pointers to the element, so a decoy field elsewhere in the record
+    // cannot supply one bound while the real layout supplies the other.
+    if (beginPath.size() != endPath.size() ||
+        !std::equal(beginPath.begin(), beginPath.end() - 1, endPath.begin()) ||
+        memberAt(beginPath) != elemPtrTy || memberAt(endPath) != elemPtrTy)
+      continue;
+    structTy.setStdTypeInfo(cir::StdTypeInfoAttr::get(
+        &getMLIRContext(), cir::StdTypeKind::StdVector, elemTy, beginPath,
+        endPath));
+    return;
+  }
+}
+
 mlir::Type CIRGenTypes::convertRecordDeclType(const clang::RecordDecl *rd) {
   // TagDecl's are not necessarily unique, instead use the (clang) type
   // connected to the decl.
@@ -284,6 +402,8 @@ mlir::Type CIRGenTypes::convertRecordDeclType(const clang::RecordDecl *rd) {
   std::unique_ptr<CIRGenRecordLayout> layout = computeRecordLayout(rd, &entry);
   recordDeclTypes[key] = entry;
   cirGenRecordLayouts[key] = std::move(layout);
+
+  attachStdTypeInfo(rd, entry);
 
   // We're done laying out this record.
   bool eraseResult = recordsBeingLaidOut.erase(key);
