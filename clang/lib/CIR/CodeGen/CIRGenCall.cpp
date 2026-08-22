@@ -375,7 +375,8 @@ void CIRGenModule::constructAttributeList(
         if ((kind == cir::KnownFuncKind::StdFind &&
              hasNarrowCharParams(func)) ||
             (kind == cir::KnownFuncKind::StdRangesFind &&
-             hasNarrowCharRangesFindParams(func))) {
+             (hasNarrowCharRangesFindParams(func) ||
+              hasNarrowCharRangesFindRangeParams(func)))) {
           addUnitAttr(cir::CIRDialect::getNarrowCharParamsAttrName());
         } else if (kind == cir::KnownFuncKind::StdFindIf ||
                    kind == cir::KnownFuncKind::StdFindIfNot) {

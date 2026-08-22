@@ -4033,6 +4033,36 @@ byteEqPredicateShape(const FunctionDecl *funcDecl, cir::KnownFuncKind kind) {
   return ByteEqPredicateShape{closure, charTy, other};
 }
 
+/// Whether `funcDecl` is the whole range call operator of ranges::find,
+/// taking a reference to a container whose record type carries a standard
+/// library identity over the searched narrow character type, the value,
+/// and a projection that has to be std::identity. The identity supplies
+/// the member paths to the container's bounds, so the rewrite needs no
+/// further layout facts.
+bool CIRGenModule::hasNarrowCharRangesFindRangeParams(
+    const FunctionDecl *funcDecl) {
+  if (funcDecl->getNumParams() != 3)
+    return false;
+  clang::QualType rangeTy =
+      funcDecl->getParamDecl(0)->getType().getNonReferenceType();
+  if (rangeTy.isVolatileQualified() || !rangeTy->getAsCXXRecordDecl())
+    return false;
+  clang::QualType charTy = narrowCharPointee(funcDecl->getParamDecl(1));
+  if (charTy.isNull())
+    return false;
+  const clang::CXXRecordDecl *projRec =
+      funcDecl->getParamDecl(2)->getType()->getAsCXXRecordDecl();
+  if (!projRec || !projRec->isInStdNamespace() || !projRec->getIdentifier() ||
+      projRec->getName() != "identity")
+    return false;
+  auto structTy = mlir::dyn_cast<cir::StructType>(
+      convertType(rangeTy.getCanonicalType().getUnqualifiedType()));
+  cir::StdTypeInfoAttr info =
+      structTy ? structTy.getStdTypeInfo() : cir::StdTypeInfoAttr();
+  return info && info.getKind() == cir::StdTypeKind::StdVector &&
+         info.getElement() == convertType(charTy);
+}
+
 bool CIRGenModule::hasByteEqPredicate(const FunctionDecl *funcDecl,
                                       cir::KnownFuncKind kind) {
   std::optional<ByteEqPredicateShape> shape =

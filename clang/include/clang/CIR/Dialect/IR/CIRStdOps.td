@@ -144,6 +144,33 @@ def CIR_StdRangesFindOp : CIR_StdOp<"ranges.find",
   }];
 }
 
+def CIR_StdRangesFindRangeOp : CIR_StdOp<"ranges.find_range",
+  (ins CIR_AnyType:$cpo, CIR_AnyType:$range, CIR_AnyType:$pattern,
+       CIR_AnyType:$proj),
+  (outs CIR_AnyType:$result),
+  [], "StdRangesFind"> {
+  let summary = "std::ranges::find() over a whole range";
+  let description = [{
+    A raised call to std::ranges::find's whole range call operator. The
+    range arrives by reference, so the operand is its address, and the
+    result is the container's iterator, a raw pointer or a record wrapping
+    one. The first operand is the customization point object and the last
+    is the projection, both carried so lowering back rebuilds the exact
+    call, passing the operands through in order.
+    `cir.narrow_char_params` is carried here from the call when CIRGen
+    recorded it, which requires the range's record to carry a
+    `#cir.std_type_info` naming a container of the searched character and
+    the projection to be std::identity.
+  }];
+  let assemblyFormat = [{
+    `(` $cpo `:` qualified(type($cpo)) `,`
+        $range `:` qualified(type($range)) `,`
+        $pattern `:` qualified(type($pattern)) `,`
+        $proj `:` qualified(type($proj)) `,`
+        $original_fn `)` `->` qualified(type($result)) attr-dict
+  }];
+}
+
 def CIR_StrLenOp : CIR_CStdLibOp<"strlen",
   (ins CIR_PtrToChar8Type:$string),
   (outs CIR_AnyFundamentalUIntType:$result)> {

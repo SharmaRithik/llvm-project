@@ -31,12 +31,32 @@ struct identity {
   unsigned char state;
   template <class T> T &&operator()(T &&t) const;
 };
+template <class T> struct remove_ref {
+  typedef T type;
+};
+template <class T> struct remove_ref<T &> {
+  typedef T type;
+};
+template <class T> struct __vector_layout {
+  T *__begin_;
+  T *__end_;
+  T *__capacity_;
+};
+template <class T> class vector {
+  __vector_layout<T> __layout_;
+
+public:
+  typedef T *iterator;
+};
 namespace ranges {
 namespace __find {
 struct __fn {
   template <class Iter, class Sent, class T, class Proj = identity>
   Iter operator()(Iter first, Sent last, const T &value,
                   Proj proj = {}) const noexcept;
+  template <class Range, class T, class Proj = identity>
+  typename remove_ref<Range>::type::iterator
+  operator()(Range &&r, const T &value, Proj proj = {}) const noexcept;
 };
 }
 inline namespace __cpo {
@@ -86,6 +106,19 @@ unsigned char *test_ranges_find(unsigned char *first, unsigned char *last,
 // FINAL: %[[RVALUE:.*]] = cir.load %
 // FINAL: %[[RPROJ:.*]] = cir.load %
 // FINAL: cir.call @_ZNKSt6ranges6__find4__fnclIPhS3_hSt8identityEET_S5_T0_RKT1_T2_(%[[RCPO]], %[[RFIRST]], %[[RLAST]], %[[RVALUE]], %[[RPROJ]]) nothrow
+// FINAL-SAME: cir.narrow_char_params
+
+unsigned char *test_ranges_find_range(std::vector<unsigned char> &v,
+                                       const unsigned char &value) {
+  return std::ranges::find(v, value);
+}
+// The whole range call raises with the range's address and lowers back to
+// the exact same call with its operands in order.
+// RAISED: %[[RCPO2:.*]] = cir.get_global @_ZNSt6ranges5__cpo4findE
+// RAISED: cir.std.ranges.find_range(%[[RCPO2]] : {{.*}}, %{{.*}} : !cir.ptr<!rec_std3A3Avector3Cunsigned_char3E>, %{{.*}} : !cir.ptr<!u8i>, %{{.*}} : !rec_std3A3Aidentity, @_ZNKSt6ranges6__find4__fnclIRSt6vectorIhEhSt8identityEENSt10remove_refIT_E4type8iteratorEOS8_RKT0_T1_)
+// RAISED-SAME: cir.narrow_char_params
+// FINAL: %[[QCPO:.*]] = cir.get_global @_ZNSt6ranges5__cpo4findE
+// FINAL: cir.call @_ZNKSt6ranges6__find4__fnclIRSt6vectorIhEhSt8identityEENSt10remove_refIT_E4type8iteratorEOS8_RKT0_T1_(%[[QCPO]], %{{.*}}, %{{.*}}, %{{.*}}) nothrow
 // FINAL-SAME: cir.narrow_char_params
 
 unsigned long test_strlen(const char *s) { return strlen(s); }
