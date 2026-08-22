@@ -1200,6 +1200,11 @@ declare i32 @vsprintf(ptr, ptr, ptr)
 ; CHECK: declare noundef i32 @vsscanf(ptr noundef readonly captures(none), ptr noundef readonly captures(none), ptr noundef) [[NOFREE_NOUNWIND]]
 declare i32 @vsscanf(ptr, ptr, ptr)
 
+; CHECK-LINUX:   declare ptr @wmemchr(ptr, i32, i64) [[ARGMEMONLY_NOFREE_NOUNWIND_READONLY]]
+; CHECK-DARWIN:  declare ptr @wmemchr(ptr, i32, i64) [[ARGMEMONLY_NOFREE_NOUNWIND_READONLY]]
+; CHECK-UNKNOWN: declare ptr @wmemchr(ptr, i32, i64) [[ARGMEMONLY_NOFREE_NOUNWIND_READONLY]]
+declare ptr @wmemchr(ptr, i32, i64)
+
 ; CHECK: declare noundef i64 @write(i32 noundef, ptr noundef readonly captures(none), i64 noundef) [[NOFREE]]
 declare i64 @write(i32, ptr, i64)
 
