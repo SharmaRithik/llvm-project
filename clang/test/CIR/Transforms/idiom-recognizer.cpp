@@ -5,12 +5,12 @@
 // an error in the post-pass dump, so the test only passes if it was raised to
 // cir.std.find. The FINAL run checks the lowered output and its implicit-check-not
 // proves no raised operation leaked past LoweringPrepare.
-// RUN: %clang_cc1 -std=c++17 -triple x86_64-unknown-linux-gnu -fclangir -clangir-enable-idiom-recognizer -emit-cir -mmlir --mlir-print-ir-after=cir-idiom-recognizer %s -o %t.cir 2>&1 | FileCheck %s --check-prefix=RAISED '--implicit-check-not=cir.call @_ZSt4find' '--implicit-check-not=cir.call @_ZNKSt6ranges'
+// RUN: %clang_cc1 -std=c++17 -triple x86_64-unknown-linux-gnu -fclangir -clangir-enable-idiom-recognizer -emit-cir -mmlir --mlir-print-ir-after=cir-idiom-recognizer %s -o %t.cir 2>&1 | FileCheck %s --check-prefix=RAISED '--implicit-check-not=cir.call @_ZSt4find' '--implicit-check-not=cir.call @_ZSt6search' '--implicit-check-not=cir.call @_ZNKSt6ranges'
 // RUN: FileCheck %s --check-prefix=FINAL --input-file=%t.cir --implicit-check-not=cir.std.
 
 // On targets where plain char is unsigned the pointer lowers to !u8i, and
 // recognition works the same.
-// RUN: %clang_cc1 -std=c++17 -triple aarch64-unknown-linux-gnu -fno-signed-char -fclangir -clangir-enable-idiom-recognizer -emit-cir -mmlir --mlir-print-ir-after=cir-idiom-recognizer %s -o %t.aarch64.cir 2>&1 | FileCheck %s --check-prefix=RAISED '--implicit-check-not=cir.call @_ZNKSt6ranges'
+// RUN: %clang_cc1 -std=c++17 -triple aarch64-unknown-linux-gnu -fno-signed-char -fclangir -clangir-enable-idiom-recognizer -emit-cir -mmlir --mlir-print-ir-after=cir-idiom-recognizer %s -o %t.aarch64.cir 2>&1 | FileCheck %s --check-prefix=RAISED '--implicit-check-not=cir.call @_ZSt6search' '--implicit-check-not=cir.call @_ZNKSt6ranges'
 
 // A no builtin list for another function survives the round trip on the
 // rebuilt call.
@@ -24,6 +24,8 @@
 namespace std {
 template <class Iter, class T>
 __attribute__((pure)) Iter find(Iter, Iter, const T &) noexcept;
+template <class Iter1, class Iter2>
+Iter1 search(Iter1, Iter1, Iter2, Iter2);
 // Real std::identity is empty and call convention lowering drops an
 // empty record argument, so this one carries a byte to keep the
 // projection operand visible in the lowered call.
@@ -87,6 +89,22 @@ char *test_find(char *first, char *last, const char &value) {
 // FINAL-SAME: -> (!cir.ptr<!s8i> {llvm.noundef})
 // FINAL-NOT: cir.call @_ZSt4find
 
+
+char *test_search(char *first1, char *last1, char *first2, char *last2) {
+  return std::search(first1, last1, first2, last2);
+}
+// RAISED-LABEL: cir.func{{.*}} @_Z11test_searchPcS_S_S_
+// RAISED: %[[SFIRST1:.*]] = cir.load
+// RAISED: %[[SLAST1:.*]] = cir.load
+// RAISED: %[[SFIRST2:.*]] = cir.load
+// RAISED: %[[SLAST2:.*]] = cir.load
+// RAISED: cir.std.search(%[[SFIRST1]] : {{.*}}, %[[SLAST1]] : {{.*}}, %[[SFIRST2]] : {{.*}}, %[[SLAST2]] : {{.*}}, @_ZSt6searchIPcS0_ET_S1_S1_T0_S2_) -> {{.*}}cir.narrow_char_params
+// FINAL-LABEL: cir.func{{.*}} @_Z11test_searchPcS_S_S_
+// FINAL: %[[QFIRST1:.*]] = cir.load
+// FINAL: %[[QLAST1:.*]] = cir.load
+// FINAL: %[[QFIRST2:.*]] = cir.load
+// FINAL: %[[QLAST2:.*]] = cir.load
+// FINAL: cir.call @_ZSt6searchIPcS0_ET_S1_S1_T0_S2_(%[[QFIRST1]], %[[QLAST1]], %[[QFIRST2]], %[[QLAST2]])
 unsigned char *test_ranges_find(unsigned char *first, unsigned char *last,
                                 const unsigned char &value) {
   return std::ranges::find(first, last, value);

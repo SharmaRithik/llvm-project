@@ -5768,6 +5768,48 @@ mlir::LogicalResult CIRToLLVMMemChrOpLowering::matchAndRewrite(
                          symbolTables);
 }
 
+mlir::LogicalResult CIRToLLVMMemMemOpLowering::matchAndRewrite(
+    cir::MemMemOp op, OpAdaptor adaptor,
+    mlir::ConversionPatternRewriter &rewriter) const {
+  auto llvmPtrTy = mlir::LLVM::LLVMPointerType::get(rewriter.getContext());
+  mlir::Type lenTy =
+      getTypeConverter()->convertType(op.getHaystackLen().getType());
+  auto fnTy = mlir::LLVM::LLVMFunctionType::get(
+      llvmPtrTy, {llvmPtrTy, lenTy, llvmPtrTy, lenTy},
+      /*isVarArg=*/false);
+  llvm::StringRef fnName = "memmem";
+
+  mlir::Builder b(rewriter.getContext());
+  mlir::NamedAttribute noundefAttr =
+      b.getNamedAttr("llvm.noundef", b.getUnitAttr());
+  mlir::DictionaryAttr noundefDict = mlir::DictionaryAttr::get(
+      rewriter.getContext(), llvm::ArrayRef(noundefAttr));
+  mlir::ArrayAttr argAttrs = mlir::ArrayAttr::get(
+      rewriter.getContext(), SmallVector<mlir::Attribute>(4, noundefDict));
+
+  // memmem has no int parameter or return value so it uses no extension
+  // attributes
+  createLLVMFuncOpIfNotExist(rewriter, symbolTables, op, fnName, fnTy,
+                             argAttrs);
+
+  auto fn = mlir::dyn_cast_if_present<mlir::LLVM::LLVMFuncOp>(
+      symbolTables.lookupSymbolIn(
+          op->getParentOfType<mlir::ModuleOp>(),
+          mlir::StringAttr::get(rewriter.getContext(), fnName)));
+  if (fn && fn.isExternal() && fn.getNumArguments() == 4)
+    rewriter.modifyOpInPlace(fn, [&] {
+      for (unsigned i = 0; i != 4; ++i)
+        fn.setArgAttr(i, "llvm.noundef", b.getUnitAttr());
+    });
+
+  mlir::LLVM::CallOp newCall = rewriter.replaceOpWithNewOp<mlir::LLVM::CallOp>(
+      op, mlir::TypeRange{llvmPtrTy}, fnName,
+      mlir::ValueRange{adaptor.getHaystack(), adaptor.getHaystackLen(),
+                       adaptor.getNeedle(), adaptor.getNeedleLen()});
+  newCall.setArgAttrsAttr(argAttrs);
+  return mlir::success();
+}
+
 mlir::LogicalResult CIRToLLVMWMemChrOpLowering::matchAndRewrite(
     cir::WMemChrOp op, OpAdaptor adaptor,
     mlir::ConversionPatternRewriter &rewriter) const {

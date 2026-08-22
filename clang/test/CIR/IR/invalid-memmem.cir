@@ -1,0 +1,58 @@
+// RUN: cir-opt %s -verify-diagnostics -split-input-file
+
+!u32i = !cir.int<u, 32>
+!u64i = !cir.int<u, 64>
+!voidptr = !cir.ptr<!cir.void>
+module attributes {cir.size_type_width = 64 : i32} {
+  cir.func @wrong_haystack_width(%h: !voidptr, %hl: !u32i,
+                                 %n: !voidptr, %nl: !u64i) {
+    // expected-error@+1 {{'cir.libc.memmem' op haystack length must have the width recorded in cir.size_type_width}}
+    %r = cir.libc.memmem(%h, %hl, %n, %nl) : !voidptr, !u32i, !voidptr, !u64i
+    cir.return
+  }
+  cir.func @wrong_needle_width(%h: !voidptr, %hl: !u64i,
+                               %n: !voidptr, %nl: !u32i) {
+    // expected-error@+1 {{'cir.libc.memmem' op needle length must have the width recorded in cir.size_type_width}}
+    %r = cir.libc.memmem(%h, %hl, %n, %nl) : !voidptr, !u64i, !voidptr, !u32i
+    cir.return
+  }
+}
+
+// -----
+
+!u64i = !cir.int<u, 64>
+!voidptr = !cir.ptr<!cir.void>
+module {
+  cir.func @missing_width(%h: !voidptr, %hl: !u64i,
+                          %n: !voidptr, %nl: !u64i) {
+    // expected-error@+1 {{'cir.libc.memmem' op expects the module to record cir.size_type_width}}
+    %r = cir.libc.memmem(%h, %hl, %n, %nl) : !voidptr, !u64i, !voidptr, !u64i
+    cir.return
+  }
+}
+
+// -----
+
+!u64i = !cir.int<u, 64>
+!voidptr = !cir.ptr<!cir.void>
+module attributes {cir.size_type_width = "64"} {
+  cir.func @string_width(%h: !voidptr, %hl: !u64i,
+                         %n: !voidptr, %nl: !u64i) {
+    // expected-error@+1 {{'cir.libc.memmem' op requires cir.size_type_width to be a signless i32 holding a fundamental integer width}}
+    %r = cir.libc.memmem(%h, %hl, %n, %nl) : !voidptr, !u64i, !voidptr, !u64i
+    cir.return
+  }
+}
+
+// -----
+
+!u64i = !cir.int<u, 64>
+!asptr = !cir.ptr<!cir.void, target_address_space(1)>
+module attributes {cir.size_type_width = 64 : i32} {
+  cir.func @address_space(%h: !asptr, %hl: !u64i,
+                          %n: !asptr, %nl: !u64i) {
+    // expected-error@+1 {{'cir.libc.memmem' op pointers must be in the default address space}}
+    %r = "cir.libc.memmem"(%h, %hl, %n, %nl) : (!asptr, !u64i, !asptr, !u64i) -> !asptr
+    cir.return
+  }
+}

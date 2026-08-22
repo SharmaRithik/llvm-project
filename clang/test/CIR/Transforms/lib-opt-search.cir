@@ -1,0 +1,605 @@
+// RUN: cir-opt --cir-lib-opt -split-input-file %s -o - | FileCheck %s
+
+!u8i = !cir.int<u, 8>
+!hayiter = !cir.struct<class "HayIter" {data !cir.ptr<!u8i>}>
+!needleiter = !cir.struct<class "NeedleIter" {data !cir.ptr<!u8i>}>
+
+module attributes {cir.triple = "x86_64-unknown-linux-gnu",
+                   cir.size_type_width = 64 : i32} {
+  cir.func @transforms(%first1: !cir.ptr<!u8i>, %last1: !cir.ptr<!u8i>,
+                       %first2: !cir.ptr<!u8i>, %last2: !cir.ptr<!u8i>)
+      -> !cir.ptr<!u8i> {
+    %0 = cir.std.search(%first1 : !cir.ptr<!u8i>,
+                        %last1 : !cir.ptr<!u8i>,
+                        %first2 : !cir.ptr<!u8i>,
+                        %last2 : !cir.ptr<!u8i>,
+                        @search_bytes) -> !cir.ptr<!u8i> {cir.narrow_char_params}
+    cir.return %0 : !cir.ptr<!u8i>
+  }
+// CHECK-LABEL: cir.func @transforms
+// CHECK-SAME: (%[[FIRST1:.*]]: !cir.ptr<!u8i>, %[[LAST1:.*]]: !cir.ptr<!u8i>, %[[FIRST2:.*]]: !cir.ptr<!u8i>, %[[LAST2:.*]]: !cir.ptr<!u8i>)
+// CHECK-NOT: cir.std.search
+// CHECK: %[[EMPTY:.*]] = cir.cmp eq %[[FIRST2]], %[[LAST2]] : !cir.ptr<!u8i>
+// CHECK: %[[RESULT:.*]] = cir.ternary(%[[EMPTY]], true {
+// CHECK-NEXT: cir.yield %[[FIRST1]] : !cir.ptr<!u8i>
+// CHECK-NEXT: }, false {
+// CHECK-NEXT: %[[HAYLEN:.*]] = cir.ptr_diff %[[LAST1]], %[[FIRST1]] : !cir.ptr<!u8i> -> !u64i
+// CHECK-NEXT: %[[NEEDLELEN:.*]] = cir.ptr_diff %[[LAST2]], %[[FIRST2]] : !cir.ptr<!u8i> -> !u64i
+// CHECK-NEXT: %[[LONGER:.*]] = cir.cmp gt %[[NEEDLELEN]], %[[HAYLEN]] : !u64i
+// CHECK-NEXT: %[[NONEMPTY:.*]] = cir.ternary(%[[LONGER]], true {
+// CHECK-NEXT: cir.yield %[[LAST1]] : !cir.ptr<!u8i>
+// CHECK-NEXT: }, false {
+// CHECK: %[[HAYSTACK:.*]] = cir.cast bitcast %[[FIRST1]] : !cir.ptr<!u8i> -> !cir.ptr<!void>
+// CHECK: %[[NEEDLE:.*]] = cir.cast bitcast %[[FIRST2]] : !cir.ptr<!u8i> -> !cir.ptr<!void>
+// CHECK: %[[FOUND:.*]] = cir.libc.memmem(%[[HAYSTACK]], %[[HAYLEN]], %[[NEEDLE]], %[[NEEDLELEN]]) : !cir.ptr<!void>, !u64i, !cir.ptr<!void>, !u64i
+// CHECK: %[[TYPED:.*]] = cir.cast bitcast %[[FOUND]] : !cir.ptr<!void> -> !cir.ptr<!u8i>
+// CHECK: %[[NULL:.*]] = cir.const #cir.ptr<null> : !cir.ptr<!u8i>
+// CHECK: %[[MISS:.*]] = cir.cmp eq %[[TYPED]], %[[NULL]] : !cir.ptr<!u8i>
+// CHECK: %[[SELECT:.*]] = cir.select if %[[MISS]] then %[[LAST1]] else %[[TYPED]]
+// CHECK-NEXT: cir.yield %[[SELECT]] : !cir.ptr<!u8i>
+// CHECK-NEXT: }) : (!cir.bool) -> !cir.ptr<!u8i>
+// CHECK-NEXT: cir.yield %[[NONEMPTY]] : !cir.ptr<!u8i>
+// CHECK-NEXT: }) : (!cir.bool) -> !cir.ptr<!u8i>
+// CHECK: cir.return %[[RESULT]] : !cir.ptr<!u8i>
+
+  cir.func @keeps_unmarked(%first1: !cir.ptr<!u8i>,
+                           %last1: !cir.ptr<!u8i>,
+                           %first2: !cir.ptr<!u8i>,
+                           %last2: !cir.ptr<!u8i>) -> !cir.ptr<!u8i> {
+    %0 = cir.std.search(%first1 : !cir.ptr<!u8i>,
+                        %last1 : !cir.ptr<!u8i>,
+                        %first2 : !cir.ptr<!u8i>,
+                        %last2 : !cir.ptr<!u8i>,
+                        @search_bytes) -> !cir.ptr<!u8i>
+    cir.return %0 : !cir.ptr<!u8i>
+  }
+// CHECK-LABEL: cir.func @keeps_unmarked
+// CHECK: cir.std.search
+// CHECK-NOT: cir.libc.memmem
+  cir.func @keeps_no_builtin(%first1: !cir.ptr<!u8i>,
+                             %last1: !cir.ptr<!u8i>,
+                             %first2: !cir.ptr<!u8i>,
+                             %last2: !cir.ptr<!u8i>) -> !cir.ptr<!u8i> {
+    %0 = cir.std.search(%first1 : !cir.ptr<!u8i>,
+                        %last1 : !cir.ptr<!u8i>,
+                        %first2 : !cir.ptr<!u8i>,
+                        %last2 : !cir.ptr<!u8i>,
+                        @search_bytes) -> !cir.ptr<!u8i> {cir.narrow_char_params, nobuiltins = ["memmem"]}
+    cir.return %0 : !cir.ptr<!u8i>
+  }
+// CHECK-LABEL: cir.func @keeps_no_builtin
+// CHECK: cir.std.search
+// CHECK-NOT: cir.libc.memmem
+
+  cir.func @keeps_no_builtin_marked_call(%first1: !cir.ptr<!u8i>,
+                                         %last1: !cir.ptr<!u8i>,
+                                         %first2: !cir.ptr<!u8i>,
+                                         %last2: !cir.ptr<!u8i>)
+      -> !cir.ptr<!u8i> {
+    %0 = cir.std.search(%first1 : !cir.ptr<!u8i>,
+                        %last1 : !cir.ptr<!u8i>,
+                        %first2 : !cir.ptr<!u8i>,
+                        %last2 : !cir.ptr<!u8i>,
+                        @search_bytes) -> !cir.ptr<!u8i> {cir.narrow_char_params, nobuiltin}
+    cir.return %0 : !cir.ptr<!u8i>
+  }
+// CHECK-LABEL: cir.func @keeps_no_builtin_marked_call
+// CHECK: cir.std.search
+// CHECK-NOT: cir.libc.memmem
+
+  cir.func @keeps_enclosing_no_builtin(%first1: !cir.ptr<!u8i>,
+                                       %last1: !cir.ptr<!u8i>,
+                                       %first2: !cir.ptr<!u8i>,
+                                       %last2: !cir.ptr<!u8i>)
+      -> !cir.ptr<!u8i> attributes {nobuiltins = ["memmem"]} {
+    %0 = cir.std.search(%first1 : !cir.ptr<!u8i>,
+                        %last1 : !cir.ptr<!u8i>,
+                        %first2 : !cir.ptr<!u8i>,
+                        %last2 : !cir.ptr<!u8i>,
+                        @search_bytes) -> !cir.ptr<!u8i> {cir.narrow_char_params}
+    cir.return %0 : !cir.ptr<!u8i>
+  }
+// CHECK-LABEL: cir.func @keeps_enclosing_no_builtin
+// CHECK: cir.std.search
+// CHECK-NOT: cir.libc.memmem
+
+  cir.func builtin @keeps_builtin_marked_function(
+      %first1: !cir.ptr<!u8i>, %last1: !cir.ptr<!u8i>,
+      %first2: !cir.ptr<!u8i>, %last2: !cir.ptr<!u8i>)
+      -> !cir.ptr<!u8i> attributes {nobuiltins = ["memmem"]} {
+    %0 = cir.std.search(%first1 : !cir.ptr<!u8i>,
+                        %last1 : !cir.ptr<!u8i>,
+                        %first2 : !cir.ptr<!u8i>,
+                        %last2 : !cir.ptr<!u8i>,
+                        @search_bytes) -> !cir.ptr<!u8i> {cir.narrow_char_params}
+    cir.return %0 : !cir.ptr<!u8i>
+  }
+// CHECK-LABEL: cir.func builtin @keeps_builtin_marked_function
+// CHECK: cir.std.search
+// CHECK-NOT: cir.libc.memmem
+
+  cir.func @transforms_in_no_builtin_marked_function(
+      %first1: !cir.ptr<!u8i>, %last1: !cir.ptr<!u8i>,
+      %first2: !cir.ptr<!u8i>, %last2: !cir.ptr<!u8i>)
+      -> !cir.ptr<!u8i> attributes {nobuiltin} {
+    %0 = cir.std.search(%first1 : !cir.ptr<!u8i>,
+                        %last1 : !cir.ptr<!u8i>,
+                        %first2 : !cir.ptr<!u8i>,
+                        %last2 : !cir.ptr<!u8i>,
+                        @search_bytes) -> !cir.ptr<!u8i> {cir.narrow_char_params}
+    cir.return %0 : !cir.ptr<!u8i>
+  }
+// CHECK-LABEL: cir.func @transforms_in_no_builtin_marked_function
+// CHECK-NOT: cir.std.search
+// CHECK: cir.libc.memmem
+
+
+  cir.func @transforms_wrapped(%first1: !hayiter, %last1: !hayiter,
+                               %first2: !needleiter, %last2: !needleiter)
+      -> !hayiter {
+    %0 = cir.std.search(%first1 : !hayiter, %last1 : !hayiter,
+                        %first2 : !needleiter, %last2 : !needleiter,
+                        @search_wrapped) -> !hayiter {cir.narrow_char_params}
+    cir.return %0 : !hayiter
+  }
+// CHECK-LABEL: cir.func @transforms_wrapped
+// CHECK-SAME: (%[[WFIRST1_RECORD:[^:]*]]: !rec_HayIter,
+// CHECK: %[[WFIRST1:.*]] = cir.extract_member %[[WFIRST1_RECORD]][0] : !rec_HayIter -> !cir.ptr<!u8i>
+// CHECK: %[[WLAST1:.*]] = cir.extract_member %{{.*}}[0] : !rec_HayIter -> !cir.ptr<!u8i>
+// CHECK: %[[WFIRST2:.*]] = cir.extract_member %{{.*}}[0] : !rec_NeedleIter -> !cir.ptr<!u8i>
+// CHECK: %[[WLAST2:.*]] = cir.extract_member %{{.*}}[0] : !rec_NeedleIter -> !cir.ptr<!u8i>
+// CHECK: cir.cmp eq %[[WFIRST2]], %[[WLAST2]]
+// CHECK: cir.libc.memmem
+// CHECK: %[[WRAPPED:.*]] = cir.insert_member %[[WFIRST1_RECORD]][0], %{{.*}} : !rec_HayIter, !cir.ptr<!u8i>
+// CHECK: cir.return %[[WRAPPED]] : !rec_HayIter
+}
+
+// -----
+
+!u8i = !cir.int<u, 8>
+
+module attributes {cir.triple = "x86_64-pc-windows-msvc",
+                   cir.size_type_width = 64 : i32} {
+  cir.func @keeps_msvc(%first1: !cir.ptr<!u8i>, %last1: !cir.ptr<!u8i>,
+                       %first2: !cir.ptr<!u8i>, %last2: !cir.ptr<!u8i>)
+      -> !cir.ptr<!u8i> {
+    %0 = cir.std.search(%first1 : !cir.ptr<!u8i>,
+                        %last1 : !cir.ptr<!u8i>,
+                        %first2 : !cir.ptr<!u8i>,
+                        %last2 : !cir.ptr<!u8i>,
+                        @search_bytes) -> !cir.ptr<!u8i> {cir.narrow_char_params}
+    cir.return %0 : !cir.ptr<!u8i>
+  }
+// CHECK-LABEL: cir.func @keeps_msvc
+// CHECK: cir.std.search
+// CHECK-NOT: cir.libc.memmem
+}
+
+// -----
+
+!u8i = !cir.int<u, 8>
+!u64i = !cir.int<u, 64>
+!voidptr = !cir.ptr<!cir.void>
+
+module attributes {cir.triple = "x86_64-unknown-linux-gnu",
+                   cir.size_type_width = 64 : i32} {
+  cir.func private @memmem(!voidptr, !u64i, !voidptr, !u64i) -> !voidptr cc(spir_function)
+
+  cir.func @keeps_other_calling_convention(
+      %first1: !cir.ptr<!u8i>, %last1: !cir.ptr<!u8i>,
+      %first2: !cir.ptr<!u8i>, %last2: !cir.ptr<!u8i>)
+      -> !cir.ptr<!u8i> {
+    %0 = cir.std.search(%first1 : !cir.ptr<!u8i>,
+                        %last1 : !cir.ptr<!u8i>,
+                        %first2 : !cir.ptr<!u8i>,
+                        %last2 : !cir.ptr<!u8i>,
+                        @search_bytes) -> !cir.ptr<!u8i> {cir.narrow_char_params}
+    cir.return %0 : !cir.ptr<!u8i>
+  }
+// CHECK-LABEL: cir.func @keeps_other_calling_convention
+// CHECK: cir.std.search
+// CHECK-NOT: cir.libc.memmem
+}
+
+// -----
+
+!u8i = !cir.int<u, 8>
+!u64i = !cir.int<u, 64>
+!voidptr = !cir.ptr<!cir.void>
+
+module attributes {cir.triple = "x86_64-unknown-linux-gnu",
+                   cir.size_type_width = 64 : i32} {
+  cir.func private @real_memmem(!voidptr, !u64i, !voidptr, !u64i) -> !voidptr
+  cir.func private @memmem(!voidptr, !u64i, !voidptr, !u64i) -> !voidptr alias(@real_memmem)
+
+  cir.func @keeps_alias(%first1: !cir.ptr<!u8i>,
+                        %last1: !cir.ptr<!u8i>,
+                        %first2: !cir.ptr<!u8i>,
+                        %last2: !cir.ptr<!u8i>) -> !cir.ptr<!u8i> {
+    %0 = cir.std.search(%first1 : !cir.ptr<!u8i>,
+                        %last1 : !cir.ptr<!u8i>,
+                        %first2 : !cir.ptr<!u8i>,
+                        %last2 : !cir.ptr<!u8i>,
+                        @search_bytes) -> !cir.ptr<!u8i> {cir.narrow_char_params}
+    cir.return %0 : !cir.ptr<!u8i>
+  }
+// CHECK-LABEL: cir.func @keeps_alias
+// CHECK: cir.std.search
+// CHECK-NOT: cir.libc.memmem
+}
+
+// -----
+
+!u8i = !cir.int<u, 8>
+
+module attributes {cir.size_type_width = 64 : i32} {
+  cir.func @keeps_without_triple(%first1: !cir.ptr<!u8i>,
+                                 %last1: !cir.ptr<!u8i>,
+                                 %first2: !cir.ptr<!u8i>,
+                                 %last2: !cir.ptr<!u8i>)
+      -> !cir.ptr<!u8i> {
+    %0 = cir.std.search(%first1 : !cir.ptr<!u8i>,
+                        %last1 : !cir.ptr<!u8i>,
+                        %first2 : !cir.ptr<!u8i>,
+                        %last2 : !cir.ptr<!u8i>,
+                        @search_bytes) -> !cir.ptr<!u8i> {cir.narrow_char_params}
+    cir.return %0 : !cir.ptr<!u8i>
+  }
+// CHECK-LABEL: cir.func @keeps_without_triple
+// CHECK: cir.std.search
+// CHECK-NOT: cir.libc.memmem
+}
+
+// -----
+
+!u8i = !cir.int<u, 8>
+
+module attributes {cir.triple = "x86_64-unknown-linux-gnu"} {
+  cir.func @keeps_without_size_width(%first1: !cir.ptr<!u8i>,
+                                     %last1: !cir.ptr<!u8i>,
+                                     %first2: !cir.ptr<!u8i>,
+                                     %last2: !cir.ptr<!u8i>)
+      -> !cir.ptr<!u8i> {
+    %0 = cir.std.search(%first1 : !cir.ptr<!u8i>,
+                        %last1 : !cir.ptr<!u8i>,
+                        %first2 : !cir.ptr<!u8i>,
+                        %last2 : !cir.ptr<!u8i>,
+                        @search_bytes) -> !cir.ptr<!u8i> {cir.narrow_char_params}
+    cir.return %0 : !cir.ptr<!u8i>
+  }
+// CHECK-LABEL: cir.func @keeps_without_size_width
+// CHECK: cir.std.search
+// CHECK-NOT: cir.libc.memmem
+}
+
+// -----
+
+!u8i = !cir.int<u, 8>
+
+module attributes {cir.triple = "x86_64-unknown-linux-gnu",
+                   cir.size_type_width = 64 : si32} {
+  cir.func @keeps_on_signed_width(%first1: !cir.ptr<!u8i>,
+                                  %last1: !cir.ptr<!u8i>,
+                                  %first2: !cir.ptr<!u8i>,
+                                  %last2: !cir.ptr<!u8i>) -> !cir.ptr<!u8i> {
+    %0 = cir.std.search(%first1 : !cir.ptr<!u8i>,
+                        %last1 : !cir.ptr<!u8i>,
+                        %first2 : !cir.ptr<!u8i>,
+                        %last2 : !cir.ptr<!u8i>,
+                        @search_bytes) -> !cir.ptr<!u8i> {cir.narrow_char_params}
+    cir.return %0 : !cir.ptr<!u8i>
+  }
+// CHECK-LABEL: cir.func @keeps_on_signed_width
+// CHECK: cir.std.search
+// CHECK-NOT: cir.libc.memmem
+}
+
+// -----
+
+!u8i = !cir.int<u, 8>
+!s32i = !cir.int<s, 32>
+
+module attributes {cir.triple = "x86_64-unknown-linux-gnu",
+                   cir.size_type_width = 64 : i32} {
+  cir.global external @memmem = #cir.int<0> : !s32i
+
+  cir.func @keeps_with_memmem_global(%first1: !cir.ptr<!u8i>,
+                                     %last1: !cir.ptr<!u8i>,
+                                     %first2: !cir.ptr<!u8i>,
+                                     %last2: !cir.ptr<!u8i>)
+      -> !cir.ptr<!u8i> {
+    %0 = cir.std.search(%first1 : !cir.ptr<!u8i>,
+                        %last1 : !cir.ptr<!u8i>,
+                        %first2 : !cir.ptr<!u8i>,
+                        %last2 : !cir.ptr<!u8i>,
+                        @search_bytes) -> !cir.ptr<!u8i> {cir.narrow_char_params}
+    cir.return %0 : !cir.ptr<!u8i>
+  }
+// CHECK-LABEL: cir.func @keeps_with_memmem_global
+// CHECK: cir.std.search
+// CHECK-NOT: cir.libc.memmem
+}
+
+// -----
+
+!u8i = !cir.int<u, 8>
+!u64i = !cir.int<u, 64>
+!voidptr = !cir.ptr<!cir.void>
+
+module attributes {cir.triple = "x86_64-unknown-linux-gnu",
+                   cir.size_type_width = 64 : i32} {
+  cir.func private @memmem(!voidptr, !u64i, !voidptr, !u64i) -> !voidptr
+// CHECK: cir.func private @memmem(!cir.ptr<!void>, !u64i, !cir.ptr<!void>, !u64i) -> !cir.ptr<!void>
+
+  cir.func @shares_compatible_declaration(
+      %first1: !cir.ptr<!u8i>, %last1: !cir.ptr<!u8i>,
+      %first2: !cir.ptr<!u8i>, %last2: !cir.ptr<!u8i>)
+      -> !cir.ptr<!u8i> {
+    %0 = cir.std.search(%first1 : !cir.ptr<!u8i>,
+                        %last1 : !cir.ptr<!u8i>,
+                        %first2 : !cir.ptr<!u8i>,
+                        %last2 : !cir.ptr<!u8i>,
+                        @search_bytes) -> !cir.ptr<!u8i> {cir.narrow_char_params}
+    cir.return %0 : !cir.ptr<!u8i>
+  }
+// CHECK-LABEL: cir.func @shares_compatible_declaration
+// CHECK-NOT: cir.std.search
+// CHECK: cir.libc.memmem
+}
+
+// -----
+
+!u8i = !cir.int<u, 8>
+!s32i = !cir.int<s, 32>
+
+module attributes {cir.triple = "x86_64-unknown-linux-gnu",
+                   cir.size_type_width = 64 : i32} {
+  cir.func private @memmem(!s32i) -> !s32i
+
+  cir.func @keeps_incompatible_declaration(
+      %first1: !cir.ptr<!u8i>, %last1: !cir.ptr<!u8i>,
+      %first2: !cir.ptr<!u8i>, %last2: !cir.ptr<!u8i>)
+      -> !cir.ptr<!u8i> {
+    %0 = cir.std.search(%first1 : !cir.ptr<!u8i>,
+                        %last1 : !cir.ptr<!u8i>,
+                        %first2 : !cir.ptr<!u8i>,
+                        %last2 : !cir.ptr<!u8i>,
+                        @search_bytes) -> !cir.ptr<!u8i> {cir.narrow_char_params}
+    cir.return %0 : !cir.ptr<!u8i>
+  }
+// CHECK-LABEL: cir.func @keeps_incompatible_declaration
+// CHECK: cir.std.search
+// CHECK-NOT: cir.libc.memmem
+}
+
+// -----
+
+!u8i = !cir.int<u, 8>
+
+module attributes {cir.triple = "x86_64-unknown-linux-gnu",
+                   cir.size_type_width = 64 : i32} {
+  cir.func @keeps_malformed_marker(%first1: !cir.ptr<!u8i>,
+                                   %last1: !cir.ptr<!u8i>,
+                                   %first2: !cir.ptr<!u8i>,
+                                   %last2: !cir.ptr<!u8i>)
+      -> !cir.ptr<!u8i> {
+    %0 = cir.std.search(%first1 : !cir.ptr<!u8i>,
+                        %last1 : !cir.ptr<!u8i>,
+                        %first2 : !cir.ptr<!u8i>,
+                        %last2 : !cir.ptr<!u8i>,
+                        @search_bytes) -> !cir.ptr<!u8i> {cir.narrow_char_params = "bad"}
+    cir.return %0 : !cir.ptr<!u8i>
+  }
+// CHECK-LABEL: cir.func @keeps_malformed_marker
+// CHECK: cir.std.search
+// CHECK-NOT: cir.libc.memmem
+}
+
+// -----
+
+!u8i = !cir.int<u, 8>
+!u64i = !cir.int<u, 64>
+!voidptr = !cir.ptr<!cir.void>
+
+module attributes {cir.triple = "x86_64-unknown-linux-gnu",
+                   cir.size_type_width = 64 : i32} {
+// CHECK-LABEL: cir.func @memmem(%{{.*}}: !cir.ptr<!void>, %{{.*}}: !u64i, %{{.*}}: !cir.ptr<!void>, %{{.*}}: !u64i) -> !cir.ptr<!void>
+  cir.func @memmem(%haystack: !voidptr, %haystack_size: !u64i,
+                   %needle: !voidptr, %needle_size: !u64i) -> !voidptr {
+    cir.return %haystack : !voidptr
+  }
+
+  cir.func @shares_compatible_definition(
+      %first1: !cir.ptr<!u8i>, %last1: !cir.ptr<!u8i>,
+      %first2: !cir.ptr<!u8i>, %last2: !cir.ptr<!u8i>)
+      -> !cir.ptr<!u8i> {
+    %0 = cir.std.search(%first1 : !cir.ptr<!u8i>,
+                        %last1 : !cir.ptr<!u8i>,
+                        %first2 : !cir.ptr<!u8i>,
+                        %last2 : !cir.ptr<!u8i>,
+                        @search_bytes) -> !cir.ptr<!u8i> {cir.narrow_char_params}
+    cir.return %0 : !cir.ptr<!u8i>
+  }
+// CHECK-LABEL: cir.func @shares_compatible_definition
+// CHECK-NOT: cir.std.search
+// CHECK: cir.libc.memmem
+}
+
+// -----
+
+!u8i = !cir.int<u, 8>
+
+module attributes {cir.triple = "x86_64-unknown-linux-gnu",
+                   cir.size_type_width = 64 : i32} {
+  cir.func @memmem(%first1: !cir.ptr<!u8i>,
+                   %last1: !cir.ptr<!u8i>,
+                   %first2: !cir.ptr<!u8i>,
+                   %last2: !cir.ptr<!u8i>) -> !cir.ptr<!u8i> {
+    %0 = cir.std.search(%first1 : !cir.ptr<!u8i>,
+                        %last1 : !cir.ptr<!u8i>,
+                        %first2 : !cir.ptr<!u8i>,
+                        %last2 : !cir.ptr<!u8i>,
+                        @search_bytes) -> !cir.ptr<!u8i> {cir.narrow_char_params}
+    cir.return %0 : !cir.ptr<!u8i>
+  }
+// CHECK-LABEL: cir.func @memmem
+// CHECK: cir.std.search
+// CHECK-NOT: cir.libc.memmem
+}
+
+// -----
+
+!u8i = !cir.int<u, 8>
+!s64i = !cir.int<s, 64>
+
+module attributes {cir.triple = "x86_64-unknown-linux-gnu",
+                   cir.size_type_width = 64 : i32} {
+  cir.global external @haystack = #cir.zero : !cir.array<!u8i x 8>
+  cir.global external @needle = #cir.zero : !cir.array<!u8i x 2>
+
+  cir.global external @global_result = ctor : !cir.ptr<!u8i> {
+    %0 = cir.get_global @haystack : !cir.ptr<!cir.array<!u8i x 8>>
+    %1 = cir.cast array_to_ptrdecay %0 : !cir.ptr<!cir.array<!u8i x 8>> -> !cir.ptr<!u8i>
+    %2 = cir.const #cir.int<8> : !s64i
+    %3 = cir.ptr_stride %1, %2 : (!cir.ptr<!u8i>, !s64i) -> !cir.ptr<!u8i>
+    %4 = cir.get_global @needle : !cir.ptr<!cir.array<!u8i x 2>>
+    %5 = cir.cast array_to_ptrdecay %4 : !cir.ptr<!cir.array<!u8i x 2>> -> !cir.ptr<!u8i>
+    %6 = cir.const #cir.int<2> : !s64i
+    %7 = cir.ptr_stride %5, %6 : (!cir.ptr<!u8i>, !s64i) -> !cir.ptr<!u8i>
+    %8 = cir.std.search(%1 : !cir.ptr<!u8i>,
+                        %3 : !cir.ptr<!u8i>,
+                        %5 : !cir.ptr<!u8i>,
+                        %7 : !cir.ptr<!u8i>,
+                        @search_bytes) -> !cir.ptr<!u8i> {cir.narrow_char_params}
+    %9 = cir.get_global @global_result : !cir.ptr<!cir.ptr<!u8i>>
+    cir.store %8, %9 : !cir.ptr<!u8i>, !cir.ptr<!cir.ptr<!u8i>>
+  }
+// CHECK-LABEL: cir.global external @global_result = ctor
+// CHECK-NOT: cir.std.search
+// CHECK: cir.libc.memmem
+}
+
+// -----
+
+!s16i = !cir.int<s, 16>
+
+module attributes {cir.triple = "x86_64-unknown-linux-gnu",
+                   cir.size_type_width = 64 : i32} {
+  cir.func @keeps_wide_marked(%first1: !cir.ptr<!s16i>,
+                              %last1: !cir.ptr<!s16i>,
+                              %first2: !cir.ptr<!s16i>,
+                              %last2: !cir.ptr<!s16i>) -> !cir.ptr<!s16i> {
+    %0 = cir.std.search(%first1 : !cir.ptr<!s16i>,
+                        %last1 : !cir.ptr<!s16i>,
+                        %first2 : !cir.ptr<!s16i>,
+                        %last2 : !cir.ptr<!s16i>,
+                        @search_wide) -> !cir.ptr<!s16i> {cir.narrow_char_params}
+    cir.return %0 : !cir.ptr<!s16i>
+  }
+// CHECK-LABEL: cir.func @keeps_wide_marked
+// CHECK: cir.std.search
+// CHECK-NOT: cir.libc.memmem
+}
+
+// -----
+
+!u8i = !cir.int<u, 8>
+!hayiter = !cir.struct<class "HayIter" {data !cir.ptr<!u8i>}>
+
+module attributes {cir.triple = "x86_64-unknown-linux-gnu",
+                   cir.size_type_width = 64 : i32} {
+  cir.func @keeps_half_wrapped(%first1: !hayiter, %last1: !hayiter,
+                               %first2: !cir.ptr<!u8i>,
+                               %last2: !cir.ptr<!u8i>) -> !hayiter {
+    %0 = cir.std.search(%first1 : !hayiter, %last1 : !hayiter,
+                        %first2 : !cir.ptr<!u8i>,
+                        %last2 : !cir.ptr<!u8i>,
+                        @search_half_wrapped) -> !hayiter {cir.narrow_char_params}
+    cir.return %0 : !hayiter
+  }
+// CHECK-LABEL: cir.func @keeps_half_wrapped
+// CHECK: cir.std.search
+// CHECK-NOT: cir.libc.memmem
+}
+
+// -----
+
+!u8i = !cir.int<u, 8>
+!fatiter = !cir.struct<class "FatIter" {data !cir.ptr<!u8i>, data !cir.ptr<!u8i>}>
+
+module attributes {cir.triple = "x86_64-unknown-linux-gnu",
+                   cir.size_type_width = 64 : i32} {
+  cir.func @keeps_two_member_iterator(
+      %first1: !fatiter, %last1: !fatiter,
+      %first2: !fatiter, %last2: !fatiter) -> !fatiter {
+    %0 = cir.std.search(%first1 : !fatiter, %last1 : !fatiter,
+                        %first2 : !fatiter, %last2 : !fatiter,
+                        @search_fat) -> !fatiter {cir.narrow_char_params}
+    cir.return %0 : !fatiter
+  }
+// CHECK-LABEL: cir.func @keeps_two_member_iterator
+// CHECK: cir.std.search
+// CHECK-NOT: cir.libc.memmem
+}
+
+// -----
+
+!u8i = !cir.int<u, 8>
+!asptr = !cir.ptr<!u8i, target_address_space(1)>
+
+module attributes {cir.triple = "x86_64-unknown-linux-gnu",
+                   cir.size_type_width = 64 : i32} {
+  cir.func @keeps_address_space(%first1: !asptr, %last1: !asptr,
+                                %first2: !asptr, %last2: !asptr) -> !asptr {
+    %0 = cir.std.search(%first1 : !asptr, %last1 : !asptr,
+                        %first2 : !asptr, %last2 : !asptr,
+                        @search_address_space) -> !asptr {cir.narrow_char_params}
+    cir.return %0 : !asptr
+  }
+// CHECK-LABEL: cir.func @keeps_address_space
+// CHECK: cir.std.search
+// CHECK-NOT: cir.libc.memmem
+}
+
+// -----
+
+!u8i = !cir.int<u, 8>
+!s8i = !cir.int<s, 8>
+
+module attributes {cir.triple = "x86_64-unknown-linux-gnu",
+                   cir.size_type_width = 64 : i32} {
+  cir.func @keeps_mismatched_elements(
+      %first1: !cir.ptr<!u8i>, %last1: !cir.ptr<!u8i>,
+      %first2: !cir.ptr<!s8i>, %last2: !cir.ptr<!s8i>)
+      -> !cir.ptr<!u8i> {
+    %0 = cir.std.search(%first1 : !cir.ptr<!u8i>,
+                        %last1 : !cir.ptr<!u8i>,
+                        %first2 : !cir.ptr<!s8i>,
+                        %last2 : !cir.ptr<!s8i>,
+                        @search_mismatched) -> !cir.ptr<!u8i> {cir.narrow_char_params}
+    cir.return %0 : !cir.ptr<!u8i>
+  }
+// CHECK-LABEL: cir.func @keeps_mismatched_elements
+// CHECK: cir.std.search
+// CHECK-NOT: cir.libc.memmem
+}
+
+// -----
+
+!voidptr = !cir.ptr<!cir.void>
+
+module attributes {cir.triple = "x86_64-unknown-linux-gnu",
+                   cir.size_type_width = 64 : i32} {
+  cir.func @keeps_non_integer_element(
+      %first1: !voidptr, %last1: !voidptr,
+      %first2: !voidptr, %last2: !voidptr) -> !voidptr {
+    %0 = cir.std.search(%first1 : !voidptr, %last1 : !voidptr,
+                        %first2 : !voidptr, %last2 : !voidptr,
+                        @search_void) -> !voidptr {cir.narrow_char_params}
+    cir.return %0 : !voidptr
+  }
+// CHECK-LABEL: cir.func @keeps_non_integer_element
+// CHECK: cir.std.search
+// CHECK-NOT: cir.libc.memmem
+}
+

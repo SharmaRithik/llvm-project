@@ -1,0 +1,12 @@
+// RUN: cir-opt %s --verify-roundtrip | FileCheck %s
+
+!voidptr = !cir.ptr<!cir.void>
+!u64i = !cir.int<u, 64>
+module attributes {cir.size_type_width = 64 : i32} {
+  cir.func @f(%haystack: !voidptr, %haystack_len: !u64i,
+              %needle: !voidptr, %needle_len: !u64i) -> !voidptr {
+    // CHECK: cir.libc.memmem({{.*}}, {{.*}}, {{.*}}, {{.*}}) : !cir.ptr<!void>, !u64i, !cir.ptr<!void>, !u64i
+    %ptr = cir.libc.memmem(%haystack, %haystack_len, %needle, %needle_len) : !voidptr, !u64i, !voidptr, !u64i
+    cir.return %ptr : !voidptr
+  }
+}
