@@ -1,0 +1,85 @@
+// RUN: cir-opt %s -verify-diagnostics -split-input-file
+
+!s32i = !cir.int<s, 32>
+!u64i = !cir.int<u, 64>
+!asptr = !cir.ptr<!s32i, target_address_space(1)>
+module attributes {cir.wchar_type_width = 32 : i32, cir.size_type_width = 64 : i32} {
+  cir.func @addr_space_src(%s: !asptr, %p: !s32i, %n: !u64i) {
+    // expected-error@+1 {{'cir.libc.wmemchr' op src must be in the default address space}}
+    %r = cir.libc.wmemchr(%s, %p, %n) : !asptr, !s32i, !u64i
+    cir.return
+  }
+}
+
+// -----
+
+!s32i = !cir.int<s, 32>
+!u32i = !cir.int<u, 32>
+!u64i = !cir.int<u, 64>
+module attributes {cir.wchar_type_width = 32 : i32, cir.size_type_width = 64 : i32} {
+  cir.func @pattern_type_mismatch(%s: !cir.ptr<!u32i>, %p: !s32i, %n: !u64i) {
+    // expected-error@+1 {{'cir.libc.wmemchr' op pattern must have the src pointee type}}
+    %r = cir.libc.wmemchr(%s, %p, %n) : !cir.ptr<!u32i>, !s32i, !u64i
+    cir.return
+  }
+}
+
+// -----
+
+!s16i = !cir.int<s, 16>
+!u64i = !cir.int<u, 64>
+module attributes {cir.wchar_type_width = 32 : i32, cir.size_type_width = 64 : i32} {
+  cir.func @wrong_pattern_width(%s: !cir.ptr<!s16i>, %p: !s16i, %n: !u64i) {
+    // expected-error@+1 {{'cir.libc.wmemchr' op pattern must have the width recorded in cir.wchar_type_width}}
+    %r = cir.libc.wmemchr(%s, %p, %n) : !cir.ptr<!s16i>, !s16i, !u64i
+    cir.return
+  }
+}
+
+// -----
+
+!s32i = !cir.int<s, 32>
+!u32i = !cir.int<u, 32>
+module attributes {cir.wchar_type_width = 32 : i32, cir.size_type_width = 64 : i32} {
+  cir.func @wrong_len_width(%s: !cir.ptr<!s32i>, %p: !s32i, %n: !u32i) {
+    // expected-error@+1 {{'cir.libc.wmemchr' op len must have the width recorded in cir.size_type_width}}
+    %r = cir.libc.wmemchr(%s, %p, %n) : !cir.ptr<!s32i>, !s32i, !u32i
+    cir.return
+  }
+}
+
+// -----
+
+!s32i = !cir.int<s, 32>
+!u64i = !cir.int<u, 64>
+module attributes {cir.size_type_width = 64 : i32} {
+  cir.func @missing_wchar_width(%s: !cir.ptr<!s32i>, %p: !s32i, %n: !u64i) {
+    // expected-error@+1 {{'cir.libc.wmemchr' op expects the module to record cir.wchar_type_width}}
+    %r = cir.libc.wmemchr(%s, %p, %n) : !cir.ptr<!s32i>, !s32i, !u64i
+    cir.return
+  }
+}
+
+// -----
+
+!s32i = !cir.int<s, 32>
+!u64i = !cir.int<u, 64>
+module attributes {cir.wchar_type_width = "wide", cir.size_type_width = 64 : i32} {
+  cir.func @malformed_wchar_width(%s: !cir.ptr<!s32i>, %p: !s32i, %n: !u64i) {
+    // expected-error@+1 {{'cir.libc.wmemchr' op requires cir.wchar_type_width to be a signless i32 holding a fundamental integer width}}
+    %r = cir.libc.wmemchr(%s, %p, %n) : !cir.ptr<!s32i>, !s32i, !u64i
+    cir.return
+  }
+}
+
+// -----
+
+!s32i = !cir.int<s, 32>
+!u64i = !cir.int<u, 64>
+module attributes {cir.wchar_type_width = 32 : i32} {
+  cir.func @missing_size_width(%s: !cir.ptr<!s32i>, %p: !s32i, %n: !u64i) {
+    // expected-error@+1 {{'cir.libc.wmemchr' op expects the module to record cir.size_type_width}}
+    %r = cir.libc.wmemchr(%s, %p, %n) : !cir.ptr<!s32i>, !s32i, !u64i
+    cir.return
+  }
+}

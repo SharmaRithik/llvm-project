@@ -4685,6 +4685,28 @@ std::optional<unsigned> cir::getRecordedIntegerWidth(mlir::ModuleOp mod,
   return readRecordedIntegerWidth(attr);
 }
 
+/// Checks an operand's integer width against a width the module records,
+/// shared by the libc search operations whose operand widths are target
+/// facts rather than shapes a constraint could pin.
+static LogicalResult checkRecordedWidth(mlir::Operation *op,
+                                        mlir::ModuleOp moduleOp,
+                                        cir::IntType type,
+                                        llvm::StringRef operandName,
+                                        llvm::StringRef attrName) {
+  mlir::Attribute attr = moduleOp->getAttr(attrName);
+  if (!attr)
+    return op->emitOpError("expects the module to record ") << attrName;
+  std::optional<unsigned> width = readRecordedIntegerWidth(attr);
+  if (!width)
+    return op->emitOpError("requires ")
+           << attrName
+           << " to be a signless i32 holding a fundamental integer width";
+  if (type.getWidth() != *width)
+    return op->emitOpError()
+           << operandName << " must have the width recorded in " << attrName;
+  return success();
+}
+
 LogicalResult cir::MemChrOp::verify() {
   auto moduleOp = (*this)->getParentOfType<mlir::ModuleOp>();
   if (!moduleOp)
@@ -4694,27 +4716,34 @@ LogicalResult cir::MemChrOp::verify() {
   if (mlir::cast<cir::PointerType>(getSrc().getType()).getAddrSpace())
     return emitOpError("src must be in the default address space");
 
-  auto checkWidth = [&](cir::IntType type, llvm::StringRef operandName,
-                        llvm::StringRef attrName) -> LogicalResult {
-    mlir::Attribute attr = moduleOp->getAttr(attrName);
-    if (!attr)
-      return emitOpError("expects the module to record ") << attrName;
-    std::optional<unsigned> width = readRecordedIntegerWidth(attr);
-    if (!width)
-      return emitOpError("requires ")
-             << attrName
-             << " to be a signless i32 holding a fundamental integer width";
-    if (type.getWidth() != *width)
-      return emitOpError() << operandName << " must have the width recorded in "
-                           << attrName;
-    return success();
-  };
-
-  if (failed(checkWidth(getPattern().getType(), "pattern",
-                        cir::CIRDialect::getIntTypeWidthAttrName())))
+  if (failed(checkRecordedWidth(*this, moduleOp, getPattern().getType(),
+                                "pattern",
+                                cir::CIRDialect::getIntTypeWidthAttrName())))
     return failure();
-  return checkWidth(getLen().getType(), "len",
-                    cir::CIRDialect::getSizeTypeWidthAttrName());
+  return checkRecordedWidth(*this, moduleOp, getLen().getType(), "len",
+                            cir::CIRDialect::getSizeTypeWidthAttrName());
+}
+
+LogicalResult cir::WMemChrOp::verify() {
+  auto moduleOp = (*this)->getParentOfType<mlir::ModuleOp>();
+  if (!moduleOp)
+    return emitOpError("expects an enclosing module");
+
+  auto srcPtrTy = mlir::cast<cir::PointerType>(getSrc().getType());
+  if (srcPtrTy.getAddrSpace())
+    return emitOpError("src must be in the default address space");
+
+  // The search compares the wide character type it points at, so the
+  // pattern is the pointee rather than a widened int.
+  if (srcPtrTy.getPointee() != getPattern().getType())
+    return emitOpError("pattern must have the src pointee type");
+
+  if (failed(checkRecordedWidth(
+          *this, moduleOp, mlir::cast<cir::IntType>(getPattern().getType()),
+          "pattern", cir::CIRDialect::getWCharTypeWidthAttrName())))
+    return failure();
+  return checkRecordedWidth(*this, moduleOp, getLen().getType(), "len",
+                            cir::CIRDialect::getSizeTypeWidthAttrName());
 }
 
 //===----------------------------------------------------------------------===//

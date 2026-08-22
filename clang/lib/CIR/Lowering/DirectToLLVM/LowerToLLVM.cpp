@@ -49,6 +49,7 @@
 #include "llvm/ADT/MapVector.h"
 #include "llvm/ADT/StringMap.h"
 #include "llvm/ADT/TypeSwitch.h"
+#include "llvm/Analysis/TargetLibraryInfo.h"
 #include "llvm/IR/Module.h"
 #include "llvm/Support/Casting.h"
 #include "llvm/Support/ErrorHandling.h"
@@ -2166,6 +2167,7 @@ static void lowerCallAttributes(cir::CIRCallOpInterface op,
         attr.getName() == op.getInlineKindAttrName() ||
         // Facts the CIR rewrites read have no meaning past this point.
         attr.getName() == CIRDialect::getNarrowCharParamsAttrName() ||
+        attr.getName() == CIRDialect::getWideCharParamsAttrName() ||
         attr.getName() == CIRDialect::getByteEqPredAttrName() ||
         attr.getName() == CIRDialect::getByteEqPredValueAttrName() ||
         attr.getName() == CIRDialect::getMustTailAttrName())
@@ -5708,6 +5710,59 @@ mlir::LogicalResult CIRToLLVMCpuIdOpLowering::matchAndRewrite(
   return mlir::success();
 }
 
+template <typename OpT>
+static mlir::LogicalResult
+lowerMemChrLike(OpT op, mlir::Value src, mlir::Value pattern, mlir::Value len,
+                llvm::StringRef fnName, mlir::LLVM::LLVMFunctionType fnTy,
+                llvm::Attribute::AttrKind extKind,
+                mlir::ConversionPatternRewriter &rewriter,
+                mlir::SymbolTableCollection &symbolTables) {
+  mlir::Builder b(rewriter.getContext());
+  mlir::NamedAttribute noundefAttr =
+      b.getNamedAttr("llvm.noundef", b.getUnitAttr());
+  mlir::DictionaryAttr noundefDict = mlir::DictionaryAttr::get(
+      rewriter.getContext(), llvm::ArrayRef(noundefAttr));
+  SmallVector<mlir::Attribute> argAttrVec(3, noundefDict);
+  if (extKind != llvm::Attribute::None) {
+    mlir::NamedAttribute extAttr = b.getNamedAttr(
+        extKind == llvm::Attribute::SExt ? "llvm.signext" : "llvm.zeroext",
+        b.getUnitAttr());
+    argAttrVec[1] = mlir::DictionaryAttr::get(
+        rewriter.getContext(), llvm::ArrayRef({noundefAttr, extAttr}));
+  }
+  mlir::ArrayAttr argAttrs =
+      mlir::ArrayAttr::get(rewriter.getContext(), argAttrVec);
+
+  createLLVMFuncOpIfNotExist(rewriter, symbolTables, op, fnName, fnTy,
+                             argAttrs);
+
+  if (extKind != llvm::Attribute::None) {
+    // A cir.func can remain in the symbol table after conversion replaced
+    // it, and touching a replaced op asserts. When the symbol is not yet an
+    // llvm.func the retrofit is skipped, so a declaration lowered from the
+    // source may keep no extension attribute at all. The call site argument
+    // attribute alone carries the ABI fact then, which is sound because the
+    // caller performs the extension.
+    auto fn = mlir::dyn_cast_if_present<mlir::LLVM::LLVMFuncOp>(
+        symbolTables.lookupSymbolIn(
+            op->template getParentOfType<mlir::ModuleOp>(),
+            mlir::StringAttr::get(rewriter.getContext(), fnName)));
+    if (fn && fn.isExternal() && fn.getFunctionType().getParams().size() == 3)
+      rewriter.modifyOpInPlace(fn, [&] {
+        fn.setArgAttr(1,
+                      extKind == llvm::Attribute::SExt ? "llvm.signext"
+                                                       : "llvm.zeroext",
+                      b.getUnitAttr());
+      });
+  }
+
+  mlir::LLVM::CallOp newCall = rewriter.replaceOpWithNewOp<mlir::LLVM::CallOp>(
+      op, mlir::TypeRange{fnTy.getReturnType()}, fnName,
+      mlir::ValueRange{src, pattern, len});
+  newCall.setArgAttrsAttr(argAttrs);
+  return mlir::success();
+}
+
 mlir::LogicalResult CIRToLLVMMemChrOpLowering::matchAndRewrite(
     cir::MemChrOp op, OpAdaptor adaptor,
     mlir::ConversionPatternRewriter &rewriter) const {
@@ -5719,26 +5774,54 @@ mlir::LogicalResult CIRToLLVMMemChrOpLowering::matchAndRewrite(
   auto fnTy =
       mlir::LLVM::LLVMFunctionType::get(llvmPtrTy, {srcTy, patternTy, lenTy},
                                         /*isVarArg=*/false);
-  llvm::StringRef fnName = "memchr";
 
-  mlir::Builder b(rewriter.getContext());
-  mlir::NamedAttribute noundefAttr =
-      b.getNamedAttr("llvm.noundef", b.getUnitAttr());
-  mlir::DictionaryAttr noundefDict = mlir::DictionaryAttr::get(
-      rewriter.getContext(), llvm::ArrayRef(noundefAttr));
-  SmallVector<mlir::Attribute> argAttrVec(3, noundefDict);
-  mlir::ArrayAttr argAttrs =
-      mlir::ArrayAttr::get(rewriter.getContext(), argAttrVec);
+  // Targets like PowerPC64 and SystemZ pass an int widened to a full
+  // register, so the i32 pattern argument needs the extension attribute
+  // classic CodeGen and BuildLibCalls put on it.  The predicate is the
+  // library's, so the target list cannot drift from what classic uses.
+  // A module with no recorded triple gets no extension attribute, since
+  // there is no target to require one.
+  auto tripleAttr = mlir::dyn_cast_if_present<mlir::StringAttr>(
+      op->getParentOfType<mlir::ModuleOp>()->getAttr(
+          cir::CIRDialect::getTripleAttrName()));
+  llvm::Attribute::AttrKind extKind =
+      tripleAttr ? llvm::TargetLibraryInfo::getExtAttrForI32Param(
+                       llvm::Triple(tripleAttr.getValue()), /*Signed=*/true)
+                 : llvm::Attribute::None;
+  return lowerMemChrLike(op, adaptor.getSrc(), adaptor.getPattern(),
+                         adaptor.getLen(), "memchr", fnTy, extKind, rewriter,
+                         symbolTables);
+}
 
-  createLLVMFuncOpIfNotExist(rewriter, symbolTables, op, fnName, fnTy,
-                             argAttrs);
-
-  mlir::LLVM::CallOp newCall = rewriter.replaceOpWithNewOp<mlir::LLVM::CallOp>(
-      op, mlir::TypeRange{llvmPtrTy}, fnName,
-      mlir::ValueRange{adaptor.getSrc(), adaptor.getPattern(),
-                       adaptor.getLen()});
-  newCall.setArgAttrsAttr(argAttrs);
-  return mlir::success();
+mlir::LogicalResult CIRToLLVMWMemChrOpLowering::matchAndRewrite(
+    cir::WMemChrOp op, OpAdaptor adaptor,
+    mlir::ConversionPatternRewriter &rewriter) const {
+  mlir::Type srcTy = getTypeConverter()->convertType(op.getSrc().getType());
+  mlir::Type patternTy =
+      getTypeConverter()->convertType(op.getPattern().getType());
+  mlir::Type lenTy = getTypeConverter()->convertType(op.getLen().getType());
+  auto fnTy =
+      mlir::LLVM::LLVMFunctionType::get(srcTy, {srcTy, patternTy, lenTy},
+                                        /*isVarArg=*/false);
+  // A target that widens int arguments needs the extension attribute on a
+  // 32 bit wchar_t, with the signedness wchar_t has there. A module with
+  // no recorded triple gets none, since there is no target to require one.
+  // A 16 bit wchar_t needs none because this query models i32 and no widening
+  // target has a 16 bit wchar_t.
+  // AIX would use zeroext but CIR does not support its ABI.
+  auto patternIntTy = mlir::cast<cir::IntType>(op.getPattern().getType());
+  auto tripleAttr = mlir::dyn_cast_if_present<mlir::StringAttr>(
+      op->getParentOfType<mlir::ModuleOp>()->getAttr(
+          cir::CIRDialect::getTripleAttrName()));
+  llvm::Attribute::AttrKind extKind =
+      tripleAttr && patternIntTy.getWidth() == 32
+          ? llvm::TargetLibraryInfo::getExtAttrForI32Param(
+                llvm::Triple(tripleAttr.getValue()),
+                /*Signed=*/patternIntTy.isSigned())
+          : llvm::Attribute::None;
+  return lowerMemChrLike(op, adaptor.getSrc(), adaptor.getPattern(),
+                         adaptor.getLen(), "wmemchr", fnTy, extKind, rewriter,
+                         symbolTables);
 }
 
 // Function to do the clear-padding operation. This is a faithful translation of

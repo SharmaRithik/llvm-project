@@ -9241,6 +9241,45 @@ def CIR_MemChrOp : CIR_Op<"libc.memchr",
   let hasVerifier = 1;
 }
 
+def CIR_WMemChrOp : CIR_Op<"libc.wmemchr",
+    [AllTypesMatch<["src", "result"]>]> {
+  let summary = "libc's `wmemchr`";
+  let description = [{
+    Search for the wide character `pattern` in the `len` wide characters
+    from `src`. `result` is a pointer to the found character or a null
+    pointer.
+
+    Unlike `cir.libc.memchr` the pointers are typed, since wmemchr takes
+    and returns `wchar_t *`, and `pattern` is a `wchar_t` rather than a
+    widened int, so no conversion happens at the boundary. `pattern` and
+    the pointee have the width the module records as
+    `cir.wchar_type_width` and `len` has the `cir.size_type_width` width,
+    which the verifier checks. `len` counts wide characters, not bytes.
+
+    Examples:
+
+    ```
+    %p = cir.libc.wmemchr(%src, %pattern, %len) : !cir.ptr<!s32i>, !s32i, !u64i
+    ```
+  }];
+
+  let arguments = (ins
+    Arg<CIR_PtrToFundamentalIntType, "", [MemRead]>:$src,
+    CIR_AnyFundamentalIntType:$pattern,
+    CIR_AnyFundamentalUIntType:$len
+  );
+
+  let results = (outs CIR_PtrToFundamentalIntType:$result);
+
+  let assemblyFormat = [{
+    `(` $src `,` $pattern `,` $len `)` attr-dict
+    `:` qualified(type($src)) `,` qualified(type($pattern)) `,`
+    qualified(type($len))
+  }];
+
+  let hasVerifier = 1;
+}
+
 //===----------------------------------------------------------------------===//
 // LaunderOp
 //===----------------------------------------------------------------------===//

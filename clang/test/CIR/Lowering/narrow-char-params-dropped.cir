@@ -1,6 +1,7 @@
 // RUN: cir-opt --cir-to-llvm %s | FileCheck %s
 
 !u8i = !cir.int<u, 8>
+!u32i = !cir.int<u, 32>
 !closure = !cir.struct<class "Closure" {data !u8i}>
 
 module attributes {cir.triple = "x86_64-unknown-linux-gnu", cir.size_type_width = 64 : i32} {
@@ -23,4 +24,14 @@ module attributes {cir.triple = "x86_64-unknown-linux-gnu", cir.size_type_width 
 // CHECK-LABEL: @g
 // CHECK: llvm.call @_ZSt7find_ifIPh1AET_S1_S1_T0_
 // CHECK-NOT: cir.byte_eq_pred
+
+  cir.func private @_ZSt4findIPwwET_S1_S1_RKT0_(!cir.ptr<!u32i>, !cir.ptr<!u32i>, !cir.ptr<!u32i>) -> !cir.ptr<!u32i>
+
+  cir.func @h(%arg0: !cir.ptr<!u32i>, %arg1: !cir.ptr<!u32i>, %arg2: !cir.ptr<!u32i>) -> !cir.ptr<!u32i> {
+    %0 = cir.call @_ZSt4findIPwwET_S1_S1_RKT0_(%arg0, %arg1, %arg2) {cir.wide_char_params} : (!cir.ptr<!u32i>, !cir.ptr<!u32i>, !cir.ptr<!u32i>) -> !cir.ptr<!u32i>
+    cir.return %0 : !cir.ptr<!u32i>
+  }
+// CHECK-LABEL: @h
+// CHECK: llvm.call @_ZSt4findIPwwET_S1_S1_RKT0_
+// CHECK-NOT: cir.wide_char_params
 }

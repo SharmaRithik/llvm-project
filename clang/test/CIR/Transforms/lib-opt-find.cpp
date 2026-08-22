@@ -14,6 +14,8 @@
 // RUN: FileCheck %s --input-file=%t.ppc64le.ll --check-prefix=LLVMEXT
 // RUN: %clang_cc1 -std=c++20 -triple s390x-unknown-linux-gnu -fclangir -O1 -clangir-enable-idiom-recognizer -clangir-lib-opt -emit-llvm %s -o %t.s390x.ll
 // RUN: FileCheck %s --input-file=%t.s390x.ll --check-prefix=LLVMEXT
+// RUN: %clang_cc1 -std=c++20 -triple x86_64-unknown-linux-gnu -fwchar-type=short -fno-signed-wchar -fclangir -O1 -clangir-enable-idiom-recognizer -clangir-lib-opt -emit-cir %s -o %t.short-wchar.cir
+// RUN: FileCheck %s --input-file=%t.short-wchar.cir --check-prefix=SHORTWCHAR
 // RUN: %clang_cc1 -std=c++20 -triple i686-unknown-linux-gnu -fclangir -O1 -clangir-enable-idiom-recognizer -clangir-lib-opt -emit-cir %s -o %t.i686.cir
 // RUN: FileCheck %s --input-file=%t.i686.cir --check-prefix=XFORM32
 // RUN: %clang_cc1 -std=c++20 -triple spirv-unknown-vulkan-compute -fclangir -O1 -clangir-enable-idiom-recognizer -clangir-lib-opt -emit-cir %s -o %t.spirv.cir
@@ -31,13 +33,15 @@
 // TargetLibraryInfo reports no memchr on these targets, so no call may be
 // introduced.
 // RUN: %clang_cc1 -std=c++20 -triple amdgcn-amd-amdhsa -fclangir -O1 -clangir-enable-idiom-recognizer -clangir-lib-opt -emit-cir %s -o %t.amdgcn.cir
-// RUN: FileCheck %s --input-file=%t.amdgcn.cir --check-prefix=NOXFORM --implicit-check-not=cir.libc.memchr --implicit-check-not=cir.std.
+// RUN: FileCheck %s --input-file=%t.amdgcn.cir --check-prefixes=NOXFORM,NOXFORMW --implicit-check-not=cir.libc.memchr --implicit-check-not=cir.libc.wmemchr --implicit-check-not=cir.std.
 // RUN: %clang_cc1 -std=c++20 -triple nvptx64-nvidia-cuda -fclangir -O1 -clangir-enable-idiom-recognizer -clangir-lib-opt -emit-cir %s -o %t.nvptx.cir
-// RUN: FileCheck %s --input-file=%t.nvptx.cir --check-prefix=NOXFORM --implicit-check-not=cir.libc.memchr --implicit-check-not=cir.std.
+// RUN: FileCheck %s --input-file=%t.nvptx.cir --check-prefixes=NOXFORM,NOXFORMW --implicit-check-not=cir.libc.memchr --implicit-check-not=cir.libc.wmemchr --implicit-check-not=cir.std.
 // RUN: %clang_cc1 -std=c++20 -triple x86_64-unknown-linux-gnu -ffreestanding -fclangir -O1 -clangir-enable-idiom-recognizer -clangir-lib-opt -emit-cir %s -o %t.free.cir
-// RUN: FileCheck %s --input-file=%t.free.cir --check-prefix=NOXFORM --implicit-check-not=cir.libc.memchr --implicit-check-not=cir.std.
+// RUN: FileCheck %s --input-file=%t.free.cir --check-prefixes=NOXFORM,NOXFORMW --implicit-check-not=cir.libc.memchr --implicit-check-not=cir.libc.wmemchr --implicit-check-not=cir.std.
 // RUN: %clang_cc1 -std=c++20 -triple x86_64-unknown-linux-gnu -fno-builtin-memchr -fclangir -O1 -clangir-enable-idiom-recognizer -clangir-lib-opt -emit-cir %s -o %t.nomemchr.cir
 // RUN: FileCheck %s --input-file=%t.nomemchr.cir --check-prefix=NOXFORM --implicit-check-not=cir.libc.memchr --implicit-check-not=cir.std.
+// RUN: %clang_cc1 -std=c++20 -triple x86_64-unknown-linux-gnu -fno-builtin-wmemchr -fclangir -O1 -clangir-enable-idiom-recognizer -clangir-lib-opt -emit-cir %s -o %t.nowmemchr.cir
+// RUN: FileCheck %s --input-file=%t.nowmemchr.cir --check-prefix=NOWMEMCHR --implicit-check-not=cir.libc.wmemchr --implicit-check-not=cir.std.
 // RUN: %clang_cc1 -std=c++20 -triple x86_64-unknown-linux-gnu -fno-builtin-strlen -fclangir -O1 -clangir-enable-idiom-recognizer -clangir-lib-opt -emit-cir %s -o %t.nostrlen.cir
 // RUN: FileCheck %s --input-file=%t.nostrlen.cir
 // RUN: %clang_cc1 -std=c++20 -triple x86_64-unknown-linux-gnu -DMEMCHR_NORETURN -fclangir -O1 -clangir-enable-idiom-recognizer -clangir-lib-opt -emit-cir %s -o %t.noreturn.cir
@@ -63,6 +67,11 @@
 // NOXFORM: cir.call @_ZSt7find_ifIPhZ20test_literal_find_ifS0_S0_E3$_0ET_S2_S2_T0_
 // NOXFORM: cir.call @_ZSt11find_if_notIPaZ24test_literal_find_if_notS0_S0_E3$_0ET_S2_S2_T0_
 // NOXFORM: cir.call @_ZSt4findIPaaET_S1_S1_RKT0_
+// NOXFORMW: cir.call @_ZSt4findIPwwET_S1_S1_RKT0_
+// NOXFORMW: cir.call @_ZSt4findIPwwET_S1_S1_RKT0_
+// NOWMEMCHR: cir.libc.memchr
+// NOWMEMCHR: cir.call @_ZSt4findIPwwET_S1_S1_RKT0_
+// NOWMEMCHR: cir.call @_ZSt4findIPwwET_S1_S1_RKT0_
 
 #ifdef MEMCHR_NORETURN
 extern "C" __attribute__((noreturn)) void *memchr(const void *, int,
@@ -141,10 +150,10 @@ unsigned char *test_byte_find(unsigned char *first, unsigned char *last,
 // CHECK: cir.ternary(%[[EMPTY]], true {
 // CHECK-NEXT: cir.yield %[[LAST]] : !cir.ptr<!u8i>
 // CHECK-NEXT: }, false {
-// CHECK: %[[SRC:.*]] = cir.cast bitcast %[[FIRST]] : !cir.ptr<!u8i> -> !cir.ptr<!void>
 // CHECK: %[[BYTE:.*]] = cir.load %arg2 : !cir.ptr<!u8i>, !u8i
-// CHECK: %[[PATTERN:.*]] = cir.cast integral %[[BYTE]] : !u8i -> !s32i
 // CHECK: %[[LEN:.*]] = cir.ptr_diff %[[LAST]], %[[FIRST]] : !cir.ptr<!u8i> -> !u64i
+// CHECK: %[[SRC:.*]] = cir.cast bitcast %[[FIRST]] : !cir.ptr<!u8i> -> !cir.ptr<!void>
+// CHECK: %[[PATTERN:.*]] = cir.cast integral %[[BYTE]] : !u8i -> !s32i
 // CHECK: %[[PTR:.*]] = cir.libc.memchr(%[[SRC]], %[[PATTERN]], %[[LEN]]) : !cir.ptr<!void>, !s32i, !u64i
 // CHECK: %[[RES:.*]] = cir.cast bitcast %[[PTR]] : !cir.ptr<!void> -> !cir.ptr<!u8i>
 // CHECK: %[[NULL:.*]] = cir.const #cir.ptr<null> : !cir.ptr<!u8i>
@@ -158,8 +167,8 @@ char *test_char_find(char *first, char *last, const char &value) {
 }
 // CHECK-LABEL: @_Z14test_char_findPcS_RKc
 // CHECK-NOT: cir.call
-// CHECK: cir.cast integral %{{.*}} : !s8i -> !s32i
 // CHECK: %[[CLEN:.*]] = cir.ptr_diff %{{.*}}, %{{.*}} : !cir.ptr<!s8i> -> !u64i
+// CHECK: cir.cast integral %{{.*}} : !s8i -> !s32i
 // CHECK: %[[CPTR:.*]] = cir.libc.memchr(%{{.*}}, %{{.*}}, %[[CLEN]]) : !cir.ptr<!void>, !s32i, !u64i
 // CHECK: %[[CRES:.*]] = cir.cast bitcast %[[CPTR]] : !cir.ptr<!void> -> !cir.ptr<!s8i>
 // CHECK: %[[CMISS:.*]] = cir.cmp eq %[[CRES]], %{{.*}}
@@ -205,8 +214,8 @@ signed char *test_signed_char_find(signed char *first, signed char *last,
 }
 // CHECK-LABEL: @_Z21test_signed_char_find
 // CHECK-NOT: cir.call
-// CHECK: cir.cast integral %{{.*}} : !s8i -> !s32i
 // CHECK: %[[SLEN:.*]] = cir.ptr_diff %{{.*}}, %{{.*}} : !cir.ptr<!s8i> -> !u64i
+// CHECK: cir.cast integral %{{.*}} : !s8i -> !s32i
 // CHECK: %[[SPTR:.*]] = cir.libc.memchr(%{{.*}}, %{{.*}}, %[[SLEN]]) : !cir.ptr<!void>, !s32i, !u64i
 // CHECK: %[[SRES:.*]] = cir.cast bitcast %[[SPTR]] : !cir.ptr<!void> -> !cir.ptr<!s8i>
 // CHECK: %[[SMISS:.*]] = cir.cmp eq %[[SRES]], %{{.*}}
@@ -313,3 +322,50 @@ char8_t *test_char8_find(char8_t *first, char8_t *last, const char8_t &value) {
 // CHECK-LABEL: @_Z15test_char8_findPDuS_RKDu
 // CHECK-NOT: cir.call
 // CHECK: cir.libc.memchr({{.*}}) : !cir.ptr<!void>, !s32i, !u64i
+
+wchar_t *test_wide_find(wchar_t *first, wchar_t *last, const wchar_t &value) {
+  return std::find(first, last, value);
+}
+// CHECK-LABEL: @_Z14test_wide_findPwS_RKw
+// CHECK-NOT: cir.call
+// CHECK: %[[WBYTE:.*]] = cir.load %arg2 : !cir.ptr<![[WCH:[su]32i]]>, ![[WCH]]
+// CHECK: %[[WLEN:.*]] = cir.ptr_diff %{{.*}}, %{{.*}} : !cir.ptr<![[WCH]]> -> !u64i
+// CHECK: %[[WPTR:.*]] = cir.libc.wmemchr(%{{.*}}, %[[WBYTE]], %[[WLEN]]) : !cir.ptr<![[WCH]]>, ![[WCH]], !u64i
+// CHECK: %[[WMISS:.*]] = cir.cmp eq %[[WPTR]], %{{.*}}
+// CHECK: cir.select if %[[WMISS]] then %{{.*}} else %[[WPTR]]
+// LLVMEXT: declare ptr @wmemchr(ptr noundef, i32 noundef signext, i64 noundef)
+// LLVMEXT: call ptr @wmemchr(ptr noundef {{.*}}, i32 noundef signext {{.*}}, i64 noundef {{.*}})
+// LLVM64: declare ptr @wmemchr(ptr noundef, i32 noundef, i64 noundef)
+// LLVM64: call ptr @wmemchr(ptr noundef {{.*}}, i32 noundef {{.*}}, i64 noundef {{.*}})
+// SHORTWCHAR-LABEL: @_Z14test_wide_findPwS_RKw
+// SHORTWCHAR-NOT: cir.libc.wmemchr
+// SHORTWCHAR: cir.call @_ZSt4findIPwwET_S1_S1_RKT0_
+// SHORTWCHAR-NOT: cir.libc.wmemchr
+
+wchar_t *test_wide_find_if(wchar_t *first, wchar_t *last,
+                           const wchar_t &value) {
+  return std::find_if(first, last,
+                      [&](wchar_t element) { return element == value; });
+}
+// CHECK-LABEL: @_Z17test_wide_find_ifPwS_RKw
+// CHECK: cir.call @_ZSt7find_ifIPwZ17test_wide_find_if{{.*}}
+// CHECK-NOT: cir.libc.wmemchr
+
+volatile wchar_t *test_volatile_wide_find(volatile wchar_t *first,
+                                          volatile wchar_t *last,
+                                          const wchar_t &value) {
+  return std::find(first, last, value);
+}
+// CHECK-LABEL: @_Z23test_volatile_wide_findPVwS0_RKw
+// CHECK: cir.call @_ZSt4findIPVwwET_S2_S2_RKT0_
+// CHECK-NOT: cir.libc.wmemchr
+
+__attribute__((no_builtin("wmemchr")))
+wchar_t *test_wide_no_builtin(wchar_t *first, wchar_t *last,
+                              const wchar_t &value) {
+  return std::find(first, last, value);
+}
+// CHECK-LABEL: @_Z20test_wide_no_builtinPwS_RKw
+// CHECK: cir.call @_ZSt4find{{.*}}(
+// CHECK-NOT: cir.libc.wmemchr
+// CHECK-NOT: cir.std.find

@@ -343,6 +343,50 @@ char *find_if_functor(char *first, char *last, char value) {
 // CHECK: cir.call @_ZNSt3__17find_ifIPc9EqFunctorEET_S3_S3_T0_
 // CHECK-NOT: cir.byte_eq_pred
 
+wchar_t *wide_eligible(wchar_t *first, wchar_t *last, const wchar_t &value) {
+  return std::find(first, last, value);
+}
+// CHECK-LABEL: cir.func{{.*}} @_Z13wide_eligible
+// CHECK: cir.call @_ZNSt3__14findIPwwEET_S2_S2_RKT0_({{.*}}) {cir.wide_char_params}
+// UCHAR-LABEL: cir.func{{.*}} @_Z13wide_eligible
+// UCHAR: cir.call @_ZNSt3__14findIPwwEET_S2_S2_RKT0_({{.*}}) {cir.wide_char_params}
+
+wchar_t *wide_wrapped(std::span_iter<wchar_t *> first,
+                      std::span_iter<wchar_t *> last, const wchar_t &value) {
+  return std::find(first, last, value).ptr;
+}
+// CHECK-LABEL: cir.func{{.*}} @_Z12wide_wrapped
+// CHECK: cir.call @_ZNSt3__14findINS_9span_iterIPwEEwEET_S4_S4_RKT0_({{.*}}) {cir.wide_char_params}
+
+char16_t *wide_char16(char16_t *first, char16_t *last, const char16_t &value) {
+  return std::find(first, last, value);
+}
+// CHECK-LABEL: cir.func{{.*}} @_Z11wide_char16
+// CHECK: cir.call @_ZNSt3__14findIPDsDsEET_S2_S2_RKT0_
+// CHECK-NOT: cir.wide_char_params
+
+char32_t *wide_char32(char32_t *first, char32_t *last, const char32_t &value) {
+  return std::find(first, last, value);
+}
+// CHECK-LABEL: cir.func{{.*}} @_Z11wide_char32
+// CHECK: cir.call @_ZNSt3__14findIPDiDiEET_S2_S2_RKT0_
+// CHECK-NOT: cir.wide_char_params
+
+wchar_t *wide_mixed(wchar_t *first, wchar_t *last, const char &value) {
+  return std::find(first, last, value);
+}
+// CHECK-LABEL: cir.func{{.*}} @_Z10wide_mixed
+// CHECK: cir.call @_ZNSt3__14findIPwcEET_S2_S2_RKT0_
+// CHECK-NOT: cir.wide_char_params
+
+char *narrow_mixed_wide_value(char *first, char *last,
+                              const wchar_t &value) {
+  return std::find(first, last, value);
+}
+// CHECK-LABEL: cir.func{{.*}} @_Z23narrow_mixed_wide_value
+// CHECK: cir.call @_ZNSt3__14findIPcwEET_S2_S2_RKT0_
+// CHECK-NOT: cir.narrow_char_params
+
 namespace user_gnu {
 namespace __gnu_cxx {
 template <class P> struct nested_iter {

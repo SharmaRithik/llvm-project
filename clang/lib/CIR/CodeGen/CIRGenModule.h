@@ -842,6 +842,11 @@ public:
   static bool hasByteEqPredicate(const clang::FunctionDecl *funcDecl,
                                  cir::KnownFuncKind kind);
 
+  /// Whether every parameter designates the same non-volatile wchar_t
+  /// through a pointer, a reference, or a standard library contiguous
+  /// iterator.
+  static bool hasWideCharParams(const clang::FunctionDecl *funcDecl);
+
   /// Whether the call operator takes a whole range whose record carries a
   /// standard library identity over the searched narrow character type,
   /// plus the value and a std::identity projection.

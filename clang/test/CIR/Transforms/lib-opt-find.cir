@@ -19,10 +19,10 @@ module attributes {cir.triple = "x86_64-unknown-linux-gnu", cir.size_type_width 
 // CHECK: %[[RESULT:.*]] = cir.ternary(%[[EMPTY]], true {
 // CHECK-NEXT: cir.yield %[[LAST]] : !cir.ptr<!u8i>
 // CHECK-NEXT: }, false {
-// CHECK: %[[SRC:.*]] = cir.cast bitcast %[[FIRST]] : !cir.ptr<!u8i> -> !cir.ptr<!void>
 // CHECK: %[[BYTE:.*]] = cir.load %[[VALUE]] : !cir.ptr<!u8i>, !u8i
-// CHECK: %[[PATTERN:.*]] = cir.cast integral %[[BYTE]] : !u8i -> !s32i
 // CHECK: %[[LEN:.*]] = cir.ptr_diff %[[LAST]], %[[FIRST]] : !cir.ptr<!u8i> -> !u64i
+// CHECK: %[[SRC:.*]] = cir.cast bitcast %[[FIRST]] : !cir.ptr<!u8i> -> !cir.ptr<!void>
+// CHECK: %[[PATTERN:.*]] = cir.cast integral %[[BYTE]] : !u8i -> !s32i
 // CHECK: %[[PTR:.*]] = cir.libc.memchr(%[[SRC]], %[[PATTERN]], %[[LEN]]) : !cir.ptr<!void>, !s32i, !u64i
 // CHECK: %[[RES:.*]] = cir.cast bitcast %[[PTR]] : !cir.ptr<!void> -> !cir.ptr<!u8i>
 // CHECK: %[[NULL:.*]] = cir.const #cir.ptr<null> : !cir.ptr<!u8i>
@@ -393,10 +393,35 @@ module attributes {cir.triple = "x86_64-unknown-linux-gnu",
 // CHECK-LABEL: @rewrites_wrapped_iterator
 // CHECK: %[[FIRST:.*]] = cir.extract_member %{{.*}}[0] : !rec_std3A3A__13A3A__wrap_iter3Cchar_2A3E -> !cir.ptr<!u8i>
 // CHECK: %[[LAST:.*]] = cir.extract_member %{{.*}}[0] : !rec_std3A3A__13A3A__wrap_iter3Cchar_2A3E -> !cir.ptr<!u8i>
-// CHECK: %[[SRC:.*]] = cir.cast bitcast %[[FIRST]] : !cir.ptr<!u8i> -> !cir.ptr<!void>
 // CHECK: %[[LEN:.*]] = cir.ptr_diff %[[LAST]], %[[FIRST]] : !cir.ptr<!u8i> -> !u64i
+// CHECK: %[[SRC:.*]] = cir.cast bitcast %[[FIRST]] : !cir.ptr<!u8i> -> !cir.ptr<!void>
 // CHECK: cir.libc.memchr(%[[SRC]], %{{.*}}, %[[LEN]])
 // CHECK: cir.insert_member %{{.*}}[0], %{{.*}} : !rec_std3A3A__13A3A__wrap_iter3Cchar_2A3E, !cir.ptr<!u8i>
+// CHECK-NOT: cir.std.find
+}
+
+// -----
+
+!s32i = !cir.int<s, 32>
+!wideiter = !cir.struct<class "wide_iterator" {data !cir.ptr<!s32i>}>
+
+module attributes {cir.triple = "x86_64-unknown-linux-gnu",
+                   cir.int_type_width = 32 : i32,
+                   cir.size_type_width = 64 : i32,
+                   cir.wchar_type_width = 32 : i32} {
+  cir.func private @wide_find(!wideiter, !wideiter, !cir.ptr<!s32i>) -> !wideiter func_info<#cir.func_identity<"std::find">>
+
+  cir.func @rewrites_wrapped_wide_iterator(%first: !wideiter, %last: !wideiter, %value: !cir.ptr<!s32i>) -> !wideiter {
+    %0 = cir.std.find(%first : !wideiter, %last : !wideiter, %value : !cir.ptr<!s32i>, @wide_find) -> !wideiter {cir.wide_char_params}
+    cir.return %0 : !wideiter
+  }
+// CHECK-LABEL: @rewrites_wrapped_wide_iterator
+// CHECK: %[[WFIRST:.*]] = cir.extract_member %{{.*}}[0] : !rec_wide_iterator -> !cir.ptr<!s32i>
+// CHECK: %[[WLAST:.*]] = cir.extract_member %{{.*}}[0] : !rec_wide_iterator -> !cir.ptr<!s32i>
+// CHECK: %[[WSOUGHT:.*]] = cir.load %{{.*}} : !cir.ptr<!s32i>, !s32i
+// CHECK: %[[WLEN:.*]] = cir.ptr_diff %[[WLAST]], %[[WFIRST]] : !cir.ptr<!s32i> -> !u64i
+// CHECK: cir.libc.wmemchr(%[[WFIRST]], %[[WSOUGHT]], %[[WLEN]]) : !cir.ptr<!s32i>, !s32i, !u64i
+// CHECK: cir.insert_member %{{.*}}[0], %{{.*}} : !rec_wide_iterator, !cir.ptr<!s32i>
 // CHECK-NOT: cir.std.find
 }
 
@@ -531,9 +556,9 @@ module attributes {cir.triple = "x86_64-unknown-linux-gnu",
 // CHECK-SAME: %[[FIRSTW:[^:]*]]: !rec_{{[^,]*}}, %[[LASTW:[^:]*]]: !rec_{{[^,]*}}, %[[PRED:[^:]*]]: !rec_byval_closure2
 // CHECK: %[[FIRST:.*]] = cir.extract_member %[[FIRSTW]][0] : {{.*}} -> !cir.ptr<!u8i>
 // CHECK: %[[LAST:.*]] = cir.extract_member %[[LASTW]][0] : {{.*}} -> !cir.ptr<!u8i>
-// CHECK: %[[SRC:.*]] = cir.cast bitcast %[[FIRST]] : !cir.ptr<!u8i> -> !cir.ptr<!void>
 // CHECK: %[[BYTE:.*]] = cir.extract_member %[[PRED]][0] : !rec_byval_closure2 -> !u8i
 // CHECK: %[[LEN:.*]] = cir.ptr_diff %[[LAST]], %[[FIRST]] : !cir.ptr<!u8i> -> !u64i
+// CHECK: %[[SRC:.*]] = cir.cast bitcast %[[FIRST]] : !cir.ptr<!u8i> -> !cir.ptr<!void>
 // CHECK: cir.libc.memchr(%[[SRC]], %{{.*}}, %[[LEN]])
 // CHECK: cir.insert_member %[[FIRSTW]][0], %{{.*}}
 // CHECK-NOT: cir.std.find_if
@@ -608,10 +633,10 @@ module attributes {cir.triple = "x86_64-unknown-linux-gnu",
 // CHECK: cir.ternary(%[[EMPTY]], true {
 // CHECK: cir.yield %[[LAST]] : !cir.ptr<!s8i>
 // CHECK: }, false {
-// CHECK: %[[SRC:.*]] = cir.cast bitcast %[[FIRST]] : !cir.ptr<!s8i> -> !cir.ptr<!void>
 // CHECK: %[[BYTE:.*]] = cir.load %[[VALUE]] : !cir.ptr<!s8i>, !s8i
-// CHECK: %[[PATTERN:.*]] = cir.cast integral %[[BYTE]] : !s8i -> !s32i
 // CHECK: %[[LEN:.*]] = cir.ptr_diff %[[LAST]], %[[FIRST]] : !cir.ptr<!s8i> -> !u64i
+// CHECK: %[[SRC:.*]] = cir.cast bitcast %[[FIRST]] : !cir.ptr<!s8i> -> !cir.ptr<!void>
+// CHECK: %[[PATTERN:.*]] = cir.cast integral %[[BYTE]] : !s8i -> !s32i
 // CHECK: %[[PTR:.*]] = cir.libc.memchr(%[[SRC]], %[[PATTERN]], %[[LEN]]) : !cir.ptr<!void>, !s32i, !u64i
 // CHECK: %[[RES:.*]] = cir.cast bitcast %[[PTR]] : !cir.ptr<!void> -> !cir.ptr<!s8i>
 // CHECK: %[[MISS:.*]] = cir.cmp eq %[[RES]], %{{.*}}
@@ -677,5 +702,28 @@ module attributes {cir.triple = "x86_64-unknown-linux-gnu",
   }
 // CHECK-LABEL: @keeps_infoless_range_find
 // CHECK: cir.std.ranges.find_range
+// CHECK-NOT: cir.libc.memchr
+}
+
+// -----
+
+!s32i = !cir.int<s, 32>
+!wide_closure = !cir.struct<class "WideClosure" {data !s32i}>
+
+module attributes {cir.triple = "x86_64-unknown-linux-gnu",
+                   cir.int_type_width = 32 : i32,
+                   cir.size_type_width = 64 : i32,
+                   cir.wchar_type_width = 32 : i32} {
+  cir.func private @_ZSt7find_ifIPw1AET_S1_S1_T0_(!cir.ptr<!s32i>, !cir.ptr<!s32i>, !wide_closure) -> !cir.ptr<!s32i> func_info<#cir.func_identity<"std::find_if">>
+
+  cir.func @keeps_wide_marked_find_if(%first: !cir.ptr<!s32i>, %last: !cir.ptr<!s32i>, %pred: !wide_closure) -> !cir.ptr<!s32i> {
+    %0 = cir.std.find_if(%first : !cir.ptr<!s32i>, %last : !cir.ptr<!s32i>, %pred : !wide_closure, @_ZSt7find_ifIPw1AET_S1_S1_T0_) -> !cir.ptr<!s32i> {cir.byte_eq_pred, cir.wide_char_params}
+    cir.return %0 : !cir.ptr<!s32i>
+  }
+// The wide license covers plain find only, so a predicate form that claims
+// it stays a call.
+// CHECK-LABEL: @keeps_wide_marked_find_if
+// CHECK: cir.std.find_if
+// CHECK-NOT: cir.libc.wmemchr
 // CHECK-NOT: cir.libc.memchr
 }

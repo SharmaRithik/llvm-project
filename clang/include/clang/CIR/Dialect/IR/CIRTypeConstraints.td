@@ -279,6 +279,8 @@ def CIR_PtrToChar8Type : CIR_PtrToType<CIR_AnyChar8Type> {
     let cppFunctionName = "isPtrToChar8Type";
 }
 
+def CIR_PtrToFundamentalIntType : CIR_PtrToType<CIR_AnyFundamentalIntType>;
+
 // Pointer to type constraints
 def CIR_PtrToIntOrFloatType : CIR_PtrToType<CIR_AnyIntOrFloatType>;
 
