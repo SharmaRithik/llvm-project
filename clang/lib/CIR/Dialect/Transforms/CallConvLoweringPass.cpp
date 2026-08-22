@@ -76,9 +76,10 @@ namespace {
 // consumes.  Integer (including `_BitInt` up to 128 bits) / pointer / bool /
 // floating-point scalars are handled, as are struct / union / array aggregates
 // (padded and packed structs included), `_Complex`, and a fixed-width vector
-// whose width is a power of two.  Other vectors, a padded or packed struct
-// holding a bitfield access unit, a packed union, a union no member of which
-// spans its declared size, and a union with an empty-record member are
+// whose width is a power of two.  A union's empty-record members hold no data
+// bytes and are dropped before classification, matching classic.  Other
+// vectors, a padded or packed struct holding a bitfield access unit, a packed
+// union, and a union no data member of which spans its declared size are
 // reported NYI by classifyX86_64Function so an unsupported signature fails the
 // pass instead of being misclassified.
 //===----------------------------------------------------------------------===//
@@ -197,27 +198,26 @@ static bool isSupportedType(mlir::Type ty, const DataLayout &dl) {
       // is only sound when some member spans that size.  Short of that, the
       // remaining bytes are either tail padding or the rest of a bitfield
       // storage unit, and the CIR type cannot tell those apart even though
-      // classic CodeGen coerces them to i32 and i8 respectively.
+      // classic CodeGen coerces them to i32 and i8 respectively.  Classic
+      // sizes a union's coercion from the bytes that hold data, so an empty
+      // member contributes none; the mapper drops them, and the checks here
+      // run on the data members only.
       llvm::ArrayRef<mlir::Type> members = recTy.getMembers();
       uint64_t recordBits = dl.getTypeSizeInBits(recTy).getFixedValue();
-      if (members.empty()) {
-        // A member-less union is all padding, which classifies Ignore up to two
-        // eightbytes.  Past that SysV says MEMORY regardless of content, and
-        // there is no member here to build the Indirect coercion from.
+      auto dataMembers = llvm::make_filter_range(
+          members, [](mlir::Type m) { return !unionMemberIsEmpty(m); });
+      if (dataMembers.empty()) {
+        // With no data member the union is all padding, which classifies
+        // Ignore up to two eightbytes.  Past that SysV says MEMORY regardless
+        // of content, and there is no member here to build the Indirect
+        // coercion from.
         if (recordBits > 128)
           return false;
       } else {
         auto spansRecord = [&](mlir::Type m) {
           return dl.getTypeSizeInBits(m).getFixedValue() == recordBits;
         };
-        if (!llvm::any_of(members, spansRecord))
-          return false;
-        // Classic sizes a union's coercion from the bytes that hold data, so an
-        // empty member contributes none.  The library instead reduces the union
-        // to one member, picked by alignment and then by size, and coerces from
-        // that member: an empty one can win either comparison and widen the
-        // coercion past what classic emits.
-        if (llvm::any_of(members, unionMemberIsEmpty))
+        if (!llvm::any_of(dataMembers, spansRecord))
           return false;
       }
     } else if (recTy.getPacked() || recTy.getPadded()) {
@@ -352,11 +352,14 @@ static const llvm::abi::Type *mapCIRType(mlir::Type type,
 
         // The size passed here spans the tail padding, so an eightbyte covers
         // the whole union rather than just the member the classifier reduces
-        // it to.
+        // it to.  An empty member holds no data bytes, and the library's
+        // reduce-to-one-member choice could pick it and coerce wider than the
+        // data classic reads, so only data members become fields.
         if (recTy.isUnion()) {
           for (mlir::Type fieldTy : recTy.getMembers())
-            fields.push_back(llvm::abi::FieldInfo(
-                mapCIRType(fieldTy, typeMapper, dl, modOp)));
+            if (!unionMemberIsEmpty(fieldTy))
+              fields.push_back(llvm::abi::FieldInfo(
+                  mapCIRType(fieldTy, typeMapper, dl, modOp)));
           return tb.getUnionType(fields, sizeBits, align,
                                  llvm::abi::StructPacking::Default, flags);
         }

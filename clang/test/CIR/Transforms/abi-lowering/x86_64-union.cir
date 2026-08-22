@@ -19,6 +19,11 @@
 !rec_UBigOverAligned = !cir.union<"UBigOverAligned" {data !cir.array<!s8i x 32>}>
 !rec_SOverAligned = !cir.struct<"SOverAligned" {data !cir.array<!s8i x 32>}>
 !rec_UEmpty = !cir.union<"UEmpty" {}, padding = {!u8i}>
+!rec_Empty = !cir.struct<"Empty" {pad !u8i}>
+!rec_UVariantShaped = !cir.union<"UVariantShaped" {data !s8i, data !rec_Empty}>
+!rec_UFormatShaped = !cir.union<"UFormatShaped" {data !rec_Empty, data !s32i, data !cir.ptr<!u8i>, data !s64i}>
+!rec_UEmptyMember = !cir.union<"UEmptyMember" {data !rec_Empty}>
+!rec_UArrEmptySpan = !cir.union<"UArrEmptySpan" {data !cir.array<!rec_Empty x 3>, data !s32i}>
 !rec_UNoRegs = !cir.union<"UNoRegs" {data !s32i, data !cir.float}>
 !rec_SWithUnion = !cir.struct<"SWithUnion" {data !rec_UIntFloat, data !s32i}>
 
@@ -252,6 +257,61 @@ module attributes {
   // CHECK:   %[[G1:.*]] = cir.get_member %[[CALLCAST]][1] {{.*}} : !cir.ptr<!rec_anon_struct> -> !cir.ptr<!u64i>
   // CHECK:   %[[A1:.*]] = cir.load %[[G1]] : !cir.ptr<!u64i>, !u64i
   // CHECK:   cir.call @take_two_eightbytes(%[[A0]], %[[A1]]) : (!s64i, !u64i) -> ()
+
+  // An empty member holds no data bytes, so only the char is classified and
+  // the union coerces to the byte classic reads.  This is the shape of
+  // libc++'s std::variant storage union.
+  cir.func @take_variant_shaped(%arg0: !rec_UVariantShaped) {
+    cir.return
+  }
+
+  // CHECK: cir.func{{.*}} @take_variant_shaped(%arg0: !s8i)
+  // CHECK:   %[[VSLOT:.*]] = cir.alloca "coerce" align(1) : !cir.ptr<!s8i>
+  // CHECK:   cir.store %arg0, %[[VSLOT]] : !s8i, !cir.ptr<!s8i>
+  // CHECK:   %[[VCAST:.*]] = cir.cast bitcast %[[VSLOT]] : !cir.ptr<!s8i> -> !cir.ptr<!rec_UVariantShaped>
+  // CHECK:   %{{.*}} = cir.load %[[VCAST]] : !cir.ptr<!rec_UVariantShaped>, !rec_UVariantShaped
+
+  // The empty member is dropped and the spanning pointer drives the
+  // reduction, so the coercion is the pointer classic picks.  This is the
+  // shape of libc++'s format argument value union.
+  cir.func @take_format_shaped(%arg0: !rec_UFormatShaped) {
+    cir.return
+  }
+
+  // CHECK: cir.func{{.*}} @take_format_shaped(%arg0: !cir.ptr<!void>)
+  // CHECK:   %[[FSLOT:.*]] = cir.alloca "coerce" align(8) : !cir.ptr<!cir.ptr<!void>>
+
+  // With its lone empty member dropped this union holds no data at all and
+  // classifies Ignore like the member-less one above.
+  cir.func @take_empty_member(%arg0: !rec_UEmptyMember) {
+    cir.return
+  }
+
+  // CHECK: cir.func{{.*}} @take_empty_member() {
+  // CHECK-NEXT: cir.return
+
+  // An array of empty records is dropped the same way, and the int that
+  // remains spans the union.
+  cir.func @take_arr_empty_span(%arg0: !rec_UArrEmptySpan) {
+    cir.return
+  }
+
+  // CHECK: cir.func{{.*}} @take_arr_empty_span(%arg0: !s32i)
+  // CHECK:   %[[ASLOT:.*]] = cir.alloca "coerce" align(4) : !cir.ptr<!s32i>
+  // CHECK:   cir.store %arg0, %[[ASLOT]] : !s32i, !cir.ptr<!s32i>
+  // CHECK:   %[[ACAST:.*]] = cir.cast bitcast %[[ASLOT]] : !cir.ptr<!s32i> -> !cir.ptr<!rec_UArrEmptySpan>
+  // CHECK:   %{{.*}} = cir.load %[[ACAST]] : !cir.ptr<!rec_UArrEmptySpan>, !rec_UArrEmptySpan
+
+  cir.func @call_variant_shaped(%arg0: !rec_UVariantShaped) {
+    cir.call @take_variant_shaped(%arg0) : (!rec_UVariantShaped) -> ()
+    cir.return
+  }
+
+  // CHECK: cir.func{{.*}} @call_variant_shaped(%arg0: !s8i)
+  // CHECK:   %[[CVSLOT:.*]] = cir.alloca "coerce" align(1) : !cir.ptr<!rec_UVariantShaped>
+  // CHECK:   %[[CVCAST:.*]] = cir.cast bitcast %[[CVSLOT]] : !cir.ptr<!rec_UVariantShaped> -> !cir.ptr<!s8i>
+  // CHECK:   %[[CVARG:.*]] = cir.load %[[CVCAST]] : !cir.ptr<!s8i>, !s8i
+  // CHECK:   cir.call @take_variant_shaped(%[[CVARG]]) : (!s8i) -> ()
 }
 
 // LLVM: define void @take_int_float(i32 %{{.+}})
@@ -278,3 +338,9 @@ module attributes {
 // LLVM:   call void @take_int_float(i32 %{{.+}})
 // LLVM: define void @call_two_eightbytes(i64 %{{.+}}, i64 %{{.+}})
 // LLVM:   call void @take_two_eightbytes(i64 %{{.+}}, i64 %{{.+}})
+// LLVM: define void @take_variant_shaped(i8 %{{.+}})
+// LLVM: define void @take_format_shaped(ptr %{{.+}})
+// LLVM: define void @take_empty_member()
+// LLVM: define void @take_arr_empty_span(i32 %{{.+}})
+// LLVM: define void @call_variant_shaped(i8 %{{.+}})
+// LLVM:   call void @take_variant_shaped(i8 %{{.+}})
