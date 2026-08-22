@@ -565,6 +565,7 @@ bool llvm::inferNonMandatoryLibFuncAttrs(Function &F,
     Changed |= setDoesNotSync(F);
     break;
   case LibFunc_memchr:
+  case LibFunc_memmem:
   case LibFunc_memrchr:
   case LibFunc_wmemchr:
     Changed |= setDoesNotThrow(F);
