@@ -1012,14 +1012,16 @@ void CIREHABILoweringPass::runOnOperation() {
   auto mod = mlir::cast<mlir::ModuleOp>(getOperation());
 
   // The target triple is attached to the module as the "cir.triple"
-  // attribute. If it is absent (e.g. a CIR module parsed from text without a
-  // triple) we cannot determine the ABI and must skip the pass.
+  // attribute. If it is absent (e.g. a CIR module parsed from text without
+  // a triple) there is no ABI to select, so the pass skips the module. It
+  // used to emit an error here and return success anyway, which printed a
+  // diagnostic on every triple-less test module while changing nothing. A
+  // module that does carry EH operations still fails loudly later, when
+  // LLVM lowering finds them unconverted.
   auto tripleAttr = mlir::dyn_cast_if_present<mlir::StringAttr>(
       mod->getAttr(cir::CIRDialect::getTripleAttrName()));
-  if (!tripleAttr) {
-    mod.emitError("Module has no target triple");
+  if (!tripleAttr)
     return;
-  }
 
   // Select the ABI-specific lowering handler from the triple. The Microsoft
   // C++ ABI targets a Windows MSVC environment; everything else uses Itanium.
