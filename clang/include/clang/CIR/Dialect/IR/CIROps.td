@@ -9241,6 +9241,41 @@ def CIR_MemChrOp : CIR_Op<"libc.memchr",
   let hasVerifier = 1;
 }
 
+//===----------------------------------------------------------------------===//
+// MemMemOp
+//===----------------------------------------------------------------------===//
+
+def CIR_MemMemOp : CIR_Op<"libc.memmem",
+    [AllTypesMatch<["haystack", "needle", "result"]>]> {
+  let summary = "libc's `memmem`";
+  let description = [{
+    Search for the byte sequence beginning at `needle` in the bytes beginning
+    at `haystack`. The two lengths are byte counts. The result is the start
+    of the first match or a null pointer.
+
+    The length operands have the width recorded by `cir.size_type_width`.
+    Both pointers use the default address space.
+  }];
+
+  let arguments = (ins
+    Arg<CIR_VoidPtrType, "", [MemRead]>:$haystack,
+    CIR_AnyFundamentalUIntType:$haystackLen,
+    Arg<CIR_VoidPtrType, "", [MemRead]>:$needle,
+    CIR_AnyFundamentalUIntType:$needleLen
+  );
+
+  let results = (outs CIR_VoidPtrType:$result);
+
+  let assemblyFormat = [{
+    `(` $haystack `,` $haystackLen `,` $needle `,` $needleLen `)`
+    attr-dict `:` qualified(type($haystack)) `,`
+    qualified(type($haystackLen)) `,` qualified(type($needle)) `,`
+    qualified(type($needleLen))
+  }];
+
+  let hasVerifier = 1;
+}
+
 def CIR_WMemChrOp : CIR_Op<"libc.wmemchr",
     [AllTypesMatch<["src", "result"]>]> {
   let summary = "libc's `wmemchr`";

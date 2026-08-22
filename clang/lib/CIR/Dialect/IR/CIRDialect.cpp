@@ -4724,6 +4724,25 @@ LogicalResult cir::MemChrOp::verify() {
                             cir::CIRDialect::getSizeTypeWidthAttrName());
 }
 
+LogicalResult cir::MemMemOp::verify() {
+  auto moduleOp = (*this)->getParentOfType<mlir::ModuleOp>();
+  if (!moduleOp)
+    return emitOpError("expects an enclosing module");
+
+  auto haystackPtrTy = mlir::cast<cir::PointerType>(getHaystack().getType());
+  auto needlePtrTy = mlir::cast<cir::PointerType>(getNeedle().getType());
+  if (haystackPtrTy.getAddrSpace() || needlePtrTy.getAddrSpace())
+    return emitOpError("pointers must be in the default address space");
+
+  if (failed(checkRecordedWidth(*this, moduleOp, getHaystackLen().getType(),
+                                "haystack length",
+                                cir::CIRDialect::getSizeTypeWidthAttrName())))
+    return failure();
+  return checkRecordedWidth(*this, moduleOp, getNeedleLen().getType(),
+                            "needle length",
+                            cir::CIRDialect::getSizeTypeWidthAttrName());
+}
+
 LogicalResult cir::WMemChrOp::verify() {
   auto moduleOp = (*this)->getParentOfType<mlir::ModuleOp>();
   if (!moduleOp)
@@ -4942,6 +4961,21 @@ bool cir::StdFindOp::signatureMatches(mlir::TypeRange operands,
   // the element types before rewriting.
   return operands[2] == iterTy || (mlir::isa<cir::RecordType>(iterTy) &&
                                    mlir::isa<cir::PointerType>(operands[2]));
+}
+
+bool cir::StdSearchOp::signatureMatches(mlir::TypeRange operands,
+                                        mlir::TypeRange results) {
+  if (operands.size() != getNumArgs() || results.size() != 1)
+    return false;
+  if (operands[0] != operands[1] || operands[0] != results[0] ||
+      operands[2] != operands[3])
+    return false;
+  bool firstIsPointer = mlir::isa<cir::PointerType>(operands[0]);
+  bool secondIsPointer = mlir::isa<cir::PointerType>(operands[2]);
+  bool firstIsRecord = mlir::isa<cir::RecordType>(operands[0]);
+  bool secondIsRecord = mlir::isa<cir::RecordType>(operands[2]);
+  return (firstIsPointer && secondIsPointer) ||
+         (firstIsRecord && secondIsRecord);
 }
 
 // The predicate is a closure whose type says nothing about the search, so

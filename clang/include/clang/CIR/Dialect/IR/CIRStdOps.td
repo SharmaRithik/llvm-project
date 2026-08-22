@@ -94,6 +94,27 @@ def CIR_StdFindOp : CIR_StdOp<"find",
   }];
 }
 
+def CIR_StdSearchOp : CIR_StdOp<"search",
+  (ins CIR_AnyType:$first1, CIR_AnyType:$last1, CIR_AnyType:$first2,
+       CIR_AnyType:$last2),
+  (outs CIR_AnyType:$result),
+  [AllTypesMatch<["first1", "last1", "result"]>,
+   AllTypesMatch<["first2", "last2"]>], "StdSearch"> {
+  let summary = "std::search()";
+  let description = [{
+    A raised `std::search` over two iterator pairs. The
+    `cir.narrow_char_params` attribute is carried here from the call when
+    CIRGen recorded it.
+  }];
+  let assemblyFormat = [{
+    `(` $first1 `:` qualified(type($first1)) `,`
+        $last1 `:` qualified(type($last1)) `,`
+        $first2 `:` qualified(type($first2)) `,`
+        $last2 `:` qualified(type($last2)) `,`
+        $original_fn `)` `->` qualified(type($result)) attr-dict
+  }];
+}
+
 class CIR_StdFindPredOp<string functionName, string knownKind>
     : CIR_StdOp<functionName,
   (ins CIR_AnyType:$first, CIR_AnyType:$last, CIR_AnyType:$pred),

@@ -348,13 +348,166 @@ static void rewriteFindLikeToMemchr(OpT findOp,
   findOp.erase();
 }
 
+// Rewrites the four iterator form of std::search over licensed bytes.
+static void rewriteSearchToMemmem(StdSearchOp searchOp,
+                                  mlir::SymbolTableCollection &symbolTables) {
+  cir::RecordType haystackWrapperTy;
+  cir::RecordType needleWrapperTy;
+  auto unwrapIterator = [](mlir::Type ty, cir::RecordType &wrapperTy) {
+    auto iterTy = mlir::dyn_cast<cir::PointerType>(ty);
+    wrapperTy = mlir::dyn_cast<cir::RecordType>(ty);
+    if (!wrapperTy)
+      return iterTy;
+    if (wrapperTy.isUnion() || !wrapperTy.isComplete() ||
+        wrapperTy.getMembers().size() != 1)
+      return cir::PointerType();
+    return mlir::dyn_cast<cir::PointerType>(wrapperTy.getMembers()[0]);
+  };
+
+  cir::PointerType haystackIterTy =
+      unwrapIterator(searchOp.getFirst1().getType(), haystackWrapperTy);
+  cir::PointerType needleIterTy =
+      unwrapIterator(searchOp.getFirst2().getType(), needleWrapperTy);
+  if (!haystackIterTy || !needleIterTy ||
+      static_cast<bool>(haystackWrapperTy) !=
+          static_cast<bool>(needleWrapperTy) ||
+      haystackIterTy.getAddrSpace() || needleIterTy.getAddrSpace())
+    return;
+
+  auto haystackElemTy =
+      mlir::dyn_cast<cir::IntType>(haystackIterTy.getPointee());
+  auto needleElemTy = mlir::dyn_cast<cir::IntType>(needleIterTy.getPointee());
+  if (!haystackElemTy || haystackElemTy.getWidth() != 8 ||
+      needleElemTy != haystackElemTy)
+    return;
+
+  auto enclosing = searchOp->getParentOfType<cir::FuncOp>();
+  auto enclosingGlobal = searchOp->getParentOfType<cir::GlobalOp>();
+  if (!enclosing && !enclosingGlobal)
+    return;
+
+  constexpr llvm::StringLiteral libcallName = "memmem";
+
+  if (isNoBuiltin(searchOp, libcallName) ||
+      (enclosing && noBuiltinListDisables(enclosing, libcallName)))
+    return;
+
+  if (!searchOp->getAttrOfType<mlir::UnitAttr>(
+          cir::CIRDialect::getNarrowCharParamsAttrName()))
+    return;
+
+  auto moduleOp = searchOp->getParentOfType<mlir::ModuleOp>();
+  if (!moduleOp)
+    return;
+  auto tripleAttr = moduleOp->getAttrOfType<mlir::StringAttr>(
+      cir::CIRDialect::getTripleAttrName());
+  if (!tripleAttr)
+    return;
+  llvm::TargetLibraryInfoImpl tliImpl(
+      llvm::Triple(tripleAttr.getValue().str()));
+  if (!llvm::TargetLibraryInfo(tliImpl).has(llvm::LibFunc_memmem))
+    return;
+
+  std::optional<unsigned> sizeWidth = cir::getRecordedIntegerWidth(
+      moduleOp, cir::CIRDialect::getSizeTypeWidthAttrName());
+  if (!sizeWidth)
+    return;
+
+  if (enclosing && enclosing.getName() == libcallName)
+    return;
+
+  CIRBaseBuilderTy builder(*searchOp.getContext());
+  auto voidPtrTy = builder.getVoidPtrTy();
+  auto sizeTy = builder.getUIntNTy(*sizeWidth);
+  if (mlir::Operation *existing = symbolTables.lookupSymbolIn(
+          moduleOp,
+          mlir::StringAttr::get(searchOp.getContext(), libcallName))) {
+    auto existingFn = mlir::dyn_cast<cir::FuncOp>(existing);
+    if (!existingFn)
+      return;
+    auto libcallTy =
+        cir::FuncType::get({voidPtrTy, sizeTy, voidPtrTy, sizeTy}, voidPtrTy);
+    if (existingFn.getAliasee() || existingFn.getFunctionType() != libcallTy ||
+        existingFn.getCallingConv() != cir::CallingConv::C)
+      return;
+  }
+
+  mlir::Location loc = searchOp.getLoc();
+  builder.setInsertionPointAfter(searchOp);
+  mlir::Value first1 = searchOp.getFirst1();
+  mlir::Value last1 = searchOp.getLast1();
+  mlir::Value first2 = searchOp.getFirst2();
+  mlir::Value last2 = searchOp.getLast2();
+  if (haystackWrapperTy) {
+    first1 = cir::ExtractMemberOp::create(builder, loc, first1, 0);
+    last1 = cir::ExtractMemberOp::create(builder, loc, last1, 0);
+    first2 = cir::ExtractMemberOp::create(builder, loc, first2, 0);
+    last2 = cir::ExtractMemberOp::create(builder, loc, last2, 0);
+  }
+
+  // The C++ empty needle rule returns first1.
+  mlir::Value needleIsEmpty =
+      builder.createCompare(loc, cir::CmpOpKind::eq, first2, last2);
+  mlir::Value result =
+      cir::TernaryOp::create(
+          builder, loc, needleIsEmpty,
+          [&](mlir::OpBuilder &, mlir::Location) {
+            builder.createYield(loc, first1);
+          },
+          [&](mlir::OpBuilder &, mlir::Location) {
+            // These pointer differences are byte counts because both element
+            // types have width eight.
+            mlir::Value haystackLen =
+                cir::PtrDiffOp::create(builder, loc, sizeTy, last1, first1);
+            mlir::Value needleLen =
+                cir::PtrDiffOp::create(builder, loc, sizeTy, last2, first2);
+            // The C++ short haystack rule returns last1. Together these guards
+            // ensure memmem receives a nonempty needle and a haystack at least
+            // as long, so every pointer and length passed to C is valid.
+            mlir::Value needleIsLonger = builder.createCompare(
+                loc, cir::CmpOpKind::gt, needleLen, haystackLen);
+            mlir::Value nonEmptyResult =
+                cir::TernaryOp::create(
+                    builder, loc, needleIsLonger,
+                    [&](mlir::OpBuilder &, mlir::Location) {
+                      builder.createYield(loc, last1);
+                    },
+                    [&](mlir::OpBuilder &, mlir::Location) {
+                      mlir::Value haystack = builder.createBitcast(
+                          loc, first1, builder.getVoidPtrTy());
+                      mlir::Value needle = builder.createBitcast(
+                          loc, first2, builder.getVoidPtrTy());
+                      mlir::Value found =
+                          cir::MemMemOp::create(builder, loc, haystack,
+                                                haystackLen, needle, needleLen);
+                      found = builder.createBitcast(loc, found, haystackIterTy);
+                      builder.createYield(
+                          loc, builder.createSelect(
+                                   loc, builder.createPtrIsNull(found), last1,
+                                   found));
+                    })
+                    .getResult();
+            builder.createYield(loc, nonEmptyResult);
+          })
+          .getResult();
+
+  if (haystackWrapperTy) {
+    result = cir::InsertMemberOp::create(builder, loc, searchOp.getFirst1(),
+                                         /*index=*/0, result);
+  }
+  searchOp.getResult().replaceAllUsesWith(result);
+  searchOp.erase();
+}
+
 void LibOptPass::runOnOperation() {
   mlir::SymbolTableCollection symbolTables;
   getOperation()->walk([&](mlir::Operation *op) {
     llvm::TypeSwitch<mlir::Operation *>(op)
         .Case<StdFindOp, StdFindIfOp, StdFindIfNotOp, StdRangesFindOp,
               StdRangesFindRangeOp>(
-            [&](auto find) { rewriteFindLikeToMemchr(find, symbolTables); });
+            [&](auto find) { rewriteFindLikeToMemchr(find, symbolTables); })
+        .Case<StdSearchOp>(
+            [&](auto search) { rewriteSearchToMemmem(search, symbolTables); });
   });
 }
 

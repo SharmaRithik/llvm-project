@@ -22,4 +22,15 @@ module attributes {cir.int_type_width = 32 : i32,
 // CHECK-LABEL: @g
 // CHECK: llvm.call @wmemchr(%{{.*}}, %{{.*}}, %{{.*}})
 // CHECK-NOT: llvm.signext
+
+  cir.func @h(%haystack: !cir.ptr<!void>, %haystack_len: !u64i,
+              %needle: !cir.ptr<!void>, %needle_len: !u64i)
+      -> !cir.ptr<!void> {
+    %0 = cir.libc.memmem(%haystack, %haystack_len, %needle, %needle_len) : !cir.ptr<!void>, !u64i, !cir.ptr<!void>, !u64i
+    cir.return %0 : !cir.ptr<!void>
+  }
+// CHECK-LABEL: @h
+// CHECK: llvm.call @memmem(%{{.*}}, %{{.*}}, %{{.*}}, %{{.*}})
+// CHECK-NOT: llvm.signext
+// CHECK-NOT: llvm.zeroext
 }

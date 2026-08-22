@@ -3758,6 +3758,12 @@ def MemcCpy : GNULibBuiltin<"string.h"> {
   let Prototype = "void*(void*, void const*, int, size_t)";
 }
 
+def MemMem : GNULibBuiltin<"string.h"> {
+  let Spellings = ["memmem"];
+  let Attributes = [NoThrow];
+  let Prototype = "void*(void const*, size_t, void const*, size_t)";
+}
+
 def MempCpy : GNULibBuiltin<"string.h"> {
   let Spellings = ["mempcpy"];
   let Prototype = "void*(void*, void const*, size_t)";

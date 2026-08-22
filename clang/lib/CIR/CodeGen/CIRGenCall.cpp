@@ -372,8 +372,17 @@ void CIRGenModule::constructAttributeList(
       // rewrites, not part of the callee identity.
       if (attrOnCallSite) {
         std::optional<cir::KnownFuncKind> kind = getKnownFuncKind(func);
+        bool narrowSearch = false;
+        if (kind == cir::KnownFuncKind::StdSearch) {
+          // This makes the four iterator overload explicit instead of relying
+          // on the marker helper. Wider elements are unsound for memmem since a
+          // byte level match can start inside an element and produce a
+          // misaligned false positive.
+          narrowSearch = func->getNumParams() == 4 && hasNarrowCharParams(func);
+        }
         if ((kind == cir::KnownFuncKind::StdFind &&
              hasNarrowCharParams(func)) ||
+            narrowSearch ||
             (kind == cir::KnownFuncKind::StdRangesFind &&
              (hasNarrowCharRangesFindParams(func) ||
               hasNarrowCharRangesFindRangeParams(func)))) {

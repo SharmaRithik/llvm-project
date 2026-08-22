@@ -92,3 +92,19 @@ module {
     cir.return %0 : !s64i
   }
 }
+
+// -----
+
+!s8i = !cir.int<s, 8>
+!s32i = !cir.int<s, 32>
+
+module {
+  cir.func @bad_search(%f1: !cir.ptr<!s8i>, %l1: !cir.ptr<!s8i>,
+                       %f2: !cir.ptr<!s8i>, %l2: !cir.ptr<!s32i>) -> !cir.ptr<!s8i> {
+    // expected-error@below {{'cir.std.search' op failed to verify that all of {first2, last2} have same type}}
+    %0 = cir.std.search(%f1 : !cir.ptr<!s8i>, %l1 : !cir.ptr<!s8i>,
+                        %f2 : !cir.ptr<!s8i>, %l2 : !cir.ptr<!s32i>,
+                        @x) -> !cir.ptr<!s8i>
+    cir.return %0 : !cir.ptr<!s8i>
+  }
+}

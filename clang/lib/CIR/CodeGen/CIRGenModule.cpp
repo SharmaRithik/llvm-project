@@ -3839,6 +3839,8 @@ CIRGenModule::getKnownFuncKind(const FunctionDecl *funcDecl) {
             cir::StdFindIfOp::getFuncKind())
       .Case(cir::StdFindIfNotOp::getFunctionName(),
             cir::StdFindIfNotOp::getFuncKind())
+      .Case(cir::StdSearchOp::getFunctionName(),
+            cir::StdSearchOp::getFuncKind())
       .Default(std::nullopt);
 }
 

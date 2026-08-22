@@ -10,6 +10,7 @@
 
 module {
   cir.func private @_ZSt4find(!cir.ptr<!s8i>, !cir.ptr<!s8i>, !cir.ptr<!s8i>) -> !cir.ptr<!s8i>
+  cir.func private @_ZSt6searchIPcS0_ET_S1_S1_T0_S2_(!cir.ptr<!s8i>, !cir.ptr<!s8i>, !cir.ptr<!s8i>, !cir.ptr<!s8i>) -> !cir.ptr<!s8i>
   cir.func private @_ZSt7find_if(!cir.ptr<!s8i>, !cir.ptr<!s8i>, !closure) -> !cir.ptr<!s8i>
   cir.func private @_ZSt11find_if_not(!cir.ptr<!s8i>, !cir.ptr<!s8i>, !closure) -> !cir.ptr<!s8i>
   cir.func private @_ZNKSt3__16ranges6__findcl(!cir.ptr<!cpo>, !cir.ptr<!s8i>, !cir.ptr<!s8i>, !cir.ptr<!s8i>, !identity) -> !cir.ptr<!s8i>
@@ -23,6 +24,13 @@ module {
   // CHECK: cir.func @test_find(%[[FIRST:.*]]: !cir.ptr<!s8i>, %[[LAST:.*]]: !cir.ptr<!s8i>, %[[VALUE:.*]]: !cir.ptr<!s8i>)
   // CHECK: cir.std.find(%[[FIRST]] : !cir.ptr<!s8i>, %[[LAST]] : !cir.ptr<!s8i>, %[[VALUE]] : !cir.ptr<!s8i>, @_ZSt4find) -> !cir.ptr<!s8i>
 
+
+  cir.func @test_search(%first1: !cir.ptr<!s8i>, %last1: !cir.ptr<!s8i>, %first2: !cir.ptr<!s8i>, %last2: !cir.ptr<!s8i>) -> !cir.ptr<!s8i> {
+    %0 = cir.std.search(%first1 : !cir.ptr<!s8i>, %last1 : !cir.ptr<!s8i>, %first2 : !cir.ptr<!s8i>, %last2 : !cir.ptr<!s8i>, @_ZSt6searchIPcS0_ET_S1_S1_T0_S2_) -> !cir.ptr<!s8i>
+    cir.return %0 : !cir.ptr<!s8i>
+  }
+  // CHECK: cir.func @test_search(%[[FIRST1:.*]]: !cir.ptr<!s8i>, %[[LAST1:.*]]: !cir.ptr<!s8i>, %[[FIRST2:.*]]: !cir.ptr<!s8i>, %[[LAST2:.*]]: !cir.ptr<!s8i>)
+  // CHECK: cir.std.search(%[[FIRST1]] : !cir.ptr<!s8i>, %[[LAST1]] : !cir.ptr<!s8i>, %[[FIRST2]] : !cir.ptr<!s8i>, %[[LAST2]] : !cir.ptr<!s8i>, @_ZSt6searchIPcS0_ET_S1_S1_T0_S2_) -> !cir.ptr<!s8i>
   cir.func @test_find_if(%first: !cir.ptr<!s8i>, %last: !cir.ptr<!s8i>, %pred: !closure) -> !cir.ptr<!s8i> {
     %0 = cir.std.find_if(%first : !cir.ptr<!s8i>, %last : !cir.ptr<!s8i>, %pred : !closure, @_ZSt7find_if) -> !cir.ptr<!s8i>
     cir.return %0 : !cir.ptr<!s8i>

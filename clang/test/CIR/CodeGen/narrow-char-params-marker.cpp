@@ -6,6 +6,8 @@
 namespace std {
 inline namespace __1 {
 template <class Iter, class T> Iter find(Iter first, Iter last, const T &value);
+template <class Iter1, class Iter2>
+Iter1 search(Iter1 first1, Iter1 last1, Iter2 first2, Iter2 last2);
 }
 }
 
@@ -403,4 +405,59 @@ char *wrapped_nested_gnu(user_gnu::__gnu_cxx::nested_iter<char *> first,
 }
 // CHECK-LABEL: cir.func{{.*}} @_Z18wrapped_nested_gnu
 // CHECK: cir.call @_ZNSt3__14findIN8user_gnu9__gnu_cxx11nested_iterIPcEEcEET_S6_S6_RKT0_
+// CHECK-NOT: cir.narrow_char_params
+
+char *search_char(char *first1, char *last1, char *first2, char *last2) {
+  return std::search(first1, last1, first2, last2);
+}
+// CHECK-LABEL: cir.func{{.*}} @_Z11search_charPcS_S_S_
+// CHECK: cir.call @_ZNSt3__16searchIPcS1_EET_S2_S2_T0_S3_({{.*}}) {{{.*}}cir.narrow_char_params
+
+unsigned char *search_unsigned(unsigned char *first1, unsigned char *last1,
+                               unsigned char *first2,
+                               unsigned char *last2) {
+  return std::search(first1, last1, first2, last2);
+}
+// CHECK-LABEL: cir.func{{.*}} @_Z15search_unsignedPhS_S_S_
+// CHECK: cir.call @_ZNSt3__16searchIPhS1_EET_S2_S2_T0_S3_({{.*}}) {{{.*}}cir.narrow_char_params
+
+char *search_wrapped(std::span_iter<char *> first1,
+                     std::span_iter<char *> last1,
+                     std::span_iter<char *> first2,
+                     std::span_iter<char *> last2) {
+  return std::search(first1, last1, first2, last2).ptr;
+}
+// CHECK-LABEL: cir.func{{.*}} @_Z14search_wrapped
+// CHECK: cir.call @_ZNSt3__16searchINS_9span_iterIPcEES3_EET_S4_S4_T0_S5_({{.*}}) {{{.*}}cir.narrow_char_params
+
+int *search_int(int *first1, int *last1, int *first2, int *last2) {
+  return std::search(first1, last1, first2, last2);
+}
+// CHECK-LABEL: cir.func{{.*}} @_Z10search_intPiS_S_S_
+// CHECK: cir.call @_ZNSt3__16searchIPiS1_EET_S2_S2_T0_S3_
+// CHECK-NOT: cir.narrow_char_params
+
+char *search_mixed(char *first1, char *last1, unsigned char *first2,
+                   unsigned char *last2) {
+  return std::search(first1, last1, first2, last2);
+}
+// CHECK-LABEL: cir.func{{.*}} @_Z12search_mixedPcS_PhS0_
+// CHECK: cir.call @_ZNSt3__16searchIPcPhEET_S3_S3_T0_S4_
+// CHECK-NOT: cir.narrow_char_params
+
+wchar_t *search_wchar(wchar_t *first1, wchar_t *last1, wchar_t *first2,
+                      wchar_t *last2) {
+  return std::search(first1, last1, first2, last2);
+}
+// CHECK-LABEL: cir.func{{.*}} @_Z12search_wcharPwS_S_S_
+// CHECK: cir.call @_ZNSt3__16searchIPwS1_EET_S2_S2_T0_S3_
+// CHECK-NOT: cir.narrow_char_params
+
+volatile char *search_volatile(volatile char *first1, volatile char *last1,
+                               volatile char *first2,
+                               volatile char *last2) {
+  return std::search(first1, last1, first2, last2);
+}
+// CHECK-LABEL: cir.func{{.*}} @_Z15search_volatilePVcS0_S0_S0_
+// CHECK: cir.call @_ZNSt3__16searchIPVcS2_EET_S3_S3_T0_S4_
 // CHECK-NOT: cir.narrow_char_params
