@@ -25,6 +25,7 @@
 #include "llvm/ADT/StringRef.h"
 #include "llvm/ADT/StringSet.h"
 #include "llvm/ADT/Twine.h"
+#include "llvm/ADT/TypeSwitch.h"
 #include "llvm/Analysis/TargetLibraryInfo.h"
 #include "llvm/Support/ErrorHandling.h"
 #include "llvm/Support/Path.h"
@@ -65,8 +66,15 @@ mlir::LogicalResult LibOptPass::initializeOptions(
   return mlir::success();
 }
 
-static void rewriteStdFindToMemchr(StdFindOp findOp,
-                                   mlir::SymbolTableCollection &symbolTables) {
+// Rewrites cir.std.find and the byte-equality-predicate forms of
+// cir.std.find_if and cir.std.find_if_not. All three search for the first
+// equal byte, so they share everything except where the byte comes from:
+// the by-reference pattern for find and the closure's single capture for
+// the predicate forms.
+template <typename OpT>
+static void rewriteFindLikeToMemchr(OpT findOp,
+                                    mlir::SymbolTableCollection &symbolTables) {
+  constexpr bool predOp = !std::is_same_v<OpT, StdFindOp>;
   // A std contiguous iterator wraps the pointer as its only member.  The
   // narrow character fact CIRGen recorded is what licenses reading that
   // member as the address, so the rewrite runs on the wrapped pointer and
@@ -85,15 +93,35 @@ static void rewriteStdFindToMemchr(StdFindOp findOp,
   auto elemTy = mlir::dyn_cast<cir::IntType>(iterTy.getPointee());
   if (!elemTy || elemTy.getWidth() != 8)
     return;
-  auto patternPtrTy =
-      mlir::dyn_cast<cir::PointerType>(findOp.getPattern().getType());
-  if (!patternPtrTy || patternPtrTy.getPointee() != elemTy)
-    return;
+  // The byte to search for arrives behind the by-reference pattern for
+  // find, and as the closure's single capture for the predicate forms,
+  // stored by value or through a reference the capture holds.
+  bool captureByRef = false;
+  if constexpr (predOp) {
+    auto closureTy =
+        mlir::dyn_cast<cir::RecordType>(findOp.getPred().getType());
+    if (!closureTy || closureTy.isUnion() || !closureTy.isComplete() ||
+        closureTy.getMembers().size() != 1)
+      return;
+    mlir::Type capTy = closureTy.getMembers()[0];
+    if (auto capPtrTy = mlir::dyn_cast<cir::PointerType>(capTy)) {
+      if (capPtrTy.getAddrSpace() || capPtrTy.getPointee() != elemTy)
+        return;
+      captureByRef = true;
+    } else if (capTy != elemTy) {
+      return;
+    }
+  } else {
+    auto patternPtrTy =
+        mlir::dyn_cast<cir::PointerType>(findOp.getPattern().getType());
+    if (!patternPtrTy || patternPtrTy.getPointee() != elemTy)
+      return;
+  }
 
   // LibOpt runs before LoweringPrepare, so a global initializer is still a
   // cir.global here. Anything else is not a shape CIRGen produces.
-  auto enclosing = findOp->getParentOfType<cir::FuncOp>();
-  auto enclosingGlobal = findOp->getParentOfType<cir::GlobalOp>();
+  auto enclosing = findOp->template getParentOfType<cir::FuncOp>();
+  auto enclosingGlobal = findOp->template getParentOfType<cir::GlobalOp>();
   if (!enclosing && !enclosingGlobal)
     return;
 
@@ -104,12 +132,15 @@ static void rewriteStdFindToMemchr(StdFindOp findOp,
     return;
 
   // Only the unit attribute CIRGen recorded licenses the rewrite, since an
-  // enum or atomic element also lowers to a byte-wide integer.
-  if (!findOp->getAttrOfType<mlir::UnitAttr>(
-          cir::CIRDialect::getNarrowCharParamsAttrName()))
+  // enum or atomic element also lowers to a byte-wide integer and a closure
+  // of the right shape can compute anything.
+  llvm::StringRef marker = predOp
+                               ? cir::CIRDialect::getByteEqPredAttrName()
+                               : cir::CIRDialect::getNarrowCharParamsAttrName();
+  if (!findOp->template getAttrOfType<mlir::UnitAttr>(marker))
     return;
 
-  auto moduleOp = findOp->getParentOfType<mlir::ModuleOp>();
+  auto moduleOp = findOp->template getParentOfType<mlir::ModuleOp>();
   if (!moduleOp)
     return;
 
@@ -118,7 +149,7 @@ static void rewriteStdFindToMemchr(StdFindOp findOp,
   // transforms consult before creating a libcall, and it answers from the
   // triple. The ABI attributes of the introduced call stay with the general
   // call ABI work.
-  auto tripleAttr = moduleOp->getAttrOfType<mlir::StringAttr>(
+  auto tripleAttr = moduleOp->template getAttrOfType<mlir::StringAttr>(
       cir::CIRDialect::getTripleAttrName());
   if (!tripleAttr)
     return;
@@ -180,9 +211,17 @@ static void rewriteStdFindToMemchr(StdFindOp findOp,
           [&](mlir::OpBuilder &, mlir::Location) {
             mlir::Value src =
                 builder.createBitcast(loc, first, builder.getVoidPtrTy());
-            mlir::Value pattern = builder.createIntCast(
-                builder.createLoad(loc, findOp.getPattern()),
-                builder.getSIntNTy(*intWidth));
+            mlir::Value byte;
+            if constexpr (predOp) {
+              byte = cir::ExtractMemberOp::create(builder, loc,
+                                                  findOp.getPred(), 0);
+              if (captureByRef)
+                byte = builder.createLoad(loc, byte);
+            } else {
+              byte = builder.createLoad(loc, findOp.getPattern());
+            }
+            mlir::Value pattern =
+                builder.createIntCast(byte, builder.getSIntNTy(*intWidth));
             mlir::Value len = cir::PtrDiffOp::create(
                 builder, loc, builder.getUIntNTy(*sizeWidth), last, first);
             mlir::Value res =
@@ -202,8 +241,11 @@ static void rewriteStdFindToMemchr(StdFindOp findOp,
 
 void LibOptPass::runOnOperation() {
   mlir::SymbolTableCollection symbolTables;
-  getOperation()->walk(
-      [&](StdFindOp findOp) { rewriteStdFindToMemchr(findOp, symbolTables); });
+  getOperation()->walk([&](mlir::Operation *op) {
+    llvm::TypeSwitch<mlir::Operation *>(op)
+        .Case<StdFindOp, StdFindIfOp, StdFindIfNotOp>(
+            [&](auto find) { rewriteFindLikeToMemchr(find, symbolTables); });
+  });
 }
 
 std::unique_ptr<Pass> mlir::createLibOptPass() {

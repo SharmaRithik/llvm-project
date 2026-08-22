@@ -2,9 +2,12 @@
 
 !s8i = !cir.int<s, 8>
 !u64i = !cir.int<u, 64>
+!closure = !cir.struct<class "Closure" {data !s8i}>
 
 module {
   cir.func private @_ZSt4find(!cir.ptr<!s8i>, !cir.ptr<!s8i>, !cir.ptr<!s8i>) -> !cir.ptr<!s8i>
+  cir.func private @_ZSt7find_if(!cir.ptr<!s8i>, !cir.ptr<!s8i>, !closure) -> !cir.ptr<!s8i>
+  cir.func private @_ZSt11find_if_not(!cir.ptr<!s8i>, !cir.ptr<!s8i>, !closure) -> !cir.ptr<!s8i>
   cir.func private @strlen(!cir.ptr<!s8i>) -> !u64i
 
   cir.func @test_find(%first: !cir.ptr<!s8i>, %last: !cir.ptr<!s8i>, %value: !cir.ptr<!s8i>) -> !cir.ptr<!s8i> {
@@ -13,6 +16,20 @@ module {
   }
   // CHECK: cir.func @test_find(%[[FIRST:.*]]: !cir.ptr<!s8i>, %[[LAST:.*]]: !cir.ptr<!s8i>, %[[VALUE:.*]]: !cir.ptr<!s8i>)
   // CHECK: cir.std.find(%[[FIRST]] : !cir.ptr<!s8i>, %[[LAST]] : !cir.ptr<!s8i>, %[[VALUE]] : !cir.ptr<!s8i>, @_ZSt4find) -> !cir.ptr<!s8i>
+
+  cir.func @test_find_if(%first: !cir.ptr<!s8i>, %last: !cir.ptr<!s8i>, %pred: !closure) -> !cir.ptr<!s8i> {
+    %0 = cir.std.find_if(%first : !cir.ptr<!s8i>, %last : !cir.ptr<!s8i>, %pred : !closure, @_ZSt7find_if) -> !cir.ptr<!s8i>
+    cir.return %0 : !cir.ptr<!s8i>
+  }
+  // CHECK: cir.func @test_find_if(%[[IFFIRST:.*]]: !cir.ptr<!s8i>, %[[IFLAST:.*]]: !cir.ptr<!s8i>, %[[IFPRED:.*]]: !rec_Closure)
+  // CHECK: cir.std.find_if(%[[IFFIRST]] : !cir.ptr<!s8i>, %[[IFLAST]] : !cir.ptr<!s8i>, %[[IFPRED]] : !rec_Closure, @_ZSt7find_if) -> !cir.ptr<!s8i>
+
+  cir.func @test_find_if_not(%first: !cir.ptr<!s8i>, %last: !cir.ptr<!s8i>, %pred: !closure) -> !cir.ptr<!s8i> {
+    %0 = cir.std.find_if_not(%first : !cir.ptr<!s8i>, %last : !cir.ptr<!s8i>, %pred : !closure, @_ZSt11find_if_not) -> !cir.ptr<!s8i>
+    cir.return %0 : !cir.ptr<!s8i>
+  }
+  // CHECK: cir.func @test_find_if_not(%[[NOTFIRST:.*]]: !cir.ptr<!s8i>, %[[NOTLAST:.*]]: !cir.ptr<!s8i>, %[[NOTPRED:.*]]: !rec_Closure)
+  // CHECK: cir.std.find_if_not(%[[NOTFIRST]] : !cir.ptr<!s8i>, %[[NOTLAST]] : !cir.ptr<!s8i>, %[[NOTPRED]] : !rec_Closure, @_ZSt11find_if_not) -> !cir.ptr<!s8i>
 
   cir.func @test_strlen(%s: !cir.ptr<!s8i>) -> !u64i {
     %0 = cir.std.strlen(%s : !cir.ptr<!s8i>, @strlen) -> !u64i

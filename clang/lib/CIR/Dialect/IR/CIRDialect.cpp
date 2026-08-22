@@ -4887,6 +4887,26 @@ bool cir::StdFindOp::signatureMatches(mlir::TypeRange operands,
                                    mlir::isa<cir::PointerType>(operands[2]));
 }
 
+// The predicate is a closure whose type says nothing about the search, so
+// only the iterator operands and the result have to agree.
+static bool stdFindPredSignatureMatches(mlir::TypeRange operands,
+                                        mlir::TypeRange results,
+                                        unsigned numArgs) {
+  if (operands.size() != numArgs || results.size() != 1)
+    return false;
+  return operands[0] == operands[1] && operands[0] == results[0];
+}
+
+bool cir::StdFindIfOp::signatureMatches(mlir::TypeRange operands,
+                                        mlir::TypeRange results) {
+  return stdFindPredSignatureMatches(operands, results, getNumArgs());
+}
+
+bool cir::StdFindIfNotOp::signatureMatches(mlir::TypeRange operands,
+                                           mlir::TypeRange results) {
+  return stdFindPredSignatureMatches(operands, results, getNumArgs());
+}
+
 //===----------------------------------------------------------------------===//
 // TableGen'd op method definitions
 //===----------------------------------------------------------------------===//

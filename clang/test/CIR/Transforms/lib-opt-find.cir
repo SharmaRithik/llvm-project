@@ -393,7 +393,9 @@ module attributes {cir.triple = "x86_64-unknown-linux-gnu",
 // CHECK-LABEL: @rewrites_wrapped_iterator
 // CHECK: %[[FIRST:.*]] = cir.extract_member %{{.*}}[0] : !rec_std3A3A__13A3A__wrap_iter3Cchar_2A3E -> !cir.ptr<!u8i>
 // CHECK: %[[LAST:.*]] = cir.extract_member %{{.*}}[0] : !rec_std3A3A__13A3A__wrap_iter3Cchar_2A3E -> !cir.ptr<!u8i>
-// CHECK: cir.libc.memchr
+// CHECK: %[[SRC:.*]] = cir.cast bitcast %[[FIRST]] : !cir.ptr<!u8i> -> !cir.ptr<!void>
+// CHECK: %[[LEN:.*]] = cir.ptr_diff %[[LAST]], %[[FIRST]] : !cir.ptr<!u8i> -> !u64i
+// CHECK: cir.libc.memchr(%[[SRC]], %{{.*}}, %[[LEN]])
 // CHECK: cir.insert_member %{{.*}}[0], %{{.*}} : !rec_std3A3A__13A3A__wrap_iter3Cchar_2A3E, !cir.ptr<!u8i>
 // CHECK-NOT: cir.std.find
 }
@@ -414,4 +416,88 @@ module attributes {cir.triple = "x86_64-unknown-linux-gnu",
 // CHECK-LABEL: @keeps_two_member_iterator
 // CHECK: cir.std.find
 // CHECK-NOT: cir.libc.memchr
+}
+
+// -----
+
+!u8i = !cir.int<u, 8>
+!byval_closure = !cir.struct<class "byval_closure" {data !u8i}>
+!byref_closure = !cir.struct<class "byref_closure" {data !cir.ptr<!u8i>}>
+!fat_closure = !cir.struct<class "fat_closure" {data !cir.ptr<!u8i>, data !u8i}>
+
+module attributes {cir.triple = "x86_64-unknown-linux-gnu",
+                   cir.int_type_width = 32 : i32, cir.size_type_width = 64 : i32} {
+  cir.func private @_ZSt7find_ifIPh1AET_S1_S1_T0_(!cir.ptr<!u8i>, !cir.ptr<!u8i>, !byval_closure) -> !cir.ptr<!u8i> func_info<#cir.func_identity<"std::find_if">>
+  cir.func private @_ZSt7find_ifIPh1BET_S1_S1_T0_(!cir.ptr<!u8i>, !cir.ptr<!u8i>, !byref_closure) -> !cir.ptr<!u8i> func_info<#cir.func_identity<"std::find_if">>
+  cir.func private @_ZSt7find_ifIPh1CET_S1_S1_T0_(!cir.ptr<!u8i>, !cir.ptr<!u8i>, !fat_closure) -> !cir.ptr<!u8i> func_info<#cir.func_identity<"std::find_if">>
+  cir.func private @_ZSt11find_if_notIPh1AET_S1_S1_T0_(!cir.ptr<!u8i>, !cir.ptr<!u8i>, !byval_closure) -> !cir.ptr<!u8i> func_info<#cir.func_identity<"std::find_if_not">>
+
+  cir.func @rewrites_byval_capture(%first: !cir.ptr<!u8i>, %last: !cir.ptr<!u8i>, %pred: !byval_closure) -> !cir.ptr<!u8i> {
+    %0 = cir.std.find_if(%first : !cir.ptr<!u8i>, %last : !cir.ptr<!u8i>, %pred : !byval_closure, @_ZSt7find_ifIPh1AET_S1_S1_T0_) -> !cir.ptr<!u8i> {cir.byte_eq_pred}
+    cir.return %0 : !cir.ptr<!u8i>
+  }
+// CHECK-LABEL: @rewrites_byval_capture
+// CHECK: %[[BYTE:.*]] = cir.extract_member %{{.*}}[0] : !rec_byval_closure -> !u8i
+// CHECK: cir.libc.memchr
+// CHECK-NOT: cir.std.find_if
+
+  cir.func @rewrites_byref_capture(%first: !cir.ptr<!u8i>, %last: !cir.ptr<!u8i>, %pred: !byref_closure) -> !cir.ptr<!u8i> {
+    %0 = cir.std.find_if(%first : !cir.ptr<!u8i>, %last : !cir.ptr<!u8i>, %pred : !byref_closure, @_ZSt7find_ifIPh1BET_S1_S1_T0_) -> !cir.ptr<!u8i> {cir.byte_eq_pred}
+    cir.return %0 : !cir.ptr<!u8i>
+  }
+// CHECK-LABEL: @rewrites_byref_capture
+// CHECK: %[[SLOT:.*]] = cir.extract_member %{{.*}}[0] : !rec_byref_closure -> !cir.ptr<!u8i>
+// CHECK: %{{.*}} = cir.load %[[SLOT]] : !cir.ptr<!u8i>, !u8i
+// CHECK: cir.libc.memchr
+// CHECK-NOT: cir.std.find_if
+
+  cir.func @rewrites_find_if_not(%first: !cir.ptr<!u8i>, %last: !cir.ptr<!u8i>, %pred: !byval_closure) -> !cir.ptr<!u8i> {
+    %0 = cir.std.find_if_not(%first : !cir.ptr<!u8i>, %last : !cir.ptr<!u8i>, %pred : !byval_closure, @_ZSt11find_if_notIPh1AET_S1_S1_T0_) -> !cir.ptr<!u8i> {cir.byte_eq_pred}
+    cir.return %0 : !cir.ptr<!u8i>
+  }
+// CHECK-LABEL: @rewrites_find_if_not
+// CHECK: cir.libc.memchr
+// CHECK-NOT: cir.std.find_if_not
+
+  cir.func @keeps_unmarked_predicate(%first: !cir.ptr<!u8i>, %last: !cir.ptr<!u8i>, %pred: !byval_closure) -> !cir.ptr<!u8i> {
+    %0 = cir.std.find_if(%first : !cir.ptr<!u8i>, %last : !cir.ptr<!u8i>, %pred : !byval_closure, @_ZSt7find_ifIPh1AET_S1_S1_T0_) -> !cir.ptr<!u8i>
+    cir.return %0 : !cir.ptr<!u8i>
+  }
+// CHECK-LABEL: @keeps_unmarked_predicate
+// CHECK: cir.std.find_if
+// CHECK-NOT: cir.libc.memchr
+
+  cir.func @keeps_two_member_closure(%first: !cir.ptr<!u8i>, %last: !cir.ptr<!u8i>, %pred: !fat_closure) -> !cir.ptr<!u8i> {
+    %0 = cir.std.find_if(%first : !cir.ptr<!u8i>, %last : !cir.ptr<!u8i>, %pred : !fat_closure, @_ZSt7find_ifIPh1CET_S1_S1_T0_) -> !cir.ptr<!u8i> {cir.byte_eq_pred}
+    cir.return %0 : !cir.ptr<!u8i>
+  }
+// CHECK-LABEL: @keeps_two_member_closure
+// CHECK: cir.std.find_if
+// CHECK-NOT: cir.libc.memchr
+}
+
+// -----
+
+!u8i = !cir.int<u, 8>
+!wrap2 = !cir.struct<class "std::__1::__wrap_iter<unsigned char *>" {data !cir.ptr<!u8i>}>
+!byval2 = !cir.struct<class "byval_closure2" {data !u8i}>
+
+module attributes {cir.triple = "x86_64-unknown-linux-gnu",
+                   cir.int_type_width = 32 : i32, cir.size_type_width = 64 : i32} {
+  cir.func private @_ZSt7find_ifISt11__wrap_iterIPhE1AET_S3_S3_T0_(!wrap2, !wrap2, !byval2) -> !wrap2 func_info<#cir.func_identity<"std::find_if">>
+
+  cir.func @rewrites_wrapped_find_if(%first: !wrap2, %last: !wrap2, %pred: !byval2) -> !wrap2 {
+    %0 = cir.std.find_if(%first : !wrap2, %last : !wrap2, %pred : !byval2, @_ZSt7find_ifISt11__wrap_iterIPhE1AET_S3_S3_T0_) -> !wrap2 {cir.byte_eq_pred}
+    cir.return %0 : !wrap2
+  }
+// CHECK-LABEL: @rewrites_wrapped_find_if(
+// CHECK-SAME: %[[FIRSTW:[^:]*]]: !rec_{{[^,]*}}, %[[LASTW:[^:]*]]: !rec_{{[^,]*}}, %[[PRED:[^:]*]]: !rec_byval_closure2
+// CHECK: %[[FIRST:.*]] = cir.extract_member %[[FIRSTW]][0] : {{.*}} -> !cir.ptr<!u8i>
+// CHECK: %[[LAST:.*]] = cir.extract_member %[[LASTW]][0] : {{.*}} -> !cir.ptr<!u8i>
+// CHECK: %[[SRC:.*]] = cir.cast bitcast %[[FIRST]] : !cir.ptr<!u8i> -> !cir.ptr<!void>
+// CHECK: %[[BYTE:.*]] = cir.extract_member %[[PRED]][0] : !rec_byval_closure2 -> !u8i
+// CHECK: %[[LEN:.*]] = cir.ptr_diff %[[LAST]], %[[FIRST]] : !cir.ptr<!u8i> -> !u64i
+// CHECK: cir.libc.memchr(%[[SRC]], %{{.*}}, %[[LEN]])
+// CHECK: cir.insert_member %[[FIRSTW]][0], %{{.*}}
+// CHECK-NOT: cir.std.find_if
 }

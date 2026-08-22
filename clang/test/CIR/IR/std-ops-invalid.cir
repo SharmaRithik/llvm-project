@@ -13,6 +13,35 @@ module {
 
 // -----
 
+!s8i = !cir.int<s, 8>
+!s32i = !cir.int<s, 32>
+!closure = !cir.struct<class "Closure" {data !s8i}>
+
+module {
+  cir.func @bad_find_if(%f: !cir.ptr<!s8i>, %l: !cir.ptr<!s8i>, %p: !closure) -> !s32i {
+    // expected-error@below {{'cir.std.find_if' op failed to verify that all of {first, last, result} have same type}}
+    %0 = cir.std.find_if(%f : !cir.ptr<!s8i>, %l : !cir.ptr<!s8i>, %p : !closure, @x) -> !s32i
+    cir.return %0 : !s32i
+  }
+}
+
+// -----
+
+!s8i = !cir.int<s, 8>
+!s32i = !cir.int<s, 32>
+!closure = !cir.struct<class "Closure" {data !s8i}>
+
+module {
+  cir.func @bad_find_if_not(%f: !cir.ptr<!s8i>, %l: !cir.ptr<!s8i>, %p: !closure) -> !s32i {
+    // expected-error@below {{'cir.std.find_if_not' op failed to verify that all of {first, last, result} have same type}}
+    %0 = cir.std.find_if_not(%f : !cir.ptr<!s8i>, %l : !cir.ptr<!s8i>, %p : !closure, @x) -> !s32i
+    cir.return %0 : !s32i
+  }
+}
+
+
+// -----
+
 !s32i = !cir.int<s, 32>
 !u64i = !cir.int<u, 64>
 

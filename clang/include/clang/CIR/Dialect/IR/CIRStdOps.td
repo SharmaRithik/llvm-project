@@ -93,6 +93,30 @@ def CIR_StdFindOp : CIR_StdOp<"find",
   }];
 }
 
+class CIR_StdFindPredOp<string functionName, string knownKind>
+    : CIR_StdOp<functionName,
+  (ins CIR_AnyType:$first, CIR_AnyType:$last, CIR_AnyType:$pred),
+  (outs CIR_AnyType:$result),
+  [AllTypesMatch<["first", "last", "result"]>], knownKind> {
+  let summary = "std::" # functionName # "()";
+  let description = [{
+    A raised `std::}] # functionName # [{`. `cir.byte_eq_pred` is carried
+    here from the call when CIRGen proved the predicate is a byte equality
+    against the closure's single capture. It is discardable, so a pass that
+    drops it costs the rewrite rather than making it wrong.
+  }];
+  let assemblyFormat = [{
+    `(` $first `:` qualified(type($first)) `,`
+        $last `:` qualified(type($last)) `,`
+        $pred `:` qualified(type($pred)) `,`
+        $original_fn `)` `->` qualified(type($result)) attr-dict
+  }];
+}
+
+def CIR_StdFindIfOp : CIR_StdFindPredOp<"find_if", "StdFindIf">;
+
+def CIR_StdFindIfNotOp : CIR_StdFindPredOp<"find_if_not", "StdFindIfNot">;
+
 def CIR_StrLenOp : CIR_CStdLibOp<"strlen",
   (ins CIR_PtrToChar8Type:$string),
   (outs CIR_AnyFundamentalUIntType:$result)> {

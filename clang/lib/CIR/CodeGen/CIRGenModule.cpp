@@ -3751,20 +3751,27 @@ CIRGenModule::getKnownFuncKind(const FunctionDecl *funcDecl) {
   return llvm::StringSwitch<std::optional<cir::KnownFuncKind>>(
              funcDecl->getName())
       .Case(cir::StdFindOp::getFunctionName(), cir::StdFindOp::getFuncKind())
+      .Case(cir::StdFindIfOp::getFunctionName(),
+            cir::StdFindIfOp::getFuncKind())
+      .Case(cir::StdFindIfNotOp::getFunctionName(),
+            cir::StdFindIfNotOp::getFuncKind())
       .Default(std::nullopt);
 }
 
 /// Whether the record lives in a namespace the standard library
 /// implementation owns. libc++ keeps its iterators in std while
-/// libstdc++ keeps them in __gnu_cxx, and both store the designated
-/// pointer as the wrapper's only field.
+/// libstdc++ keeps them in __gnu_cxx, a reserved identifier only the
+/// implementation may use, so only the top level namespace of that name
+/// counts. Both implementations store the designated pointer as the
+/// wrapper's only field.
 static bool inStdImplementationNamespace(const clang::CXXRecordDecl *rec) {
   if (rec->isInStdNamespace())
     return true;
   for (const clang::DeclContext *ctx = rec->getDeclContext(); ctx;
        ctx = ctx->getParent()) {
     const auto *ns = dyn_cast<clang::NamespaceDecl>(ctx);
-    if (ns && ns->getIdentifier() && ns->getName() == "__gnu_cxx")
+    if (ns && ns->getIdentifier() && ns->getName() == "__gnu_cxx" &&
+        ns->getDeclContext()->getRedeclContext()->isTranslationUnit())
       return true;
   }
   return false;
@@ -3815,26 +3822,108 @@ static clang::QualType stdContiguousIteratorPointee(clang::QualType ty) {
   return onlyField->getType()->getPointeeType();
 }
 
+/// The canonical unqualified narrow character type the parameter points at,
+/// directly or through a standard library contiguous iterator, or a null
+/// type. An enum lowers to the same byte-wide integer as a character type
+/// and can carry a user-defined operator==, so CIR cannot tell the two
+/// apart. char8_t is a distinct type but cannot carry one, so it belongs
+/// here too.
+static clang::QualType narrowCharPointee(const ParmVarDecl *param) {
+  clang::QualType pointee = param->getType()->getPointeeType();
+  if (pointee.isNull())
+    pointee = stdContiguousIteratorPointee(param->getType());
+  if (pointee.isNull() || pointee.isVolatileQualified())
+    return {};
+  if (!pointee->isCharType() && !pointee->isChar8Type())
+    return {};
+  return pointee.getCanonicalType().getUnqualifiedType();
+}
+
 bool CIRGenModule::hasNarrowCharParams(const FunctionDecl *funcDecl) {
-  // An enum lowers to the same byte-wide integer as a character type and can
-  // carry a user-defined operator==, so CIR cannot tell the two apart.
-  // char8_t is a distinct type but cannot carry one, so it belongs here too.
   clang::QualType firstPointee;
   return !funcDecl->parameters().empty() &&
          llvm::all_of(funcDecl->parameters(), [&](const ParmVarDecl *param) {
-           clang::QualType pointee = param->getType()->getPointeeType();
+           clang::QualType pointee = narrowCharPointee(param);
            if (pointee.isNull())
-             pointee = stdContiguousIteratorPointee(param->getType());
-           if (pointee.isNull() || pointee.isVolatileQualified())
              return false;
-           if (!pointee->isCharType() && !pointee->isChar8Type())
-             return false;
-           clang::QualType canonical =
-               pointee.getCanonicalType().getUnqualifiedType();
            if (firstPointee.isNull())
-             firstPointee = canonical;
-           return canonical == firstPointee;
+             firstPointee = pointee;
+           return pointee == firstPointee;
          });
+}
+
+bool CIRGenModule::hasByteEqPredicate(const FunctionDecl *funcDecl,
+                                      cir::KnownFuncKind kind) {
+  if (funcDecl->getNumParams() != 3)
+    return false;
+
+  clang::QualType charTy = narrowCharPointee(funcDecl->getParamDecl(0));
+  if (charTy.isNull() || narrowCharPointee(funcDecl->getParamDecl(1)) != charTy)
+    return false;
+
+  // The predicate has to be a lambda with a single capture of that same
+  // character type. A single comparison against it cannot observe anything
+  // the search would change, since neither the search nor the comparison
+  // writes, so a by-reference capture is as loop invariant as a copy.
+  const CXXRecordDecl *closure =
+      funcDecl->getParamDecl(2)->getType()->getAsCXXRecordDecl();
+  if (!closure || !closure->isLambda() || closure->capture_size() != 1)
+    return false;
+  const LambdaCapture &capture = *closure->captures().begin();
+  if (!capture.capturesVariable())
+    return false;
+  // The captured variable may itself be a reference, as when the value
+  // reaches the enclosing scope as a const reference parameter.
+  const ValueDecl *capturedVar = capture.getCapturedVar();
+  clang::QualType capturedTy = capturedVar->getType().getNonReferenceType();
+  if (capturedTy.isVolatileQualified() ||
+      capturedTy.getCanonicalType().getUnqualifiedType() != charTy)
+    return false;
+
+  const CXXMethodDecl *callOp = closure->getLambdaCallOperator();
+  if (!callOp || callOp->getNumParams() != 1)
+    return false;
+  const ParmVarDecl *element = callOp->getParamDecl(0);
+  // A generic lambda leaves the parameter dependent here, and the call shape
+  // instantiates it to the character the iterators designate, so both
+  // comparison sides are the same narrow character and the comparison is
+  // the builtin one, since no operator== can take two builtin characters.
+  // A concrete parameter has to be that character already, by value or by
+  // const reference, so both sides promote identically.
+  clang::QualType elementTy = element->getType();
+  if (!elementTy->isDependentType()) {
+    if (elementTy.getNonReferenceType().isVolatileQualified())
+      return false;
+    if (elementTy.getNonReferenceType()
+            .getCanonicalType()
+            .getUnqualifiedType() != charTy)
+      return false;
+  }
+
+  // The body has to be a lone return of element == capture for find_if, or
+  // element != capture for find_if_not, in either operand order. Both make
+  // the search stop at the first equal byte.
+  const auto *body = dyn_cast_if_present<CompoundStmt>(callOp->getBody());
+  if (!body || body->size() != 1)
+    return false;
+  const auto *ret = dyn_cast<ReturnStmt>(body->body_front());
+  if (!ret || !ret->getRetValue())
+    return false;
+  const auto *cmp =
+      dyn_cast<BinaryOperator>(ret->getRetValue()->IgnoreParenImpCasts());
+  clang::BinaryOperatorKind wanted =
+      kind == cir::KnownFuncKind::StdFindIf ? BO_EQ : BO_NE;
+  if (!cmp || cmp->getOpcode() != wanted)
+    return false;
+  auto refersTo = [](const Expr *side, const ValueDecl *decl) {
+    const auto *ref = dyn_cast<DeclRefExpr>(side->IgnoreParenImpCasts());
+    return ref &&
+           ref->getDecl()->getCanonicalDecl() == decl->getCanonicalDecl();
+  };
+  return (refersTo(cmp->getLHS(), element) &&
+          refersTo(cmp->getRHS(), capturedVar)) ||
+         (refersTo(cmp->getLHS(), capturedVar) &&
+          refersTo(cmp->getRHS(), element));
 }
 
 static void setWindowsItaniumDLLImport(CIRGenModule &cgm, bool isLocal,
