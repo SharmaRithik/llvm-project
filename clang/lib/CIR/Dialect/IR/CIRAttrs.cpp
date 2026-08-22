@@ -84,6 +84,27 @@ using namespace mlir;
 using namespace cir;
 
 //===----------------------------------------------------------------------===//
+// StdTypeInfoAttr
+//===----------------------------------------------------------------------===//
+
+mlir::Type
+cir::StdTypeInfoAttr::resolvePath(cir::RecordType root,
+                                  llvm::ArrayRef<uint32_t> path,
+                                  llvm::SmallVectorImpl<mlir::Type> *steps) {
+  mlir::Type ty = root;
+  for (uint32_t idx : path) {
+    auto rec = mlir::dyn_cast<cir::RecordType>(ty);
+    if (!rec || rec.isUnion() || !rec.isComplete() ||
+        idx >= rec.getMembers().size())
+      return {};
+    ty = rec.getMembers()[idx];
+    if (steps)
+      steps->push_back(ty);
+  }
+  return ty;
+}
+
+//===----------------------------------------------------------------------===//
 // MemorySpaceAttrInterface implementations for Lang and Target address space
 // attributes
 //===----------------------------------------------------------------------===//

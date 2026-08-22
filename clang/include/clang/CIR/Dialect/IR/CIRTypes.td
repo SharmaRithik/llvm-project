@@ -820,6 +820,12 @@ def CIR_StructType : CIR_Type<"Struct", "struct", [
     void complete(llvm::ArrayRef<mlir::Type> members, bool packed,
                   llvm::ArrayRef<cir::RecordMemberKind> memberKinds);
 
+    /// The standard library identity of the record, null when it has none.
+    /// Only a named record can carry one, since the identity is a fact
+    /// about a declaration rather than a shape.
+    cir::StdTypeInfoAttr getStdTypeInfo() const;
+    void setStdTypeInfo(cir::StdTypeInfoAttr info);
+
     /// Whether any member is marked pad.
     bool getPadded() const;
 

@@ -933,6 +933,13 @@ class CIRABITypeConverter : public mlir::TypeConverter {
         loweredPadding = convertType(pad);
     convertedType.complete(convertedMembers, type.getPacked(), loweredPadding,
                            type.getMemberKinds());
+    // The standard library identity is a fact about the record, so the
+    // converted record keeps it. Member conversion is one type in, one type
+    // out, so the recorded member paths stay valid.
+    if (auto srcStruct = mlir::dyn_cast<cir::StructType>(mlir::Type(type)))
+      if (cir::StdTypeInfoAttr info = srcStruct.getStdTypeInfo())
+        mlir::cast<cir::StructType>(mlir::Type(convertedType))
+            .setStdTypeInfo(info);
     addConvertedRecordType(convertedType);
     return convertedType;
   }

@@ -230,7 +230,8 @@ static void
 printRecordBody(mlir::AsmPrinter &printer, RecordTy self, mlir::StringAttr name,
                 bool hasClassPrefix, bool isPacked, bool isIncomplete,
                 llvm::ArrayRef<mlir::Type> members, mlir::Type padding,
-                llvm::ArrayRef<RecordMemberKind> memberKinds) {
+                llvm::ArrayRef<RecordMemberKind> memberKinds,
+                mlir::Attribute stdTypeInfo) {
   printer << '<';
   if (hasClassPrefix)
     printer << "class ";
@@ -263,6 +264,12 @@ printRecordBody(mlir::AsmPrinter &printer, RecordTy self, mlir::StringAttr name,
       printer << ", padding = {";
       printer.printType(padding);
       printer << '}';
+    }
+    // An incomplete reference never spells the identity, so only the one
+    // complete printing of a record carries it.
+    if (stdTypeInfo) {
+      printer << ", std_type_info = ";
+      printer.printAttribute(stdTypeInfo);
     }
   }
   printer << '>';
@@ -314,8 +321,23 @@ Type StructType::parse(mlir::AsmParser &parser) {
   if (parseRecordBody(parser, incomplete, members, memberKinds).failed())
     return {};
 
+  cir::StdTypeInfoAttr stdTypeInfo;
+  if (parser.parseOptionalComma().succeeded()) {
+    if (parser.parseKeyword("std_type_info") || parser.parseEqual() ||
+        parser.parseAttribute(stdTypeInfo))
+      return {};
+  }
+
   if (parser.parseGreater())
     return {};
+
+  // The identity is a fact about a declaration, so only a complete named
+  // record can spell one.
+  if (stdTypeInfo && (!name || incomplete)) {
+    parser.emitError(loc,
+                     "std_type_info requires a complete identified record");
+    return {};
+  }
 
   ArrayRef<mlir::Type> membersRef(members);
   ArrayRef<RecordMemberKind> kindsRef(memberKinds);
@@ -332,9 +354,22 @@ Type StructType::parse(mlir::AsmParser &parser) {
                                   is_class, kindsRef);
     if (!type)
       return {};
-    if (auto structTy = mlir::dyn_cast<StructType>(type))
+    if (auto structTy = mlir::dyn_cast<StructType>(type)) {
       if (structTy.isIncomplete())
         structTy.complete(membersRef, packed, kindsRef);
+      // A second spelling of the record may repeat the identity but must
+      // not contradict one already attached, and user input diagnoses
+      // rather than aborts.
+      if (stdTypeInfo) {
+        cir::StdTypeInfoAttr existing = structTy.getStdTypeInfo();
+        if (existing && existing != stdTypeInfo) {
+          parser.emitError(loc, "std_type_info contradicts an earlier "
+                                "spelling of the same record");
+          return {};
+        }
+        structTy.setStdTypeInfo(stdTypeInfo);
+      }
+    }
     assert(!cir::MissingFeatures::astRecordDeclAttr());
   } else {
     parser.emitError(loc, "anonymous records must be complete");
@@ -347,7 +382,7 @@ Type StructType::parse(mlir::AsmParser &parser) {
 void StructType::print(mlir::AsmPrinter &printer) const {
   printRecordBody(printer, *this, getName(), isClass(), getPacked(),
                   isIncomplete(), getMembers(), /*padding=*/{},
-                  getMemberKinds());
+                  getMemberKinds(), getStdTypeInfo());
 }
 
 mlir::LogicalResult StructType::verify(
@@ -400,6 +435,16 @@ void StructType::complete(ArrayRef<Type> members, bool packed,
   assert(!cir::MissingFeatures::astRecordDeclAttr());
   if (mutate(members, packed, memberKinds).failed())
     llvm_unreachable("failed to complete struct");
+}
+
+cir::StdTypeInfoAttr StructType::getStdTypeInfo() const {
+  return mlir::dyn_cast_if_present<cir::StdTypeInfoAttr>(
+      getImpl()->std_type_info);
+}
+
+void StructType::setStdTypeInfo(cir::StdTypeInfoAttr info) {
+  if (mutate(mlir::Attribute(info)).failed())
+    llvm_unreachable("std type identity rejected or contradicted");
 }
 
 bool StructType::isLayoutIdentical(const StructType &other) {
@@ -512,7 +557,7 @@ Type UnionType::parse(mlir::AsmParser &parser) {
 void UnionType::print(mlir::AsmPrinter &printer) const {
   printRecordBody(printer, *this, getName(), /*hasClassPrefix=*/false,
                   getPacked(), isIncomplete(), getMembers(), getPadding(),
-                  getMemberKinds());
+                  getMemberKinds(), /*stdTypeInfo=*/{});
 }
 
 mlir::LogicalResult
