@@ -22,6 +22,7 @@ static double C[N][N];
 static double D[N][N];
 static double X[N];
 static double Y[N];
+static volatile double VX[N];
 static long L[N][N];
 
 // CHECK-DAG: recognized loop nest in @tri_upper outer init constant condition induction lt constant inner init constant condition induction lt induction memory safe
@@ -187,6 +188,34 @@ void outer_carried_two_level_update(void) {
       X[j] += A[j][i];
 }
 
+// CHECK-DAG: recognized loop nest in @shifted_element_recurrence {{.*}} memory potential dependence {{.*}} floating recurrences 0
+void shifted_element_recurrence(void) {
+  for (int i = 0; i < N - 1; ++i)
+    for (int j = 0; j < N; ++j)
+      X[i] = X[i + 1] + A[j][i];
+}
+
+// CHECK-DAG: recognized loop nest in @duplicated_recurrence_value {{.*}} memory potential dependence {{.*}} floating recurrences 0
+void duplicated_recurrence_value(void) {
+  for (int i = 0; i < N; ++i)
+    for (int j = 0; j < N; ++j)
+      X[i] = X[i] + X[i] + A[j][i];
+}
+
+// CHECK-DAG: recognized loop nest in @volatile_element_recurrence {{.*}} memory unsupported operation {{.*}} floating recurrences 0
+void volatile_element_recurrence(void) {
+  for (int i = 0; i < N; ++i)
+    for (int j = 0; j < N; ++j)
+      VX[i] += A[j][i];
+}
+
+// CHECK-DAG: recognized loop nest in @aliased_element_recurrence {{.*}} memory unsupported address {{.*}} floating recurrences 0
+void aliased_element_recurrence(double *x, double (*a)[N], double *y) {
+  for (int i = 0; i < N; ++i)
+    for (int j = 0; j < N; ++j)
+      x[i] += a[j][i] * y[j];
+}
+
 // CHECK-DAG: recognized loop nest in @shifted_dependence {{.*}} memory potential dependence
 void shifted_dependence(void) {
   for (int i = 1; i < N; ++i)
@@ -275,6 +304,14 @@ void outer_carried_recurrence(void) {
         C[i][j] += A[i][k] * B[j][k] + B[i][k] * A[j][k];
       }
   }
+}
+
+// CHECK-DAG: recognized anchored loop band in @shifted_outer_recurrence {{.*}} floating recurrences 0 band memory potential dependence
+void shifted_outer_recurrence(void) {
+  for (int i = 0; i < N; ++i)
+    for (int k = 0; k < N; ++k)
+      for (int j = 0; j < N - 1; ++j)
+        C[i][j] = C[i][j + 1] + A[i][k] * B[j][k];
 }
 
 // CHECK-DAG: recognized anchored loop band in @inner_varying_update {{.*}} floating recurrences 0 band memory safe
@@ -607,6 +644,30 @@ void rejected_volatile(void) {
 // INTERCHANGE-NEXT: cir.store{{.*}} [[OUTERUPDATEZERO]], [[OUTERUPDATEI]]
 // INTERCHANGE-NEXT: cir.for : cond {
 
+// INTERCHANGE-LABEL: cir.func dso_local @shifted_element_recurrence()
+// INTERCHANGE: [[SHIFTRECI:%[0-9]+]] = cir.alloca "i"
+// INTERCHANGE-NEXT: [[SHIFTRECZERO:%[0-9]+]] = cir.const #cir.int<0>
+// INTERCHANGE-NEXT: cir.store{{.*}} [[SHIFTRECZERO]], [[SHIFTRECI]]
+// INTERCHANGE-NEXT: cir.for : cond {
+
+// INTERCHANGE-LABEL: cir.func dso_local @duplicated_recurrence_value()
+// INTERCHANGE: [[DUPRECI:%[0-9]+]] = cir.alloca "i"
+// INTERCHANGE-NEXT: [[DUPRECZERO:%[0-9]+]] = cir.const #cir.int<0>
+// INTERCHANGE-NEXT: cir.store{{.*}} [[DUPRECZERO]], [[DUPRECI]]
+// INTERCHANGE-NEXT: cir.for : cond {
+
+// INTERCHANGE-LABEL: cir.func dso_local @volatile_element_recurrence()
+// INTERCHANGE: [[VOLRECI:%[0-9]+]] = cir.alloca "i"
+// INTERCHANGE-NEXT: [[VOLRECZERO:%[0-9]+]] = cir.const #cir.int<0>
+// INTERCHANGE-NEXT: cir.store{{.*}} [[VOLRECZERO]], [[VOLRECI]]
+// INTERCHANGE-NEXT: cir.for : cond {
+
+// INTERCHANGE-LABEL: cir.func dso_local @aliased_element_recurrence(
+// INTERCHANGE: [[ALIASRECI:%[0-9]+]] = cir.alloca "i"
+// INTERCHANGE-NEXT: [[ALIASRECZERO:%[0-9]+]] = cir.const #cir.int<0>
+// INTERCHANGE-NEXT: cir.store{{.*}} [[ALIASRECZERO]], [[ALIASRECI]]
+// INTERCHANGE-NEXT: cir.for : cond {
+
 // INTERCHANGE-LABEL: cir.func dso_local @shifted_dependence()
 // INTERCHANGE: [[SHIFTI:%[0-9]+]] = cir.alloca "i"
 // INTERCHANGE-NEXT: [[SHIFTONE:%[0-9]+]] = cir.const #cir.int<1>
@@ -675,6 +736,12 @@ void rejected_volatile(void) {
 // INTERCHANGE: } body {
 // INTERCHANGE: [[UPDATEK:%[0-9]+]] = cir.alloca "k"
 // INTERCHANGE: cir.for : cond {
+
+// INTERCHANGE-LABEL: cir.func dso_local @shifted_outer_recurrence()
+// INTERCHANGE: [[SHIFTOUTERI:%[0-9]+]] = cir.alloca "i"
+// INTERCHANGE-NEXT: [[SHIFTOUTERZERO:%[0-9]+]] = cir.const #cir.int<0>
+// INTERCHANGE-NEXT: cir.store{{.*}} [[SHIFTOUTERZERO]], [[SHIFTOUTERI]]
+// INTERCHANGE-NEXT: cir.for : cond {
 
 // INTERCHANGE-LABEL: cir.func dso_local @band_outer_dependent_domain()
 // INTERCHANGE: [[DEPENDENTJ:%[0-9]+]] = cir.alloca "j"
