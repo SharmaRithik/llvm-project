@@ -431,6 +431,7 @@ TEST_F(TargetLibraryInfoTest, ValidProto) {
       "declare i32 @vsprintf(ptr, ptr, ptr)\n"
       "declare i32 @vsscanf(ptr, ptr, ptr)\n"
       "declare i64 @wcslen(ptr)\n"
+      "declare ptr @wmemchr(ptr, i32, i64)\n"
       "declare i32 @fork()\n"
       "declare i32 @execl(ptr, ptr, ...)\n"
       "declare i32 @execle(ptr, ptr, ...)\n"
