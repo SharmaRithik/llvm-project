@@ -50,9 +50,10 @@ template <typename... TargetOps> class StdRecognizer {
       return false;
 
     if constexpr (TargetOp::hasKnownFuncKind()) {
-      // Only a free std function with the right name carries the tag, so
-      // members, static members, and operators never match. The shape of the
-      // call is checked here, so a variadic callee never matches.
+      // CIRGen tags free std functions with the right name and the call
+      // operator of a recognized customization point object, so no other
+      // member or operator ever matches. The shape of the call is checked
+      // here, so a variadic callee never matches.
       cir::FuncOp callee = call.resolveCalleeInTable(symbolTables);
       if (!callee || callee.getFunctionType().isVarArg())
         return false;
@@ -100,8 +101,8 @@ public:
 };
 
 // The library calls the recognizer knows how to raise, tried in order.
-using RecognizedStdOps =
-    StdRecognizer<StdFindOp, StdFindIfOp, StdFindIfNotOp, StrLenOp>;
+using RecognizedStdOps = StdRecognizer<StdFindOp, StdFindIfOp, StdFindIfNotOp,
+                                       StdRangesFindOp, StrLenOp>;
 
 struct IdiomRecognizerPass
     : public impl::IdiomRecognizerBase<IdiomRecognizerPass> {

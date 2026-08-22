@@ -117,6 +117,31 @@ def CIR_StdFindIfOp : CIR_StdFindPredOp<"find_if", "StdFindIf">;
 
 def CIR_StdFindIfNotOp : CIR_StdFindPredOp<"find_if_not", "StdFindIfNot">;
 
+def CIR_StdRangesFindOp : CIR_StdOp<"ranges.find",
+  (ins CIR_AnyType:$cpo, CIR_AnyType:$first, CIR_AnyType:$last,
+       CIR_AnyType:$pattern, CIR_AnyType:$proj),
+  (outs CIR_AnyType:$result),
+  [AllTypesMatch<["first", "last", "result"]>], "StdRangesFind"> {
+  let summary = "std::ranges::find()";
+  let description = [{
+    A raised call to std::ranges::find's call operator over an iterator
+    pair. The first operand is the customization point object the call was
+    made through and the last is the projection, both carried so lowering
+    back to a call loses nothing. Lowering back passes the operands through
+    in order, so the object has to stay operand 0 where the member call
+    expects it. `cir.narrow_char_params` is carried here from the call when
+    CIRGen recorded it, which requires the projection to be std::identity.
+  }];
+  let assemblyFormat = [{
+    `(` $cpo `:` qualified(type($cpo)) `,`
+        $first `:` qualified(type($first)) `,`
+        $last `:` qualified(type($last)) `,`
+        $pattern `:` qualified(type($pattern)) `,`
+        $proj `:` qualified(type($proj)) `,`
+        $original_fn `)` `->` qualified(type($result)) attr-dict
+  }];
+}
+
 def CIR_StrLenOp : CIR_CStdLibOp<"strlen",
   (ins CIR_PtrToChar8Type:$string),
   (outs CIR_AnyFundamentalUIntType:$result)> {

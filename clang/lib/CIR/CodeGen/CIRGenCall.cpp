@@ -372,7 +372,10 @@ void CIRGenModule::constructAttributeList(
       // rewrites, not part of the callee identity.
       if (attrOnCallSite) {
         std::optional<cir::KnownFuncKind> kind = getKnownFuncKind(func);
-        if (kind == cir::KnownFuncKind::StdFind && hasNarrowCharParams(func))
+        if ((kind == cir::KnownFuncKind::StdFind &&
+             hasNarrowCharParams(func)) ||
+            (kind == cir::KnownFuncKind::StdRangesFind &&
+             hasNarrowCharRangesFindParams(func)))
           addUnitAttr(cir::CIRDialect::getNarrowCharParamsAttrName());
         else if ((kind == cir::KnownFuncKind::StdFindIf ||
                   kind == cir::KnownFuncKind::StdFindIfNot) &&

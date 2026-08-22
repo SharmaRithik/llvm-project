@@ -829,6 +829,12 @@ public:
   /// char8_t.
   static bool hasNarrowCharParams(const clang::FunctionDecl *funcDecl);
 
+  /// Whether `funcDecl` is a call operator taking a narrow character
+  /// iterator pair and value like std::find, plus an optional projection
+  /// parameter that has to be std::identity.
+  static bool
+  hasNarrowCharRangesFindParams(const clang::FunctionDecl *funcDecl);
+
   /// Whether `funcDecl` takes two narrow character iterators and a lambda
   /// proven to be a single equality comparison of the element against its
   /// only capture, with the polarity that makes a search of `kind` stop at

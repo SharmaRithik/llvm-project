@@ -4935,6 +4935,16 @@ bool cir::StdFindIfNotOp::signatureMatches(mlir::TypeRange operands,
   return stdFindPredSignatureMatches(operands, results, getNumArgs());
 }
 
+bool cir::StdRangesFindOp::signatureMatches(mlir::TypeRange operands,
+                                            mlir::TypeRange results) {
+  // Operand 0 is the customization point object the call was made through
+  // and the last operand is the projection. The iterator pair and the
+  // pattern between them follow the std::find rules, so that check is
+  // shared.
+  return operands.size() == getNumArgs() &&
+         StdFindOp::signatureMatches(operands.slice(1, 3), results);
+}
+
 //===----------------------------------------------------------------------===//
 // TableGen'd op method definitions
 //===----------------------------------------------------------------------===//

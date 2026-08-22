@@ -31,13 +31,13 @@
 // TargetLibraryInfo reports no memchr on these targets, so no call may be
 // introduced.
 // RUN: %clang_cc1 -std=c++20 -triple amdgcn-amd-amdhsa -fclangir -O1 -clangir-enable-idiom-recognizer -clangir-lib-opt -emit-cir %s -o %t.amdgcn.cir
-// RUN: FileCheck %s --input-file=%t.amdgcn.cir --check-prefix=NOXFORM --implicit-check-not=cir.libc.memchr
+// RUN: FileCheck %s --input-file=%t.amdgcn.cir --check-prefix=NOXFORM --implicit-check-not=cir.libc.memchr --implicit-check-not=cir.std.
 // RUN: %clang_cc1 -std=c++20 -triple nvptx64-nvidia-cuda -fclangir -O1 -clangir-enable-idiom-recognizer -clangir-lib-opt -emit-cir %s -o %t.nvptx.cir
-// RUN: FileCheck %s --input-file=%t.nvptx.cir --check-prefix=NOXFORM --implicit-check-not=cir.libc.memchr
+// RUN: FileCheck %s --input-file=%t.nvptx.cir --check-prefix=NOXFORM --implicit-check-not=cir.libc.memchr --implicit-check-not=cir.std.
 // RUN: %clang_cc1 -std=c++20 -triple x86_64-unknown-linux-gnu -ffreestanding -fclangir -O1 -clangir-enable-idiom-recognizer -clangir-lib-opt -emit-cir %s -o %t.free.cir
-// RUN: FileCheck %s --input-file=%t.free.cir --check-prefix=NOXFORM --implicit-check-not=cir.libc.memchr
+// RUN: FileCheck %s --input-file=%t.free.cir --check-prefix=NOXFORM --implicit-check-not=cir.libc.memchr --implicit-check-not=cir.std.
 // RUN: %clang_cc1 -std=c++20 -triple x86_64-unknown-linux-gnu -fno-builtin-memchr -fclangir -O1 -clangir-enable-idiom-recognizer -clangir-lib-opt -emit-cir %s -o %t.nomemchr.cir
-// RUN: FileCheck %s --input-file=%t.nomemchr.cir --check-prefix=NOXFORM --implicit-check-not=cir.libc.memchr
+// RUN: FileCheck %s --input-file=%t.nomemchr.cir --check-prefix=NOXFORM --implicit-check-not=cir.libc.memchr --implicit-check-not=cir.std.
 // RUN: %clang_cc1 -std=c++20 -triple x86_64-unknown-linux-gnu -fno-builtin-strlen -fclangir -O1 -clangir-enable-idiom-recognizer -clangir-lib-opt -emit-cir %s -o %t.nostrlen.cir
 // RUN: FileCheck %s --input-file=%t.nostrlen.cir
 // RUN: %clang_cc1 -std=c++20 -triple x86_64-unknown-linux-gnu -DMEMCHR_NORETURN -fclangir -O1 -clangir-enable-idiom-recognizer -clangir-lib-opt -emit-cir %s -o %t.noreturn.cir
@@ -55,6 +55,8 @@
 // LLVM64: call ptr @memchr(ptr noundef {{.*}}, i32 noundef {{.*}}, i64 noundef {{.*}})
 // LLVMEXT: declare ptr @memchr(ptr noundef, i32 noundef signext, i64 noundef)
 // LLVMEXT: call ptr @memchr(ptr noundef {{.*}}, i32 noundef signext {{.*}}, i64 noundef {{.*}})
+// NOXFORM: cir.call @_ZNKSt6ranges6__findclIPhS2_hSt8identityEET_S4_T0_RKT1_T2_
+// NOXFORM: cir.call @_ZNKSt6ranges6__findclIPiS2_iSt8identityEET_S4_T0_RKT1_T2_
 // NOXFORM: cir.call @_ZSt4findIPhhET_S1_S1_RKT0_
 // NOXFORM: cir.call @_ZSt4findIPccET_S1_S1_RKT0_
 // NOXFORM: cir.call @_ZSt4findIPaaET_S1_S1_RKT0_
@@ -74,7 +76,37 @@ const void *force_memchr(const void *p) { return memchr(p, 'x', 4); }
 
 namespace std {
 template <class Iter, class T> Iter find(Iter, Iter, const T &);
+struct identity {
+  template <class T> T &&operator()(T &&t) const;
+};
+namespace ranges {
+struct __find {
+  template <class Iter, class Sent, class T, class Proj = identity>
+  Iter operator()(Iter first, Sent last, const T &value,
+                  Proj proj = {}) const;
+};
+inline namespace __cpo {
+inline constexpr __find find{};
 }
+}
+}
+
+unsigned char *test_byte_ranges_find(unsigned char *first, unsigned char *last,
+                                     const unsigned char &value) {
+  return std::ranges::find(first, last, value);
+}
+// CHECK-LABEL: @_Z21test_byte_ranges_findPhS_RKh
+// CHECK-NOT: cir.call @_ZNKSt6ranges
+// CHECK: cir.libc.memchr
+// CHECK-NOT: cir.call @_ZNKSt6ranges
+
+int *test_wide_ranges_find(int *first, int *last, const int &value) {
+  return std::ranges::find(first, last, value);
+}
+// CHECK-LABEL: @_Z21test_wide_ranges_findPiS_RKi
+// CHECK-NOT: cir.libc.memchr
+// CHECK: cir.call @_ZNKSt6ranges6__findclIPiS2_iSt8identityEET_S4_T0_RKT1_T2_(
+// CHECK-NOT: cir.libc.memchr
 
 unsigned char *test_byte_find(unsigned char *first, unsigned char *last,
                               const unsigned char &value) {
