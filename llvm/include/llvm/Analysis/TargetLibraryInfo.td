@@ -1686,5 +1686,8 @@ def vsscanf : TargetLibCall<"vsscanf", Int, [Ptr, Ptr, Ptr]>;
 /// size_t wcslen (const wchar_t* wcs);
 def wcslen : TargetLibCall<"wcslen", SizeT, [Ptr]>;
 
+/// wchar_t *wmemchr(const wchar_t *s, wchar_t c, size_t n);
+def wmemchr : TargetLibCall<"wmemchr", Ptr, [Ptr, IntX, SizeT]>;
+
 /// ssize_t write(int fildes, const void *buf, size_t nbyte);
 def write : TargetLibCall<"write", SSizeT, [Int, Ptr, SizeT]>;

@@ -32,7 +32,7 @@
 # RUN: FileCheck %s --check-prefix=AVAIL --input-file %t3.txt
 # RUN: FileCheck %s --check-prefix=UNAVAIL --input-file %t3.txt
 #
-# CHECK: << Total TLI yes SDK no:  18
+# CHECK: << Total TLI yes SDK no:  19
 # CHECK: >> Total TLI no  SDK yes: 0
 # CHECK: == Total TLI yes SDK yes: 277
 #
@@ -46,7 +46,8 @@
 # WRONG_DETAIL: << TLI yes SDK no : 'fminimum_num'
 # WRONG_DETAIL: << TLI yes SDK no : 'fminimum_numf'
 # WRONG_DETAIL: << TLI yes SDK no : 'fminimum_numl'
-# WRONG_SUMMARY: << Total TLI yes SDK no:  19{{$}}
+# WRONG_DETAIL: << TLI yes SDK no : 'wmemchr'
+# WRONG_SUMMARY: << Total TLI yes SDK no:  20{{$}}
 # WRONG_SUMMARY: >> Total TLI no  SDK yes: 1{{$}}
 # WRONG_SUMMARY: == Total TLI yes SDK yes: 276
 #
@@ -54,8 +55,8 @@
 ## the exact count first; the two directives should add up to that.
 ## Yes, this means additions to TLI will fail this test, but the argument
 ## to -COUNT can't be an expression.
-# AVAIL: TLI knows 528 symbols, 295 available
-# AVAIL-COUNT-295: {{^}} available
+# AVAIL: TLI knows 529 symbols, 296 available
+# AVAIL-COUNT-296: {{^}} available
 # AVAIL-NOT:       {{^}} available
 # UNAVAIL-COUNT-233: not available
 # UNAVAIL-NOT:       not available
