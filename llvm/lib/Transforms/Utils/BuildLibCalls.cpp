@@ -566,6 +566,7 @@ bool llvm::inferNonMandatoryLibFuncAttrs(Function &F,
     break;
   case LibFunc_memchr:
   case LibFunc_memrchr:
+  case LibFunc_wmemchr:
     Changed |= setDoesNotThrow(F);
     Changed |= setDoesNotCallback(F);
     Changed |= setOnlyAccessesArgMemory(F);
