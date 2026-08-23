@@ -9,12 +9,14 @@ module attributes {cir.triple = "x86_64-unknown-linux-gnu", cir.size_type_width 
   cir.func private @_ZSt7find_ifIPh1AET_S1_S1_T0_(!cir.ptr<!u8i>, !cir.ptr<!u8i>, !closure) -> !cir.ptr<!u8i>
 
   cir.func @f(%arg0: !cir.ptr<!u8i>, %arg1: !cir.ptr<!u8i>, %arg2: !cir.ptr<!u8i>) -> !cir.ptr<!u8i> {
-    %0 = cir.call @_ZSt4findIPhhET_S1_S1_RKT0_(%arg0, %arg1, %arg2) {cir.byte_eq_pred, cir.byte_eq_pred_value = #cir.int<120> : !u8i, cir.narrow_char_params} : (!cir.ptr<!u8i>, !cir.ptr<!u8i>, !cir.ptr<!u8i>) -> !cir.ptr<!u8i>
+    %0 = cir.call @_ZSt4findIPhhET_S1_S1_RKT0_(%arg0, %arg1, %arg2) {cir.bool_eq_pred, cir.bool_eq_pred_value = true, cir.byte_eq_pred, cir.byte_eq_pred_value = #cir.int<120> : !u8i, cir.narrow_char_params} : (!cir.ptr<!u8i>, !cir.ptr<!u8i>, !cir.ptr<!u8i>) -> !cir.ptr<!u8i>
     cir.return %0 : !cir.ptr<!u8i>
   }
 // CHECK-LABEL: @f
 // CHECK: llvm.call @_ZSt4findIPhhET_S1_S1_RKT0_
 // CHECK-NOT: cir.byte_eq_pred
+// CHECK-NOT: cir.bool_eq_pred
+// CHECK-NOT: cir.bool_eq_pred_value
 // CHECK-NOT: cir.narrow_char_params
 
   cir.func @g(%arg0: !cir.ptr<!u8i>, %arg1: !cir.ptr<!u8i>, %arg2: !closure) -> !cir.ptr<!u8i> {

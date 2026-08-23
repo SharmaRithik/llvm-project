@@ -60,6 +60,14 @@ def CIR_Dialect : Dialect {
     static llvm::StringRef getByteEqPredValueAttrName() {
       return "cir.byte_eq_pred_value";
     }
+    // Marks a bit iterator predicate that seeks its single boolean capture
+    static llvm::StringRef getBoolEqPredAttrName() {
+      return "cir.bool_eq_pred";
+    }
+    // Marks a bit iterator predicate that seeks the carried boolean constant
+    static llvm::StringRef getBoolEqPredValueAttrName() {
+      return "cir.bool_eq_pred_value";
+    }
     // Set by CIRGen on a call to the predicate overload of std::equal whose
     // three iterators satisfy the narrow character rules above and whose
     // predicate is a capture free lambda proven to be a lone return of a

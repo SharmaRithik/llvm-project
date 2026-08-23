@@ -232,14 +232,52 @@ template <class Iter, class Pred> Iter find_if_not(Iter first, Iter last, Pred p
       break;
   return first;
 }
+
+struct bit_alloc {
+  using word_type = unsigned long;
+  using pointer = word_type *;
+  using const_pointer = const word_type *;
+};
+
+template <class T, class Alloc = bit_alloc> class vector;
+template <class Alloc> class vector<bool, Alloc> {
+public:
+  using __storage_type = typename Alloc::word_type;
+  using __storage_pointer = typename Alloc::pointer;
+  using __const_storage_pointer = typename Alloc::const_pointer;
+};
+
+template <bool, class True, class False> struct __choose;
+template <class True, class False> struct __choose<true, True, False> {
+  using type = True;
+};
+template <class True, class False> struct __choose<false, True, False> {
+  using type = False;
+};
+
+template <class Cp, bool IsConst> class __bit_iterator {
+  using storage_pointer =
+      typename __choose<IsConst, typename Cp::__const_storage_pointer,
+                        typename Cp::__storage_pointer>::type;
+  storage_pointer __seg_;
+  unsigned __ctz_;
+
+public:
+  bool operator!=(const __bit_iterator &) const;
+  __bit_iterator &operator++();
+  bool operator*() const;
+};
 }
 }
+
+using bit_iterator = std::__bit_iterator<std::vector<bool>, false>;
 
 char *find_if_ref_capture(char *first, char *last, const char &value) {
   return std::find_if(first, last, [&](char element) { return element == value; });
 }
 // CHECK-LABEL: cir.func{{.*}} @_Z19find_if_ref_capture
 // CHECK: cir.call @_ZNSt3__17find_ifIPcZ19find_if_ref_capture{{.*}} {{{.*}}cir.byte_eq_pred}
+// CHECK-NOT: cir.bool_eq_pred
 
 char *find_if_value_capture(char *first, char *last, char value) {
   return std::find_if(first, last, [value](char element) { return value == element; });
@@ -450,6 +488,128 @@ char *find_if_functor(char *first, char *last, char value) {
 // CHECK-LABEL: cir.func{{.*}} @_Z15find_if_functor
 // CHECK: cir.call @_ZNSt3__17find_ifIPc9EqFunctorEET_S3_S3_T0_
 // CHECK-NOT: cir.byte_eq_pred
+
+bit_iterator bool_find_if_capture(bit_iterator first, bit_iterator last,
+                                  const bool &value) {
+  return std::find_if(first, last,
+                      [&](bool element) { return element == value; });
+}
+// CHECK-LABEL: cir.func{{.*}} @_Z20bool_find_if_capture
+// CHECK: cir.call @_ZNSt3__17find_ifINS_14__bit_iterator{{.*}} {cir.bool_eq_pred}
+
+bit_iterator bool_find_if_not_capture(bit_iterator first, bit_iterator last,
+                                      const bool &value) {
+  return std::find_if_not(first, last,
+                          [&](bool element) { return element != value; });
+}
+// CHECK-LABEL: cir.func{{.*}} @_Z24bool_find_if_not_capture
+// CHECK: cir.call @_ZNSt3__111find_if_notINS_14__bit_iterator{{.*}} {cir.bool_eq_pred}
+
+bit_iterator bool_find_if_reversed(bit_iterator first, bit_iterator last,
+                                   bool value) {
+  return std::find_if(first, last, [value](const bool &element) {
+    return value == element;
+  });
+}
+// CHECK-LABEL: cir.func{{.*}} @_Z21bool_find_if_reversed
+// CHECK: cir.call @_ZNSt3__17find_ifINS_14__bit_iterator{{.*}} {cir.bool_eq_pred}
+
+bit_iterator bool_find_if_identity(bit_iterator first, bit_iterator last) {
+  return std::find_if(first, last, [](bool element) { return element; });
+}
+// CHECK-LABEL: cir.func{{.*}} @_Z21bool_find_if_identity
+// CHECK: cir.call @_ZNSt3__17find_ifINS_14__bit_iterator{{.*}} {cir.bool_eq_pred_value = true}
+
+bit_iterator bool_find_if_not_identity(bit_iterator first, bit_iterator last) {
+  return std::find_if_not(first, last,
+                          [](bool element) { return element; });
+}
+// CHECK-LABEL: cir.func{{.*}} @_Z25bool_find_if_not_identity
+// CHECK: cir.call @_ZNSt3__111find_if_notINS_14__bit_iterator{{.*}} {cir.bool_eq_pred_value = false}
+
+bit_iterator bool_find_if_negation(bit_iterator first, bit_iterator last) {
+  return std::find_if(first, last, [](bool element) { return !element; });
+}
+// CHECK-LABEL: cir.func{{.*}} @_Z21bool_find_if_negation
+// CHECK: cir.call @_ZNSt3__17find_ifINS_14__bit_iterator{{.*}} {cir.bool_eq_pred_value = false}
+
+bit_iterator bool_find_if_not_negation(bit_iterator first, bit_iterator last) {
+  return std::find_if_not(first, last,
+                          [](bool element) { return !element; });
+}
+// CHECK-LABEL: cir.func{{.*}} @_Z25bool_find_if_not_negation
+// CHECK: cir.call @_ZNSt3__111find_if_notINS_14__bit_iterator{{.*}} {cir.bool_eq_pred_value = true}
+
+bit_iterator bool_find_if_literal(bit_iterator first, bit_iterator last) {
+  return std::find_if(first, last,
+                      [](bool element) { return false != element; });
+}
+// CHECK-LABEL: cir.func{{.*}} @_Z20bool_find_if_literal
+// CHECK: cir.call @_ZNSt3__17find_ifINS_14__bit_iterator{{.*}} {cir.bool_eq_pred_value = true}
+
+bit_iterator bool_find_if_generic(bit_iterator first, bit_iterator last,
+                                  const bool &value) {
+  return std::find_if(first, last,
+                      [&](auto element) { return element == value; });
+}
+// CHECK-LABEL: cir.func{{.*}} @_Z20bool_find_if_generic
+// CHECK: cir.call @_ZNSt3__17find_ifINS_14__bit_iterator{{.*}} {cir.bool_eq_pred}
+
+bit_iterator bool_find_if_not_wrong_polarity(bit_iterator first,
+                                             bit_iterator last,
+                                             const bool &value) {
+  return std::find_if_not(first, last,
+                          [&](bool element) { return element == value; });
+}
+// CHECK-LABEL: cir.func{{.*}} @_Z31bool_find_if_not_wrong_polarity
+// CHECK: cir.call @_ZNSt3__111find_if_notINS_14__bit_iterator
+// CHECK-NOT: cir.bool_eq_pred
+
+bit_iterator bool_find_if_two_captures(bit_iterator first, bit_iterator last,
+                                       bool value, bool other) {
+  return std::find_if(first, last, [value, other](bool element) {
+    return element == value;
+  });
+}
+// CHECK-LABEL: cir.func{{.*}} @_Z25bool_find_if_two_captures
+// CHECK: cir.call @_ZNSt3__17find_ifINS_14__bit_iterator
+// CHECK-NOT: cir.bool_eq_pred
+
+bit_iterator bool_find_if_non_bool_capture(bit_iterator first,
+                                           bit_iterator last, int value) {
+  return std::find_if(first, last,
+                      [value](bool element) { return element == value; });
+}
+// CHECK-LABEL: cir.func{{.*}} @_Z29bool_find_if_non_bool_capture
+// CHECK: cir.call @_ZNSt3__17find_ifINS_14__bit_iterator
+// CHECK-NOT: cir.bool_eq_pred
+
+bit_iterator bool_find_if_explicit_cast(bit_iterator first, bit_iterator last,
+                                        bool value) {
+  return std::find_if(first, last, [value](bool element) {
+    return element == static_cast<bool>(value);
+  });
+}
+// CHECK-LABEL: cir.func{{.*}} @_Z26bool_find_if_explicit_cast
+// CHECK: cir.call @_ZNSt3__17find_ifINS_14__bit_iterator
+// CHECK-NOT: cir.bool_eq_pred
+
+bit_iterator bool_find_if_int_literal(bit_iterator first, bit_iterator last) {
+  return std::find_if(first, last,
+                      [](bool element) { return element == 1; });
+}
+// CHECK-LABEL: cir.func{{.*}} @_Z24bool_find_if_int_literal
+// CHECK: cir.call @_ZNSt3__17find_ifINS_14__bit_iterator
+// CHECK-NOT: cir.bool_eq_pred
+
+bit_iterator bool_find_if_ignored_capture(bit_iterator first,
+                                          bit_iterator last, bool value) {
+  return std::find_if(first, last,
+                      [value](bool element) { return element; });
+}
+// CHECK-LABEL: cir.func{{.*}} @_Z28bool_find_if_ignored_capture
+// CHECK: cir.call @_ZNSt3__17find_ifINS_14__bit_iterator
+// CHECK-NOT: cir.bool_eq_pred
 
 wchar_t *wide_eligible(wchar_t *first, wchar_t *last, const wchar_t &value) {
   return std::find(first, last, value);
