@@ -1498,6 +1498,7 @@ def CIR_KnownFuncKind : CIR_I32EnumAttr<"KnownFuncKind",
   I32EnumAttrCase<"StdRangesFind", 4, "std::ranges::find">,
   I32EnumAttrCase<"StdSearch", 5, "std::search">,
   I32EnumAttrCase<"StdEqual", 6, "std::equal">,
+  I32EnumAttrCase<"StdMismatch", 7, "std::mismatch">,
 ]> {
   let genSpecializedAttr = 0;
   // A name like std::find is not a bare identifier, so print it as a quoted

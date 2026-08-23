@@ -19,6 +19,20 @@ bool equal(Iter1 first1, Iter1 last1, Iter2 first2, Pred pred) {
       return false;
   return true;
 }
+template <class T1, class T2> struct pair {
+  T1 first;
+  T2 second;
+};
+template <class Iter1, class Iter2>
+pair<Iter1, Iter2> mismatch(Iter1 first1, Iter1 last1, Iter2 first2);
+template <class Iter1, class Iter2, class Pred>
+pair<Iter1, Iter2> mismatch(Iter1 first1, Iter1 last1, Iter2 first2,
+                            Pred pred) {
+  for (; first1 != last1; ++first1, ++first2)
+    if (!pred(*first1, *first2))
+      break;
+  return {first1, first2};
+}
 }
 }
 
@@ -602,4 +616,28 @@ bool equal_pred_int(int *first1, int *last1, int *first2) {
 }
 // CHECK-LABEL: cir.func{{.*}} @_Z14equal_pred_int
 // CHECK: cir.call @_ZNSt3__15equalIPiS1_Z14equal_pred_intS1_S1_S1_E3$_0EEbT_S3_T0_T1_
+// CHECK-NOT: cir.elem_eq_binary_pred
+
+bool mismatch_char(char *first1, char *last1, char *first2) {
+  auto r = std::mismatch(first1, last1, first2);
+  return r.first == last1;
+}
+// CHECK-LABEL: cir.func{{.*}} @_Z13mismatch_char
+// CHECK: cir.call @_ZNSt3__18mismatchIPcS1_EENS_4pairIT_T0_EES3_S3_S4_({{.*}}) {cir.narrow_char_params}
+
+bool mismatch_pred_generic(char *first1, char *last1, char *first2) {
+  auto r = std::mismatch(first1, last1, first2,
+                         [](auto a, auto b) { return a == b; });
+  return r.first == last1;
+}
+// CHECK-LABEL: cir.func{{.*}} @_Z21mismatch_pred_generic
+// CHECK: cir.call @_ZNSt3__18mismatchIPcS1_Z21mismatch_pred_genericS1_S1_S1_E3$_0EENS_4pairIT_T0_EES4_S4_S5_T1_({{.*}}) {cir.elem_eq_binary_pred}
+
+bool mismatch_pred_int(int *first1, int *last1, int *first2) {
+  auto r = std::mismatch(first1, last1, first2,
+                         [](int a, int b) { return a == b; });
+  return r.first == last1;
+}
+// CHECK-LABEL: cir.func{{.*}} @_Z17mismatch_pred_int
+// CHECK: cir.call @_ZNSt3__18mismatchIPiS1_Z17mismatch_pred_intS1_S1_S1_E3$_0EENS_4pairIT_T0_EES4_S4_S5_T1_
 // CHECK-NOT: cir.elem_eq_binary_pred

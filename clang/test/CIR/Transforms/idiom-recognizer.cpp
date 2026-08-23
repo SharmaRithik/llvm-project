@@ -32,6 +32,16 @@ template <class Iter1, class Iter2>
 __attribute__((pure)) bool equal(Iter1, Iter1, Iter2, Iter2) noexcept;
 template <class Iter1, class Iter2, class Pred>
 __attribute__((pure)) bool equal(Iter1, Iter1, Iter2, Pred) noexcept;
+template <class T1, class T2> struct pair {
+  T1 first;
+  T2 second;
+};
+template <class Iter1, class Iter2>
+__attribute__((pure)) pair<Iter1, Iter2> mismatch(Iter1, Iter1,
+                                                  Iter2) noexcept;
+template <class Iter1, class Iter2, class Pred>
+__attribute__((pure)) pair<Iter1, Iter2> mismatch(Iter1, Iter1, Iter2,
+                                                  Pred) noexcept;
 // Real std::identity is empty and call convention lowering drops an
 // empty record argument, so this one carries a byte to keep the
 // projection operand visible in the lowered call.
@@ -152,6 +162,29 @@ bool test_equal_predicate(char *first1, char *last1, char *first2,
 // RAISED-NOT: cir.elem_eq_binary_pred
 // FINAL-LABEL: @_Z20test_equal_predicatePcS_S_14EqualPredicate
 // FINAL: cir.call @_ZSt5equalIPcS0_14EqualPredicateEbT_S2_T0_T1_(%{{.*}}, %{{.*}}, %{{.*}}, %{{.*}})
+
+bool test_mismatch(char *first1, char *last1, char *first2) {
+  auto r = std::mismatch(first1, last1, first2);
+  return r.first == last1;
+}
+// RAISED-LABEL: @_Z13test_mismatchPcS_S_
+// RAISED: cir.std.mismatch(%{{.*}} : !cir.ptr<!{{[su]8i}}>, %{{.*}} : !cir.ptr<!{{[su]8i}}>, %{{.*}} : !cir.ptr<!{{[su]8i}}>, @_ZSt8mismatchIPcS0_ESt4pairIT_T0_ES2_S2_S3_) -> !rec_std3A3Apair3Cchar_2A2C_char_2A3E
+// RAISED-SAME: cir.narrow_char_params
+// FINAL-LABEL: @_Z13test_mismatchPcS_S_
+// FINAL: cir.call @_ZSt8mismatchIPcS0_ESt4pairIT_T0_ES2_S2_S3_(%{{.*}}, %{{.*}}, %{{.*}})
+
+bool test_mismatch_predicate(char *first1, char *last1, char *first2,
+                             EqualPredicate pred) {
+  auto r = std::mismatch(first1, last1, first2, pred);
+  return r.first == last1;
+}
+// The predicate overload raises with no marker since only CIRGen's lambda
+// proof attaches one, and an unmarked operation lowers back to the call.
+// RAISED-LABEL: @_Z23test_mismatch_predicatePcS_S_14EqualPredicate
+// RAISED: cir.std.mismatch_pred(%{{.*}} : !cir.ptr<!{{[su]8i}}>, %{{.*}} : !cir.ptr<!{{[su]8i}}>, %{{.*}} : !cir.ptr<!{{[su]8i}}>, %{{.*}} : !rec_EqualPredicate, @_ZSt8mismatchIPcS0_14EqualPredicateESt4pairIT_T0_ES3_S3_S4_T1_) -> !rec_std3A3Apair3Cchar_2A2C_char_2A3E
+// RAISED-NOT: cir.elem_eq_binary_pred
+// FINAL-LABEL: @_Z23test_mismatch_predicatePcS_S_14EqualPredicate
+// FINAL: cir.call @_ZSt8mismatchIPcS0_14EqualPredicateESt4pairIT_T0_ES3_S3_S4_T1_(%{{.*}}, %{{.*}}, %{{.*}}, %{{.*}})
 
 unsigned char *test_ranges_find(unsigned char *first, unsigned char *last,
                                 const unsigned char &value) {
