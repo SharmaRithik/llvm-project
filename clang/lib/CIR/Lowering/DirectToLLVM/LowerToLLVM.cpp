@@ -2168,6 +2168,7 @@ static void lowerCallAttributes(cir::CIRCallOpInterface op,
         attr.getName() == CIRDialect::getWideCharParamsAttrName() ||
         attr.getName() == CIRDialect::getByteEqPredAttrName() ||
         attr.getName() == CIRDialect::getByteEqPredValueAttrName() ||
+        attr.getName() == CIRDialect::getElemEqBinaryPredAttrName() ||
         attr.getName() == CIRDialect::getMustTailAttrName())
       continue;
 

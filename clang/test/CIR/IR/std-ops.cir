@@ -16,6 +16,7 @@ module {
   cir.func private @_ZNKSt3__16ranges6__findcl(!cir.ptr<!cpo>, !cir.ptr<!s8i>, !cir.ptr<!s8i>, !cir.ptr<!s8i>, !identity) -> !cir.ptr<!s8i>
   cir.func private @_ZNKSt3__16ranges6__findclR(!cir.ptr<!cpo>, !cir.ptr<!vec>, !cir.ptr<!s8i>, !identity) -> !cir.ptr<!s8i>
   cir.func private @_ZSt5equal(!cir.ptr<!s8i>, !cir.ptr<!s8i>, !cir.ptr<!s8i>) -> !cir.bool
+  cir.func private @_ZSt5equalP(!cir.ptr<!s8i>, !cir.ptr<!s8i>, !cir.ptr<!s8i>, !closure) -> !cir.bool
   cir.func private @strlen(!cir.ptr<!s8i>) -> !u64i
 
   cir.func @test_find(%first: !cir.ptr<!s8i>, %last: !cir.ptr<!s8i>, %value: !cir.ptr<!s8i>) -> !cir.ptr<!s8i> {
@@ -52,6 +53,13 @@ module {
   }
   // CHECK: cir.func @test_equal(%[[EFIRST:.*]]: !cir.ptr<!s8i>, %[[ELAST:.*]]: !cir.ptr<!s8i>, %[[ESECOND:.*]]: !cir.ptr<!s8i>)
   // CHECK: cir.std.equal(%[[EFIRST]] : !cir.ptr<!s8i>, %[[ELAST]] : !cir.ptr<!s8i>, %[[ESECOND]] : !cir.ptr<!s8i>, @_ZSt5equal) -> !cir.bool
+
+  cir.func @test_equal_pred(%first1: !cir.ptr<!s8i>, %last1: !cir.ptr<!s8i>, %first2: !cir.ptr<!s8i>, %pred: !closure) -> !cir.bool {
+    %0 = cir.std.equal_pred(%first1 : !cir.ptr<!s8i>, %last1 : !cir.ptr<!s8i>, %first2 : !cir.ptr<!s8i>, %pred : !closure, @_ZSt5equalP) -> !cir.bool
+    cir.return %0 : !cir.bool
+  }
+  // CHECK: cir.func @test_equal_pred(%[[PFIRST:.*]]: !cir.ptr<!s8i>, %[[PLAST:.*]]: !cir.ptr<!s8i>, %[[PSECOND:.*]]: !cir.ptr<!s8i>, %[[PPRED:.*]]: !rec_Closure)
+  // CHECK: cir.std.equal_pred(%[[PFIRST]] : !cir.ptr<!s8i>, %[[PLAST]] : !cir.ptr<!s8i>, %[[PSECOND]] : !cir.ptr<!s8i>, %[[PPRED]] : !rec_Closure, @_ZSt5equalP) -> !cir.bool
 
   cir.func @test_ranges_find(%cpo: !cir.ptr<!cpo>, %first: !cir.ptr<!s8i>, %last: !cir.ptr<!s8i>, %value: !cir.ptr<!s8i>, %proj: !identity) -> !cir.ptr<!s8i> {
     %0 = cir.std.ranges.find(%cpo : !cir.ptr<!cpo>, %first : !cir.ptr<!s8i>, %last : !cir.ptr<!s8i>, %value : !cir.ptr<!s8i>, %proj : !identity, @_ZNKSt3__16ranges6__findcl) -> !cir.ptr<!s8i>

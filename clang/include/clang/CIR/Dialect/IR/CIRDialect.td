@@ -60,6 +60,13 @@ def CIR_Dialect : Dialect {
     static llvm::StringRef getByteEqPredValueAttrName() {
       return "cir.byte_eq_pred_value";
     }
+    // Set by CIRGen on a call to the predicate overload of std::equal whose
+    // three iterators satisfy the narrow character rules above and whose
+    // predicate is a capture free lambda proven to be a lone return of a
+    // builtin equality of its two parameters.
+    static llvm::StringRef getElemEqBinaryPredAttrName() {
+      return "cir.elem_eq_binary_pred";
+    }
     // The wide sibling of cir.narrow_char_params, set when the same rules
     // hold over the target's wchar_t instead of a narrow character.
     static llvm::StringRef getWideCharParamsAttrName() {

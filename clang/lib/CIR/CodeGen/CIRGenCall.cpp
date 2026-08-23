@@ -397,6 +397,9 @@ void CIRGenModule::constructAttributeList(
             addUnitAttr(cir::CIRDialect::getByteEqPredAttrName());
           else if (cir::IntAttr value = getByteEqPredicateValue(func, *kind))
             attrs.set(cir::CIRDialect::getByteEqPredValueAttrName(), value);
+        } else if (kind == cir::KnownFuncKind::StdEqual &&
+                   hasElemEqBinaryPredicate(func)) {
+          addUnitAttr(cir::CIRDialect::getElemEqBinaryPredAttrName());
         }
       }
 

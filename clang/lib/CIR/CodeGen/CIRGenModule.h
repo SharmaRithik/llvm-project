@@ -853,6 +853,11 @@ public:
   cir::IntAttr getByteEqPredicateValue(const clang::FunctionDecl *funcDecl,
                                        cir::KnownFuncKind kind);
 
+  /// Whether the predicate overload of std::equal takes three narrow
+  /// character iterators over one character type and a capture free lambda
+  /// whose body is a lone return comparing its two parameters for equality.
+  static bool hasElemEqBinaryPredicate(const clang::FunctionDecl *funcDecl);
+
   cir::FuncOp createRuntimeFunction(cir::FuncType ty, llvm::StringRef name,
                                     mlir::NamedAttrList extraAttrs = {},
                                     bool isLocal = false,

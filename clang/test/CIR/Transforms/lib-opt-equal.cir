@@ -494,3 +494,57 @@ module attributes {cir.triple = "x86_64-unknown-linux-gnu",
 // CHECK-LABEL: cir.global external @equal_in_ctor = ctor
 // CHECK-NOT: cir.std.equal
 // CHECK: cir.libc.memcmp
+
+// -----
+
+!u8i = !cir.int<u, 8>
+!pred_closure = !cir.struct<class "PredClosure" {data !u8i}>
+!wrap = !cir.struct<class "wrap_iter" {data !cir.ptr<!u8i>}>
+
+module attributes {cir.triple = "x86_64-unknown-linux-gnu",
+                   cir.int_type_width = 32 : i32,
+                   cir.size_type_width = 64 : i32} {
+  cir.func private @_ZSt5equalP(!cir.ptr<!u8i>, !cir.ptr<!u8i>, !cir.ptr<!u8i>, !pred_closure) -> !cir.bool func_info<#cir.func_identity<"std::equal">>
+
+  cir.func @transforms_pred(%first1: !cir.ptr<!u8i>, %last1: !cir.ptr<!u8i>, %first2: !cir.ptr<!u8i>, %pred: !pred_closure) -> !cir.bool {
+    %0 = cir.std.equal_pred(%first1 : !cir.ptr<!u8i>, %last1 : !cir.ptr<!u8i>, %first2 : !cir.ptr<!u8i>, %pred : !pred_closure, @_ZSt5equalP) -> !cir.bool {cir.elem_eq_binary_pred}
+    cir.return %0 : !cir.bool
+  }
+// CHECK-LABEL: @transforms_pred
+// CHECK: cir.libc.memcmp
+// CHECK-NOT: cir.std.equal_pred
+
+  cir.func @keeps_unmarked_pred(%first1: !cir.ptr<!u8i>, %last1: !cir.ptr<!u8i>, %first2: !cir.ptr<!u8i>, %pred: !pred_closure) -> !cir.bool {
+    %0 = cir.std.equal_pred(%first1 : !cir.ptr<!u8i>, %last1 : !cir.ptr<!u8i>, %first2 : !cir.ptr<!u8i>, %pred : !pred_closure, @_ZSt5equalP) -> !cir.bool
+    cir.return %0 : !cir.bool
+  }
+// The unit marker carries the lambda proof, so its absence declines even
+// though the shape is right.
+// CHECK-LABEL: @keeps_unmarked_pred
+// CHECK: cir.std.equal_pred
+// CHECK-NOT: cir.libc.memcmp
+
+  cir.func @keeps_narrow_marked_pred(%first1: !cir.ptr<!u8i>, %last1: !cir.ptr<!u8i>, %first2: !cir.ptr<!u8i>, %pred: !pred_closure) -> !cir.bool {
+    %0 = cir.std.equal_pred(%first1 : !cir.ptr<!u8i>, %last1 : !cir.ptr<!u8i>, %first2 : !cir.ptr<!u8i>, %pred : !pred_closure, @_ZSt5equalP) -> !cir.bool {cir.narrow_char_params}
+    cir.return %0 : !cir.bool
+  }
+// The iterator marker alone says nothing about the predicate body, and the
+// four iterator overload raises with exactly this shape when its iterators
+// are wrapper records, with last2 riding in the predicate operand.
+// CHECK-LABEL: @keeps_narrow_marked_pred
+// CHECK: cir.std.equal_pred
+// CHECK-NOT: cir.libc.memcmp
+
+  cir.func private @_ZSt5equalW(!wrap, !wrap, !wrap, !wrap) -> !cir.bool func_info<#cir.func_identity<"std::equal">>
+
+  cir.func @keeps_four_iterator_shape(%first1: !wrap, %last1: !wrap, %first2: !wrap, %last2: !wrap) -> !cir.bool {
+    %0 = cir.std.equal_pred(%first1 : !wrap, %last1 : !wrap, %first2 : !wrap, %last2 : !wrap, @_ZSt5equalW) -> !cir.bool {cir.narrow_char_params}
+    cir.return %0 : !cir.bool
+  }
+// The four iterator overload over wrapper records lands here with the
+// iterator marker. Rewriting it would read only one range's length, so it
+// must stay a call.
+// CHECK-LABEL: @keeps_four_iterator_shape
+// CHECK: cir.std.equal_pred
+// CHECK-NOT: cir.libc.memcmp
+}

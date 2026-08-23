@@ -13,7 +13,12 @@ bool equal(Iter1 first1, Iter1 last1, Iter2 first2);
 template <class Iter1, class Iter2>
 bool equal(Iter1 first1, Iter1 last1, Iter2 first2, Iter2 last2);
 template <class Iter1, class Iter2, class Pred>
-bool equal(Iter1 first1, Iter1 last1, Iter2 first2, Pred pred);
+bool equal(Iter1 first1, Iter1 last1, Iter2 first2, Pred pred) {
+  for (; first1 != last1; ++first1, ++first2)
+    if (!pred(*first1, *first2))
+      return false;
+  return true;
+}
 }
 }
 
@@ -548,3 +553,53 @@ volatile char *search_volatile(volatile char *first1, volatile char *last1,
 // CHECK-LABEL: cir.func{{.*}} @_Z15search_volatilePVcS0_S0_S0_
 // CHECK: cir.call @_ZNSt3__16searchIPVcS2_EET_S3_S3_T0_S4_
 // CHECK-NOT: cir.narrow_char_params
+
+bool equal_pred_generic(char *first1, char *last1, char *first2) {
+  return std::equal(first1, last1, first2,
+                    [](auto a, auto b) { return a == b; });
+}
+// CHECK-LABEL: cir.func{{.*}} @_Z18equal_pred_generic
+// CHECK: cir.call @_ZNSt3__15equalIPcS1_Z18equal_pred_genericS1_S1_S1_E3$_0EEbT_S3_T0_T1_({{.*}}) {cir.elem_eq_binary_pred}
+
+bool equal_pred_reversed(unsigned char *first1, unsigned char *last1,
+                         unsigned char *first2) {
+  return std::equal(first1, last1, first2,
+                    [](unsigned char a, unsigned char b) { return b == a; });
+}
+// CHECK-LABEL: cir.func{{.*}} @_Z19equal_pred_reversed
+// CHECK: cir.call @_ZNSt3__15equalIPhS1_Z19equal_pred_reversedS1_S1_S1_E3$_0EEbT_S3_T0_T1_({{.*}}) {cir.elem_eq_binary_pred}
+
+bool equal_pred_capturing(char *first1, char *last1, char *first2, char x) {
+  return std::equal(first1, last1, first2,
+                    [x](char a, char b) { return a == b && a != x; });
+}
+// The capture carries state the pure equality proof cannot cover.
+// CHECK-LABEL: cir.func{{.*}} @_Z20equal_pred_capturing
+// CHECK: cir.call @_ZNSt3__15equalIPcS1_Z20equal_pred_capturingS1_S1_S1_cE3$_0EEbT_S3_T0_T1_
+// CHECK-NOT: cir.elem_eq_binary_pred
+
+bool equal_pred_inequality(char *first1, char *last1, char *first2) {
+  return std::equal(first1, last1, first2,
+                    [](char a, char b) { return a != b; });
+}
+// CHECK-LABEL: cir.func{{.*}} @_Z21equal_pred_inequality
+// CHECK: cir.call @_ZNSt3__15equalIPcS1_Z21equal_pred_inequalityS1_S1_S1_E3$_0EEbT_S3_T0_T1_
+// CHECK-NOT: cir.elem_eq_binary_pred
+
+bool equal_pred_cast(char *first1, char *last1, char *first2) {
+  return std::equal(first1, last1, first2,
+                    [](char a, char b) { return a == (unsigned char)b; });
+}
+// The explicit cast changes the comparison at values above 0x7f, so the
+// proof must not look through it.
+// CHECK-LABEL: cir.func{{.*}} @_Z15equal_pred_cast
+// CHECK: cir.call @_ZNSt3__15equalIPcS1_Z15equal_pred_castS1_S1_S1_E3$_0EEbT_S3_T0_T1_
+// CHECK-NOT: cir.elem_eq_binary_pred
+
+bool equal_pred_int(int *first1, int *last1, int *first2) {
+  return std::equal(first1, last1, first2,
+                    [](int a, int b) { return a == b; });
+}
+// CHECK-LABEL: cir.func{{.*}} @_Z14equal_pred_int
+// CHECK: cir.call @_ZNSt3__15equalIPiS1_Z14equal_pred_intS1_S1_S1_E3$_0EEbT_S3_T0_T1_
+// CHECK-NOT: cir.elem_eq_binary_pred

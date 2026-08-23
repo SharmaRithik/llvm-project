@@ -145,10 +145,13 @@ bool test_equal_predicate(char *first1, char *last1, char *first2,
                           EqualPredicate pred) {
   return std::equal(first1, last1, first2, pred);
 }
+// The predicate overload raises with no marker since only CIRGen's lambda
+// proof attaches one, and an unmarked operation lowers back to the call.
 // RAISED-LABEL: @_Z20test_equal_predicatePcS_S_14EqualPredicate
-// RAISED-NOT: cir.std.equal
-// RAISED: cir.call @_ZSt5equalIPcS0_14EqualPredicateEbT_S2_T0_T1_
-// RAISED-NOT: cir.narrow_char_params
+// RAISED: cir.std.equal_pred(%{{.*}} : !cir.ptr<!{{[su]8i}}>, %{{.*}} : !cir.ptr<!{{[su]8i}}>, %{{.*}} : !cir.ptr<!{{[su]8i}}>, %{{.*}} : !rec_EqualPredicate, @_ZSt5equalIPcS0_14EqualPredicateEbT_S2_T0_T1_) -> !cir.bool
+// RAISED-NOT: cir.elem_eq_binary_pred
+// FINAL-LABEL: @_Z20test_equal_predicatePcS_S_14EqualPredicate
+// FINAL: cir.call @_ZSt5equalIPcS0_14EqualPredicateEbT_S2_T0_T1_(%{{.*}}, %{{.*}}, %{{.*}}, %{{.*}})
 
 unsigned char *test_ranges_find(unsigned char *first, unsigned char *last,
                                 const unsigned char &value) {
