@@ -40,3 +40,11 @@
 
 // expected-error@below {{a contiguous container identity requires the begin and end roles}}
 !bad = !cir.struct<"missing_role" {data !cir.ptr<!s8i>}, std_type_info = #cir.std_type_info<"std::vector", !s8i, roles {begin = array<i32: 0>}>>
+
+// -----
+
+!u64i = !cir.int<u, 64>
+!u32i = !cir.int<u, 32>
+
+// expected-error@below {{a bit iterator identity requires the word_pointer and bit_offset roles}}
+!bad = !cir.struct<"missing_bit_role" {data !cir.ptr<!u64i>, data !u32i}, std_type_info = #cir.std_type_info<"std::bit_iterator", !cir.bool, roles {word_pointer = array<i32: 0>}>>
