@@ -231,12 +231,12 @@ static void rewriteFindLikeToMemchr(OpT findOp,
     if (!rangeInfo || rangeInfo.getKind() != cir::StdTypeKind::StdVector ||
         rangeInfo.getElement() != mlir::Type(elemTy))
       return;
-    auto pathLandsOnIter = [&](llvm::ArrayRef<uint32_t> path) {
+    auto pathLandsOnIter = [&](llvm::ArrayRef<int32_t> path) {
       return cir::StdTypeInfoAttr::resolvePath(rangeRecTy, path) ==
              mlir::Type(iterTy);
     };
-    if (!pathLandsOnIter(rangeInfo.getBeginPath()) ||
-        !pathLandsOnIter(rangeInfo.getEndPath()))
+    if (!pathLandsOnIter(rangeInfo.getRolePath("begin")) ||
+        !pathLandsOnIter(rangeInfo.getRolePath("end")))
       return;
   }
 
@@ -300,7 +300,7 @@ static void rewriteFindLikeToMemchr(OpT findOp,
   if constexpr (rangeOp) {
     // The same walk that licensed the paths supplies each step's member
     // type here, so the emitted accesses cannot drift from the proof.
-    auto loadBound = [&](llvm::ArrayRef<uint32_t> path) {
+    auto loadBound = [&](llvm::ArrayRef<int32_t> path) {
       llvm::SmallVector<mlir::Type, 4> steps;
       cir::StdTypeInfoAttr::resolvePath(rangeRecTy, path, &steps);
       mlir::Value addr = findOp.getRange();
@@ -310,8 +310,8 @@ static void rewriteFindLikeToMemchr(OpT findOp,
                                         /*name=*/"", /*index=*/idx);
       return builder.createLoad(loc, addr);
     };
-    first = loadBound(rangeInfo.getBeginPath());
-    last = loadBound(rangeInfo.getEndPath());
+    first = loadBound(rangeInfo.getRolePath("begin"));
+    last = loadBound(rangeInfo.getRolePath("end"));
   } else {
     first = findOp.getFirst();
     last = findOp.getLast();

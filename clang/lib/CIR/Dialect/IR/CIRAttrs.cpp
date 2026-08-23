@@ -89,19 +89,66 @@ using namespace cir;
 
 mlir::Type
 cir::StdTypeInfoAttr::resolvePath(cir::RecordType root,
-                                  llvm::ArrayRef<uint32_t> path,
+                                  llvm::ArrayRef<int32_t> path,
                                   llvm::SmallVectorImpl<mlir::Type> *steps) {
   mlir::Type ty = root;
-  for (uint32_t idx : path) {
+  for (int32_t idx : path) {
     auto rec = mlir::dyn_cast<cir::RecordType>(ty);
-    if (!rec || rec.isUnion() || !rec.isComplete() ||
-        idx >= rec.getMembers().size())
+    if (!rec || rec.isUnion() || !rec.isComplete() || idx < 0 ||
+        (size_t)idx >= rec.getMembers().size())
       return {};
     ty = rec.getMembers()[idx];
     if (steps)
       steps->push_back(ty);
   }
   return ty;
+}
+
+llvm::ArrayRef<int32_t>
+cir::StdTypeInfoAttr::getRolePath(llvm::StringRef role) const {
+  auto path =
+      mlir::dyn_cast_if_present<mlir::DenseI32ArrayAttr>(getRoles().get(role));
+  return path ? path.asArrayRef() : llvm::ArrayRef<int32_t>();
+}
+
+mlir::Type cir::StdTypeInfoAttr::resolveRole(
+    cir::RecordType root, llvm::StringRef role,
+    llvm::SmallVectorImpl<mlir::Type> *steps) const {
+  if (!getRoles().get(role))
+    return {};
+  return resolvePath(root, getRolePath(role), steps);
+}
+
+mlir::DictionaryAttr
+cir::StdTypeInfoAttr::getContiguousRoles(mlir::MLIRContext *ctx,
+                                         llvm::ArrayRef<int32_t> beginPath,
+                                         llvm::ArrayRef<int32_t> endPath) {
+  mlir::Builder builder(ctx);
+  return builder.getDictionaryAttr(
+      {builder.getNamedAttr("begin", builder.getDenseI32ArrayAttr(beginPath)),
+       builder.getNamedAttr("end", builder.getDenseI32ArrayAttr(endPath))});
+}
+
+mlir::LogicalResult cir::StdTypeInfoAttr::verify(
+    llvm::function_ref<mlir::InFlightDiagnostic()> emitError,
+    cir::StdTypeKind kind, mlir::Type element, mlir::DictionaryAttr roles) {
+  for (mlir::NamedAttribute role : roles) {
+    auto path = mlir::dyn_cast<mlir::DenseI32ArrayAttr>(role.getValue());
+    if (!path)
+      return emitError() << "role " << role.getName()
+                         << " must carry a dense i32 member index path";
+    for (int32_t idx : path.asArrayRef())
+      if (idx < 0)
+        return emitError() << "role " << role.getName()
+                           << " has a negative member index";
+  }
+  // Each kind names the roles its consumers rely on, so their absence is a
+  // construction error rather than a consumer decline.
+  if (kind == cir::StdTypeKind::StdVector &&
+      (!roles.get("begin") || !roles.get("end")))
+    return emitError() << "a contiguous container identity requires the "
+                          "begin and end roles";
+  return mlir::success();
 }
 
 //===----------------------------------------------------------------------===//

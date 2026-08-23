@@ -244,7 +244,7 @@ bool CIRGenModule::isPaddedAtomicType(const AtomicType *type) {
 /// index of every step to `path`.
 bool CIRGenTypes::findFieldPath(const clang::RecordDecl *rd,
                                 llvm::StringRef name,
-                                llvm::SmallVectorImpl<uint32_t> &path) {
+                                llvm::SmallVectorImpl<int32_t> &path) {
   const CIRGenRecordLayout &layout = getCIRGenRecordLayout(rd);
   for (const clang::FieldDecl *field : rd->fields()) {
     if (field->isBitField() || !layout.hasCIRField(field))
@@ -333,12 +333,12 @@ void CIRGenTypes::attachStdTypeInfo(const clang::RecordDecl *rd,
 
   mlir::Type elemTy = convertType(elemQt);
   auto elemPtrTy = cir::PointerType::get(elemTy);
-  auto memberAt = [&](llvm::ArrayRef<uint32_t> path) {
+  auto memberAt = [&](llvm::ArrayRef<int32_t> path) {
     return cir::StdTypeInfoAttr::resolvePath(structTy, path);
   };
 
   for (const auto &names : boundsNames) {
-    llvm::SmallVector<uint32_t, 4> beginPath, endPath;
+    llvm::SmallVector<int32_t, 4> beginPath, endPath;
     if (!findFieldPath(rd, names.begin, beginPath) ||
         !findFieldPath(rd, names.end, endPath))
       continue;
@@ -350,8 +350,9 @@ void CIRGenTypes::attachStdTypeInfo(const clang::RecordDecl *rd,
         memberAt(beginPath) != elemPtrTy || memberAt(endPath) != elemPtrTy)
       continue;
     structTy.setStdTypeInfo(cir::StdTypeInfoAttr::get(
-        &getMLIRContext(), cir::StdTypeKind::StdVector, elemTy, beginPath,
-        endPath));
+        &getMLIRContext(), cir::StdTypeKind::StdVector, elemTy,
+        cir::StdTypeInfoAttr::getContiguousRoles(&getMLIRContext(), beginPath,
+                                                 endPath)));
     return;
   }
 }

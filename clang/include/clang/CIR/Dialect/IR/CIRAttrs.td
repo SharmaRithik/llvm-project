@@ -1635,13 +1635,13 @@ def CIR_StdTypeInfoAttr : CIR_Attr<"StdTypeInfo", "std_type_info"> {
     the member layout the roles describe, and a consumer owns proving
     everything else it needs.
 
-    `element` is the type of the objects the container owns. `begin_path`
-    and `end_path` are member index paths from the record to the two
-    pointers bounding the owned storage, since an implementation may nest
-    them inside implementation detail records. The paths are the roles a
-    contiguous container kind carries; another kind of type would carry
-    the roles its consumers need instead, with `kind` and `element` as
-    the common core.
+    `element` is the type of the objects the container owns. `roles` maps
+    each role name a kind carries to a member index path from the record
+    to that role's field, since an implementation may nest the fields
+    inside implementation detail records. A contiguous container kind
+    carries `begin` and `end`, the two pointers bounding the owned
+    storage. Another kind carries the roles its consumers need instead,
+    with `kind` and `element` as the common core.
 
     A consumer has to run before ABI lowering rewrites record types,
     which re-creates records and carries the identity over but may
@@ -1651,22 +1651,22 @@ def CIR_StdTypeInfoAttr : CIR_Attr<"StdTypeInfo", "std_type_info"> {
     Example:
     ```
     #cir.std_type_info<"std::vector", !s8i,
-                       begin [0, 0], end [0, 1]>
+                       roles {begin = array<i32: 0, 0>,
+                              end = array<i32: 0, 1>}>
     ```
   }];
 
   let parameters = (ins
     EnumParameter<CIR_StdTypeKind>:$kind,
     "mlir::Type":$element,
-    ArrayRefParameter<"uint32_t">:$begin_path,
-    ArrayRefParameter<"uint32_t">:$end_path
+    "mlir::DictionaryAttr":$roles
   );
 
   let assemblyFormat = [{
-    `<` $kind `,` $element `,`
-    `begin` `` `[` $begin_path `]` `,`
-    `end` `` `[` $end_path `]` `>`
+    `<` $kind `,` $element `,` `roles` $roles `>`
   }];
+
+  let genVerifyDecl = 1;
 
   let extraClassDeclaration = [{
     /// The member type a path resolves to through `root`, walking complete
@@ -1675,8 +1675,25 @@ def CIR_StdTypeInfoAttr : CIR_Attr<"StdTypeInfo", "std_type_info"> {
     /// so a consumer emitting member accesses uses the same walk that
     /// validated the path.
     static mlir::Type
-    resolvePath(cir::RecordType root, llvm::ArrayRef<uint32_t> path,
+    resolvePath(cir::RecordType root, llvm::ArrayRef<int32_t> path,
                 llvm::SmallVectorImpl<mlir::Type> *steps = nullptr);
+
+    /// The recorded member index path of `role`, or empty when this
+    /// identity does not carry it.
+    llvm::ArrayRef<int32_t> getRolePath(llvm::StringRef role) const;
+
+    /// resolvePath applied to the recorded path of `role`, or null when
+    /// the identity does not carry the role.
+    mlir::Type
+    resolveRole(cir::RecordType root, llvm::StringRef role,
+                llvm::SmallVectorImpl<mlir::Type> *steps = nullptr) const;
+
+    /// Builds the roles dictionary of a contiguous container kind from
+    /// its two bounding pointer paths.
+    static mlir::DictionaryAttr
+    getContiguousRoles(mlir::MLIRContext *ctx,
+                       llvm::ArrayRef<int32_t> beginPath,
+                       llvm::ArrayRef<int32_t> endPath);
   }];
 
   let canHaveIllegalCXXABIType = 0;

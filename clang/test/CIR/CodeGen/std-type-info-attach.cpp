@@ -10,9 +10,9 @@
 // and the GNU shape keeps them in a base class chain like libstdc++. The
 // identity is attached by field name, so each shape proves its own path,
 // and the wide element instantiation gets none.
-// CHECK: std_type_info = #cir.std_type_info<"std::vector", !s8i, begin[0, 0], end[0, 1]>
+// CHECK: std_type_info = #cir.std_type_info<"std::vector", !s8i, roles {begin = array<i32: 0, 0>, end = array<i32: 0, 1>}>
 // CHECK-NOT: #cir.std_type_info<"std::vector", !s32i
-// GNU: std_type_info = #cir.std_type_info<"std::vector", !s8i, begin[0, 0, 0, 0], end[0, 0, 0, 1]>
+// GNU: std_type_info = #cir.std_type_info<"std::vector", !s8i, roles {begin = array<i32: 0, 0, 0, 0>, end = array<i32: 0, 0, 0, 1>}>
 // GNU-NOT: #cir.std_type_info<"std::vector", !s32i
 // PARTIAL-NOT: std_type_info
 
