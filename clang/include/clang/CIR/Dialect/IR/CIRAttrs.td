@@ -1551,6 +1551,9 @@ def CIR_FuncInfoAttr : AnyAttrOf<[
 def CIR_StdTypeKind : CIR_I32EnumAttr<"StdTypeKind",
     "known standard library type", [
   I32EnumAttrCase<"StdVector", 1, "std::vector">,
+  // No library spells this name. It denotes the abstract kind the two
+  // verified vector<bool> iterator representations share.
+  I32EnumAttrCase<"StdBitIterator", 2, "std::bit_iterator">,
 ]> {
   let genSpecializedAttr = 0;
   // A name like std::vector is not a bare identifier, so print it as a
@@ -1576,6 +1579,8 @@ def CIR_StdTypeInfoAttr : CIR_Attr<"StdTypeInfo", "std_type_info"> {
     carries `begin` and `end`, the two pointers bounding the owned
     storage. Another kind carries the roles its consumers need instead,
     with `kind` and `element` as the common core.
+    A bit iterator carries `word_pointer` and `bit_offset`, which locate
+    its storage word pointer and the offset within that word.
 
     A consumer has to run before ABI lowering rewrites record types,
     which re-creates records and carries the identity over but may
@@ -1628,6 +1633,13 @@ def CIR_StdTypeInfoAttr : CIR_Attr<"StdTypeInfo", "std_type_info"> {
     getContiguousRoles(mlir::MLIRContext *ctx,
                        llvm::ArrayRef<int32_t> beginPath,
                        llvm::ArrayRef<int32_t> endPath);
+
+    /// Builds the roles dictionary of a bit iterator from its storage word
+    /// pointer and bit offset paths.
+    static mlir::DictionaryAttr
+    getBitIteratorRoles(mlir::MLIRContext *ctx,
+                        llvm::ArrayRef<int32_t> wordPointerPath,
+                        llvm::ArrayRef<int32_t> bitOffsetPath);
   }];
 
   let canHaveIllegalCXXABIType = 0;

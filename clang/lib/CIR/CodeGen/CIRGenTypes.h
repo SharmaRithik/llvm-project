@@ -142,6 +142,11 @@ public:
   /// Attach the standard library identity to a completed record type when
   /// the declaration names a known std type with a recognized layout.
   void attachStdTypeInfo(const clang::RecordDecl *rd, cir::RecordType entry);
+  void
+  attachStdVectorTypeInfo(const clang::ClassTemplateSpecializationDecl *spec,
+                          cir::StructType structTy);
+  void attachStdBitIteratorTypeInfo(const clang::RecordDecl *rd,
+                                    cir::StructType structTy);
   bool findFieldPath(const clang::RecordDecl *rd, llvm::StringRef name,
                      llvm::SmallVectorImpl<int32_t> &path);
 

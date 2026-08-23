@@ -293,14 +293,10 @@ bool CIRGenTypes::findFieldPath(const clang::RecordDecl *rd,
 /// implementation uses. The names pin the begin and end roles, so member
 /// order proves nothing here, and a layout matching no known implementation
 /// gets no identity. Rewrites re-verify the member types behind the paths.
-void CIRGenTypes::attachStdTypeInfo(const clang::RecordDecl *rd,
-                                    cir::RecordType entry) {
-  auto structTy = mlir::dyn_cast<cir::StructType>(mlir::Type(entry));
-  if (!structTy || structTy.getStdTypeInfo())
-    return;
-
-  const auto *spec = dyn_cast<clang::ClassTemplateSpecializationDecl>(rd);
-  if (!spec || !spec->isInStdNamespace() || !spec->getIdentifier() ||
+void CIRGenTypes::attachStdVectorTypeInfo(
+    const clang::ClassTemplateSpecializationDecl *spec,
+    cir::StructType structTy) {
+  if (!spec->isInStdNamespace() || !spec->getIdentifier() ||
       spec->getName() != "vector")
     return;
   // A program may legally specialize std::vector for a program defined
@@ -339,8 +335,8 @@ void CIRGenTypes::attachStdTypeInfo(const clang::RecordDecl *rd,
 
   for (const auto &names : boundsNames) {
     llvm::SmallVector<int32_t, 4> beginPath, endPath;
-    if (!findFieldPath(rd, names.begin, beginPath) ||
-        !findFieldPath(rd, names.end, endPath))
+    if (!findFieldPath(spec, names.begin, beginPath) ||
+        !findFieldPath(spec, names.end, endPath))
       continue;
     // The two names have to be siblings of one subobject and land on
     // pointers to the element, so a decoy field elsewhere in the record
@@ -355,6 +351,235 @@ void CIRGenTypes::attachStdTypeInfo(const clang::RecordDecl *rd,
                                                  endPath)));
     return;
   }
+}
+
+static bool hasVolatileQualification(clang::QualType type) {
+  type = type.getCanonicalType();
+  if (type.isVolatileQualified())
+    return true;
+  if (const auto *pointer = type->getAs<clang::PointerType>())
+    return hasVolatileQualification(pointer->getPointeeType());
+  return false;
+}
+
+static bool isDirectlyInStdNamespace(const clang::Decl *decl) {
+  const auto *ns = dyn_cast<clang::NamespaceDecl>(decl->getDeclContext());
+  return ns && ns->getIdentifier() && ns->getName() == "std" &&
+         ns->getParent()->isTranslationUnit();
+}
+
+static bool isPrimaryTemplateInstantiation(
+    const clang::ClassTemplateSpecializationDecl *spec) {
+  return clang::isTemplateInstantiation(spec->getSpecializationKind()) &&
+         isa<clang::ClassTemplateDecl *>(
+             spec->getSpecializedTemplateOrPartial());
+}
+
+static bool isVectorBoolPartial(
+    const clang::ClassTemplatePartialSpecializationDecl *partial,
+    const clang::ASTContext &astContext) {
+  const clang::TemplateArgumentList &args = partial->getTemplateArgs();
+  if (args.size() != 2 || args[0].getKind() != clang::TemplateArgument::Type ||
+      args[1].getKind() != clang::TemplateArgument::Type ||
+      !clang::ASTContext::hasSameType(args[0].getAsType(), astContext.BoolTy))
+    return false;
+
+  const clang::TemplateParameterList *params = partial->getTemplateParameters();
+  if (params->size() != 1)
+    return false;
+  const auto *param =
+      dyn_cast<clang::TemplateTypeParmDecl>(params->getParam(0));
+  const auto *argType =
+      args[1].getAsType()->getAs<clang::TemplateTypeParmType>();
+  return param && argType && !param->isParameterPack() &&
+         !argType->isParameterPack() &&
+         param->getDepth() == argType->getDepth() &&
+         param->getIndex() == argType->getIndex();
+}
+
+static bool isVectorBoolInstantiation(clang::QualType type,
+                                      const clang::ASTContext &astContext) {
+  if (type.getCanonicalType().hasQualifiers())
+    return false;
+  const auto *spec = dyn_cast_or_null<clang::ClassTemplateSpecializationDecl>(
+      type->getAsCXXRecordDecl());
+  if (!spec || !spec->isInStdNamespace() || !spec->getIdentifier() ||
+      spec->getName() != "vector" ||
+      !clang::isTemplateInstantiation(spec->getSpecializationKind()))
+    return false;
+
+  const clang::TemplateArgumentList &args = spec->getTemplateArgs();
+  if (args.size() != 2 || args[0].getKind() != clang::TemplateArgument::Type ||
+      args[1].getKind() != clang::TemplateArgument::Type ||
+      !clang::ASTContext::hasSameType(args[0].getAsType(), astContext.BoolTy))
+    return false;
+
+  auto pattern = spec->getSpecializedTemplateOrPartial();
+  if (isa<clang::ClassTemplateDecl *>(pattern))
+    return true;
+  // libc++ implements vector<bool> with the standard partial specialization.
+  return isVectorBoolPartial(
+      cast<clang::ClassTemplatePartialSpecializationDecl *>(pattern),
+      astContext);
+}
+
+static const clang::FieldDecl *findDirectField(const clang::RecordDecl *rd,
+                                               llvm::StringRef name) {
+  for (const clang::FieldDecl *field : rd->fields())
+    if (field->getIdentifier() && field->getName() == name)
+      return field;
+  return nullptr;
+}
+
+static bool hasOnlyEmptyNonVirtualBases(const clang::CXXRecordDecl *rd) {
+  for (const clang::CXXBaseSpecifier &base : rd->bases()) {
+    if (base.isVirtual())
+      return false;
+    const clang::CXXRecordDecl *baseDecl = base.getType()->getAsCXXRecordDecl();
+    if (!baseDecl)
+      return false;
+    baseDecl = baseDecl->getDefinitionOrSelf();
+    if (!baseDecl || !baseDecl->isEmpty() || !baseDecl->field_empty() ||
+        !hasOnlyEmptyNonVirtualBases(baseDecl))
+      return false;
+  }
+  return true;
+}
+
+// A later rewrite trusts this identity to read the word pointer and scan
+// the words it addresses, so a false positive here becomes an arbitrary
+// memory read. Every check that can be stricter at no cost is, and only
+// the exact shapes of the two verified implementations attach. The names
+// this keys on are reserved to the implementation in all contexts, and
+// the allocator controlled degrees of freedom are verified structurally.
+void CIRGenTypes::attachStdBitIteratorTypeInfo(const clang::RecordDecl *rd,
+                                               cir::StructType structTy) {
+  const auto *cxxrd = dyn_cast<clang::CXXRecordDecl>(rd);
+  if (!cxxrd || cxxrd->isPolymorphic())
+    return;
+
+  llvm::StringRef wordPointerName;
+  llvm::StringRef bitOffsetName;
+  const clang::RecordDecl *representation = nullptr;
+  llvm::SmallVector<int32_t, 4> wordPointerPath;
+  llvm::SmallVector<int32_t, 4> bitOffsetPath;
+
+  if (const auto *spec =
+          dyn_cast<clang::ClassTemplateSpecializationDecl>(cxxrd);
+      spec && spec->getIdentifier() && spec->getName() == "__bit_iterator") {
+    if (!spec->isInStdNamespace() || !isPrimaryTemplateInstantiation(spec) ||
+        spec->getNumBases() != 0 || spec->getNumFields() != 2)
+      return;
+    const clang::TemplateArgumentList &args = spec->getTemplateArgs();
+    // Current libc++ declares a third defaulted non type parameter, so the
+    // verified shapes carry two or three arguments. A trailing argument
+    // beyond the two checked here is tolerable only because the name is
+    // reserved to the implementation.
+    if ((args.size() != 2 && args.size() != 3) ||
+        args[0].getKind() != clang::TemplateArgument::Type ||
+        args[1].getKind() != clang::TemplateArgument::Integral ||
+        !args[1].getIntegralType()->isBooleanType() ||
+        !isVectorBoolInstantiation(args[0].getAsType(), astContext))
+      return;
+    // The libc++ iterator holds both fields directly, so each path is one
+    // step. The roles follow the field names, not the field order.
+    wordPointerName = "__seg_";
+    bitOffsetName = "__ctz_";
+    representation = spec;
+    if (!findFieldPath(spec, wordPointerName, wordPointerPath) ||
+        !findFieldPath(spec, bitOffsetName, bitOffsetPath) ||
+        wordPointerPath.size() != 1 || bitOffsetPath.size() != 1)
+      return;
+  } else {
+    // Requiring std as the direct parent excludes the libstdc++ debug and
+    // versioned namespace configurations, which nest these records one
+    // level deeper. Declining there costs only the rewrite.
+    if (!cxxrd->getIdentifier() ||
+        (cxxrd->getName() != "_Bit_iterator" &&
+         cxxrd->getName() != "_Bit_const_iterator") ||
+        !isDirectlyInStdNamespace(cxxrd) || !cxxrd->field_empty() ||
+        cxxrd->getNumBases() != 1)
+      return;
+    const clang::CXXBaseSpecifier &base = *cxxrd->bases_begin();
+    if (base.isVirtual())
+      return;
+    const clang::CXXRecordDecl *baseDecl = base.getType()->getAsCXXRecordDecl();
+    if (!baseDecl)
+      return;
+    baseDecl = baseDecl->getDefinitionOrSelf();
+    if (!baseDecl || !baseDecl->getIdentifier() ||
+        baseDecl->getName() != "_Bit_iterator_base" ||
+        !isDirectlyInStdNamespace(baseDecl) || baseDecl->isPolymorphic() ||
+        baseDecl->getNumFields() != 2 || !hasOnlyEmptyNonVirtualBases(baseDecl))
+      return;
+
+    // Both fields live in the base, so each path is a base step and a
+    // field step, and the cross check below pins the base's CIR index.
+    wordPointerName = "_M_p";
+    bitOffsetName = "_M_offset";
+    representation = baseDecl;
+    if (!findFieldPath(cxxrd, wordPointerName, wordPointerPath) ||
+        !findFieldPath(cxxrd, bitOffsetName, bitOffsetPath) ||
+        wordPointerPath.size() != 2 || bitOffsetPath.size() != 2)
+      return;
+    const CIRGenRecordLayout &layout = getCIRGenRecordLayout(cxxrd);
+    if (!layout.hasNonVirtualBaseCIRField(baseDecl))
+      return;
+    int32_t baseIndex = layout.getNonVirtualBaseCIRFieldNo(baseDecl);
+    if (wordPointerPath.front() != baseIndex ||
+        bitOffsetPath.front() != baseIndex)
+      return;
+  }
+
+  const clang::FieldDecl *wordPointerField =
+      findDirectField(representation, wordPointerName);
+  const clang::FieldDecl *bitOffsetField =
+      findDirectField(representation, bitOffsetName);
+  if (!wordPointerField || !bitOffsetField ||
+      !wordPointerField->getType()->isPointerType() ||
+      hasVolatileQualification(wordPointerField->getType()) ||
+      hasVolatileQualification(bitOffsetField->getType()) ||
+      !clang::ASTContext::hasSameType(
+          bitOffsetField->getType().getUnqualifiedType(),
+          astContext.UnsignedIntTy) ||
+      wordPointerPath.size() != bitOffsetPath.size() ||
+      !std::equal(wordPointerPath.begin(), wordPointerPath.end() - 1,
+                  bitOffsetPath.begin()))
+    return;
+
+  mlir::Type wordPointerType =
+      cir::StdTypeInfoAttr::resolvePath(structTy, wordPointerPath);
+  auto pointerType = mlir::dyn_cast<cir::PointerType>(wordPointerType);
+  auto wordType = pointerType
+                      ? mlir::dyn_cast<cir::IntType>(pointerType.getPointee())
+                      : cir::IntType();
+  if (!pointerType || pointerType.getAddrSpace() || !wordType ||
+      !wordType.isUnsignedFundamental() ||
+      cir::StdTypeInfoAttr::resolvePath(structTy, bitOffsetPath) !=
+          convertType(astContext.UnsignedIntTy))
+    return;
+
+  mlir::Type boolType = convertType(astContext.BoolTy);
+  structTy.setStdTypeInfo(cir::StdTypeInfoAttr::get(
+      &getMLIRContext(), cir::StdTypeKind::StdBitIterator, boolType,
+      cir::StdTypeInfoAttr::getBitIteratorRoles(
+          &getMLIRContext(), wordPointerPath, bitOffsetPath)));
+}
+
+void CIRGenTypes::attachStdTypeInfo(const clang::RecordDecl *rd,
+                                    cir::RecordType entry) {
+  auto structTy = mlir::dyn_cast<cir::StructType>(mlir::Type(entry));
+  if (!structTy || structTy.getStdTypeInfo() || !rd->getIdentifier())
+    return;
+
+  if (const auto *spec = dyn_cast<clang::ClassTemplateSpecializationDecl>(rd);
+      spec && spec->getName() == "vector") {
+    attachStdVectorTypeInfo(spec, structTy);
+    return;
+  }
+  if (rd->getName() == "__bit_iterator" || rd->getName() == "_Bit_iterator" ||
+      rd->getName() == "_Bit_const_iterator")
+    attachStdBitIteratorTypeInfo(rd, structTy);
 }
 
 mlir::Type CIRGenTypes::convertRecordDeclType(const clang::RecordDecl *rd) {

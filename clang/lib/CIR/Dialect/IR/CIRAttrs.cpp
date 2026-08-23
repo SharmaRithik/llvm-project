@@ -129,6 +129,17 @@ cir::StdTypeInfoAttr::getContiguousRoles(mlir::MLIRContext *ctx,
        builder.getNamedAttr("end", builder.getDenseI32ArrayAttr(endPath))});
 }
 
+mlir::DictionaryAttr cir::StdTypeInfoAttr::getBitIteratorRoles(
+    mlir::MLIRContext *ctx, llvm::ArrayRef<int32_t> wordPointerPath,
+    llvm::ArrayRef<int32_t> bitOffsetPath) {
+  mlir::Builder builder(ctx);
+  return builder.getDictionaryAttr(
+      {builder.getNamedAttr("word_pointer",
+                            builder.getDenseI32ArrayAttr(wordPointerPath)),
+       builder.getNamedAttr("bit_offset",
+                            builder.getDenseI32ArrayAttr(bitOffsetPath))});
+}
+
 mlir::LogicalResult cir::StdTypeInfoAttr::verify(
     llvm::function_ref<mlir::InFlightDiagnostic()> emitError,
     cir::StdTypeKind kind, mlir::Type element, mlir::DictionaryAttr roles) {
@@ -148,6 +159,10 @@ mlir::LogicalResult cir::StdTypeInfoAttr::verify(
       (!roles.get("begin") || !roles.get("end")))
     return emitError() << "a contiguous container identity requires the "
                           "begin and end roles";
+  if (kind == cir::StdTypeKind::StdBitIterator &&
+      (!roles.get("word_pointer") || !roles.get("bit_offset")))
+    return emitError() << "a bit iterator identity requires the word_pointer "
+                          "and bit_offset roles";
   return mlir::success();
 }
 
