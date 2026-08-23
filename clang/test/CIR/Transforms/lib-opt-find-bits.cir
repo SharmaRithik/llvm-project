@@ -1,0 +1,115 @@
+// RUN: cir-opt --cir-lib-opt %s | FileCheck %s
+
+!u32i = !cir.int<u, 32>
+!u64i = !cir.int<u, 64>
+!biter = !cir.struct<class "bit_iterator" {data !cir.ptr<!u64i>, data !u32i}, std_type_info = #cir.std_type_info<"std::bit_iterator", !cir.bool, roles {bit_offset = array<i32: 1>, word_pointer = array<i32: 0>}>>
+!closure = !cir.struct<class "BoolClosure" {data !cir.bool}>
+!refclosure = !cir.struct<class "RefBoolClosure" {data !cir.ptr<!cir.bool>}>
+!s32i = !cir.int<s, 32>
+!baditer = !cir.struct<class "signed_offset_iterator" {data !cir.ptr<!u64i>, data !s32i}, std_type_info = #cir.std_type_info<"std::bit_iterator", !cir.bool, roles {bit_offset = array<i32: 1>, word_pointer = array<i32: 0>}>>
+!identity = !cir.struct<class "std::__1::identity" {pad !u32i}>
+
+module attributes {cir.triple = "x86_64-unknown-linux-gnu",
+                   cir.int_type_width = 32 : i32,
+                   cir.size_type_width = 64 : i32} {
+  cir.func private @_ZSt7find_ifB(!biter, !biter, !closure) -> !biter func_info<#cir.func_identity<"std::find_if">>
+  cir.func private @_ZSt11find_if_notB(!biter, !biter, !closure) -> !biter func_info<#cir.func_identity<"std::find_if_not">>
+  cir.func private @_ZSt7find_ifBR(!biter, !biter, !refclosure) -> !biter func_info<#cir.func_identity<"std::find_if">>
+
+  cir.func @transforms_constant(%first: !biter, %last: !biter, %pred: !closure) -> !biter {
+    %0 = cir.std.find_if(%first : !biter, %last : !biter, %pred : !closure, @_ZSt7find_ifB) -> !biter {cir.bool_eq_pred_value = true}
+    cir.return %0 : !biter
+  }
+
+  cir.func @transforms_capture(%first: !biter, %last: !biter, %pred: !closure) -> !biter {
+    %0 = cir.std.find_if(%first : !biter, %last : !biter, %pred : !closure, @_ZSt7find_ifB) -> !biter {cir.bool_eq_pred}
+    cir.return %0 : !biter
+  }
+
+
+
+
+  cir.func @transforms_find_if_not(%first: !biter, %last: !biter, %pred: !closure) -> !biter {
+    %0 = cir.std.find_if_not(%first : !biter, %last : !biter, %pred : !closure, @_ZSt11find_if_notB) -> !biter {cir.bool_eq_pred_value = false}
+    cir.return %0 : !biter
+  }
+
+  cir.func @transforms_capture_byref(%first: !biter, %last: !biter, %pred: !refclosure) -> !biter {
+    %0 = cir.std.find_if(%first : !biter, %last : !biter, %pred : !refclosure, @_ZSt7find_ifBR) -> !biter {cir.bool_eq_pred}
+    cir.return %0 : !biter
+  }
+
+  cir.func @keeps_signed_offset_role(%first: !baditer, %last: !baditer, %pred: !closure) -> !baditer {
+    %0 = cir.std.find_if(%first : !baditer, %last : !baditer, %pred : !closure, @_ZSt7find_ifB2) -> !baditer {cir.bool_eq_pred_value = true}
+    cir.return %0 : !baditer
+  }
+  cir.func private @_ZSt7find_ifB2(!baditer, !baditer, !closure) -> !baditer func_info<#cir.func_identity<"std::find_if">>
+
+  cir.func @keeps_unmarked(%first: !biter, %last: !biter, %pred: !closure) -> !biter {
+    %0 = cir.std.find_if(%first : !biter, %last : !biter, %pred : !closure, @_ZSt7find_ifB) -> !biter
+    cir.return %0 : !biter
+  }
+
+  cir.global external @global_bits = ctor : !biter {
+    %0 = cir.get_global @global_bits : !cir.ptr<!biter>
+    %1 = cir.load %0 : !cir.ptr<!biter>, !biter
+    %2 = cir.const #cir.const_record<{#cir.ptr<null> : !cir.ptr<!u64i>, #cir.int<0> : !u32i}> : !biter
+    %3 = cir.const #cir.zero : !closure
+    %4 = cir.std.find_if(%1 : !biter, %2 : !biter, %3 : !closure, @_ZSt7find_ifB) -> !biter {cir.bool_eq_pred_value = true}
+    cir.store %4, %0 : !biter, !cir.ptr<!biter>
+  }
+}
+
+// A marked constant sought find_if becomes the masked word loop.
+// CHECK-LABEL: @transforms_constant
+// CHECK: %[[FW:[0-9]+]] = cir.extract_member %arg0[0] : !rec_bit_iterator -> !cir.ptr<!u64i>
+// CHECK: %[[FO:[0-9]+]] = cir.extract_member %arg0[1] : !rec_bit_iterator -> !u32i
+// CHECK: cir.ternary(%{{[0-9]+}}, true {
+// CHECK: cir.yield %arg1 : !rec_bit_iterator
+// CHECK: }, false {
+// CHECK: cir.alloca "find_bit_word"
+// CHECK: cir.alloca "find_bit_found"
+// CHECK: cir.shift(left, %{{[0-9]+}} : !u64i, %[[FO]] : !u32i) -> !u64i
+// CHECK: cir.ctz
+// CHECK: cir.while {
+// CHECK: cir.insert_member %arg1[0], %{{[0-9]+}} : !rec_bit_iterator, !cir.ptr<!u64i>
+// CHECK: cir.insert_member %{{[0-9]+}}[1], %{{[0-9]+}} : !rec_bit_iterator, !u32i
+// CHECK-NOT: cir.std.find_if
+
+// The runtime capture form loads the sought value from the closure.
+// CHECK-LABEL: @transforms_capture
+// CHECK: cir.extract_member %arg2[0] : !rec_BoolClosure -> !cir.bool
+// CHECK: cir.ctz
+// CHECK-NOT: cir.std.find_if
+
+// The inequality form and the clear bit constant share the same loop,
+// with the word inverted before masking.
+// CHECK-LABEL: @transforms_find_if_not
+// CHECK: cir.ctz
+// CHECK-NOT: cir.std.find_if_not
+
+// A by reference capture loads the sought value through the closure's
+// pointer member once before the scan.
+// CHECK-LABEL: @transforms_capture_byref
+// CHECK: %[[CAP:[0-9]+]] = cir.extract_member %arg2[0] : !rec_RefBoolClosure -> !cir.ptr<!cir.bool>
+// CHECK: cir.load{{.*}} %[[CAP]] : !cir.ptr<!cir.bool>, !cir.bool
+// CHECK: cir.ctz
+// CHECK-NOT: cir.std.find_if
+
+// A signed offset role fails the shape guard even with the identity
+// and the marker present.
+// CHECK-LABEL: @keeps_signed_offset_role
+// CHECK: cir.std.find_if
+// CHECK-NOT: cir.ctz
+
+
+// Only the CIRGen markers license the rewrite.
+// CHECK-LABEL: @keeps_unmarked
+// CHECK: cir.std.find_if
+// CHECK-NOT: cir.ctz
+
+// The loop state needs a function allocation scope, so a global
+// initializer keeps the call.
+// CHECK-LABEL: cir.global external @global_bits = ctor
+// CHECK: cir.std.find_if
+// CHECK-NOT: cir.ctz

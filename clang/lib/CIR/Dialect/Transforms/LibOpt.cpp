@@ -20,6 +20,7 @@
 #include "clang/CIR/Dialect/Builder/CIRBaseBuilder.h"
 #include "clang/CIR/Dialect/IR/CIRDialect.h"
 #include "clang/CIR/Dialect/Passes.h"
+#include "llvm/ADT/APInt.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/StringMap.h"
 #include "llvm/ADT/StringRef.h"
@@ -810,13 +811,358 @@ rewriteMismatchToMemcmpLoop(OpT mismatchOp,
   mismatchOp.erase();
 }
 
+// Both markers mean seek the recorded value, because CIRGen marks find_if
+// only on equality bodies and find_if_not only on inequality bodies, so
+// the two forms rewrite identically with no polarity flip here. Loading
+// whole words is safe because dereferencing a bit iterator loads its
+// whole word too, so the scan touches exactly the word set the source
+// touched, and the last word only when its offset is nonzero. The
+// verified identity guarantees offsets below the word width, which the
+// mask shifts rely on.
+template <typename OpT> static bool rewriteFindBitToWordScan(OpT findOp) {
+  static_assert(std::is_same_v<OpT, StdFindIfOp> ||
+                std::is_same_v<OpT, StdFindIfNotOp>);
+
+  // The loop state needs a function allocation scope
+  cir::FuncOp enclosing = findOp->template getParentOfType<cir::FuncOp>();
+  if (!enclosing)
+    return false;
+
+  llvm::StringRef algorithmName = OpT::getFunctionName();
+  if (isNoBuiltin(findOp, algorithmName) ||
+      noBuiltinListDisables(enclosing, algorithmName))
+    return false;
+
+  mlir::BoolAttr predicateValue =
+      findOp->template getAttrOfType<mlir::BoolAttr>(
+          cir::CIRDialect::getBoolEqPredValueAttrName());
+
+  bool captureByRef = false;
+  if (!predicateValue) {
+    if (!findOp->template getAttrOfType<mlir::UnitAttr>(
+            cir::CIRDialect::getBoolEqPredAttrName()))
+      return false;
+
+    auto closureTy =
+        mlir::dyn_cast<cir::RecordType>(findOp.getPred().getType());
+    if (!closureTy || closureTy.isUnion() || !closureTy.isComplete() ||
+        closureTy.getMembers().size() != 1)
+      return false;
+
+    mlir::Type captureTy = closureTy.getMembers()[0];
+    if (auto capturePtrTy = mlir::dyn_cast<cir::PointerType>(captureTy)) {
+      if (capturePtrTy.getAddrSpace() ||
+          !mlir::isa<cir::BoolType>(capturePtrTy.getPointee()))
+        return false;
+      captureByRef = true;
+    } else if (!mlir::isa<cir::BoolType>(captureTy)) {
+      return false;
+    }
+  }
+
+  mlir::Type iteratorType = findOp.getFirst().getType();
+  auto iteratorTy = mlir::dyn_cast<cir::StructType>(iteratorType);
+  if (!iteratorTy || findOp.getLast().getType() != iteratorType ||
+      findOp.getResult().getType() != iteratorType)
+    return false;
+
+  cir::StdTypeInfoAttr iteratorInfo = iteratorTy.getStdTypeInfo();
+  if (!iteratorInfo ||
+      iteratorInfo.getKind() != cir::StdTypeKind::StdBitIterator ||
+      !mlir::isa<cir::BoolType>(iteratorInfo.getElement()))
+    return false;
+
+  llvm::ArrayRef<int32_t> wordPath = iteratorInfo.getRolePath("word_pointer");
+  llvm::ArrayRef<int32_t> bitPath = iteratorInfo.getRolePath("bit_offset");
+  if (wordPath.empty() || bitPath.empty())
+    return false;
+
+  auto wordPtrTy = mlir::dyn_cast<cir::PointerType>(
+      iteratorInfo.resolveRole(iteratorTy, "word_pointer"));
+  if (!wordPtrTy || wordPtrTy.getAddrSpace())
+    return false;
+
+  auto wordTy = mlir::dyn_cast<cir::IntType>(wordPtrTy.getPointee());
+  if (!wordTy || !wordTy.isUnsigned() || !wordTy.isFundamental())
+    return false;
+
+  switch (wordTy.getWidth()) {
+  case 8:
+  case 16:
+  case 32:
+  case 64:
+    break;
+  default:
+    return false;
+  }
+
+  auto bitOffsetTy = mlir::dyn_cast<cir::IntType>(
+      iteratorInfo.resolveRole(iteratorTy, "bit_offset"));
+  if (!bitOffsetTy || !bitOffsetTy.isUnsigned() || !bitOffsetTy.isFundamental())
+    return false;
+
+  CIRBaseBuilderTy builder(*findOp.getContext());
+  mlir::Location loc = findOp.getLoc();
+  builder.setInsertionPointAfter(findOp);
+
+  auto extractPath = [&](mlir::Location l, mlir::Value record,
+                         llvm::ArrayRef<int32_t> path) {
+    mlir::Value value = record;
+    for (int32_t index : path)
+      value = cir::ExtractMemberOp::create(builder, l, value,
+                                           static_cast<uint64_t>(index));
+    return value;
+  };
+
+  // Rebuild each nested parent after replacing the role value
+  auto insertPath = [&](mlir::Location l, mlir::Value record,
+                        llvm::ArrayRef<int32_t> path, mlir::Value replacement) {
+    llvm::SmallVector<mlir::Value, 4> parents;
+    mlir::Value nested = record;
+    for (size_t depth = 0; depth + 1 < path.size(); ++depth) {
+      parents.push_back(nested);
+      nested = cir::ExtractMemberOp::create(builder, l, nested,
+                                            static_cast<uint64_t>(path[depth]));
+    }
+
+    nested = cir::InsertMemberOp::create(
+        builder, l, nested, static_cast<uint64_t>(path.back()), replacement);
+
+    for (size_t depth = path.size() - 1; depth > 0; --depth)
+      nested = cir::InsertMemberOp::create(
+          builder, l, parents[depth - 1],
+          static_cast<uint64_t>(path[depth - 1]), nested);
+
+    return nested;
+  };
+
+  mlir::Value firstWord = extractPath(loc, findOp.getFirst(), wordPath);
+  mlir::Value firstOffset = extractPath(loc, findOp.getFirst(), bitPath);
+  mlir::Value lastWord = extractPath(loc, findOp.getLast(), wordPath);
+  mlir::Value lastOffset = extractPath(loc, findOp.getLast(), bitPath);
+
+  mlir::Value sameWord =
+      builder.createCompare(loc, cir::CmpOpKind::eq, firstWord, lastWord);
+  mlir::Value sameOffset =
+      builder.createCompare(loc, cir::CmpOpKind::eq, firstOffset, lastOffset);
+  mlir::Value empty = builder.createLogicalAnd(loc, sameWord, sameOffset);
+
+  mlir::Value result =
+      cir::TernaryOp::create(
+          builder, loc, empty,
+          [&](mlir::OpBuilder &, mlir::Location l) {
+            builder.createYield(l, findOp.getLast());
+          },
+          [&](mlir::OpBuilder &, mlir::Location l) {
+            mlir::Value sought;
+            if (predicateValue) {
+              sought = builder.getBool(predicateValue.getValue(), l);
+            } else {
+              sought =
+                  cir::ExtractMemberOp::create(builder, l, findOp.getPred(), 0);
+              if (captureByRef)
+                sought = builder.createLoad(l, sought);
+            }
+
+            mlir::Value wordZero =
+                builder.getUnsignedInt(l, 0, wordTy.getWidth());
+            mlir::Value wordOne =
+                builder.getUnsignedInt(l, 1, wordTy.getWidth());
+            mlir::Value wordAllOnes = builder.getConstAPInt(
+                l, wordTy, llvm::APInt::getAllOnes(wordTy.getWidth()));
+            mlir::Value bitZero =
+                builder.getUnsignedInt(l, 0, bitOffsetTy.getWidth());
+            mlir::Value oneStride =
+                builder.getUnsignedInt(l, 1, bitOffsetTy.getWidth());
+
+            mlir::IntegerAttr ptrAlign = builder.getAlignmentAttr(8);
+            mlir::IntegerAttr offsetAlign =
+                builder.getAlignmentAttr(bitOffsetTy.getWidth() / 8);
+            mlir::Value foundWordAddr = builder.createAlloca(
+                l, builder.getPointerTo(wordPtrTy), "find_bit_word", ptrAlign);
+            mlir::Value foundOffsetAddr =
+                builder.createAlloca(l, builder.getPointerTo(bitOffsetTy),
+                                     "find_bit_offset", offsetAlign);
+            mlir::Value currentWordAddr =
+                builder.createAlloca(l, builder.getPointerTo(wordPtrTy),
+                                     "find_bit_current", ptrAlign);
+            mlir::Value foundAddr = builder.createAlloca(
+                l, builder.getPointerTo(builder.getBoolTy()), "find_bit_found",
+                builder.getAlignmentAttr(1));
+            builder.createStore(l, builder.getFalse(l), foundAddr);
+
+            // The load reads the whole word the iterator would read, and
+            // the mask discards every bit outside the searched range
+            // before the candidates test.
+            auto scanWord = [&](mlir::Location scanLoc, mlir::Value wordPointer,
+                                mlir::Value validMask) {
+              mlir::Value loaded = builder.createLoad(scanLoc, wordPointer);
+              mlir::Value inverted = builder.createNot(scanLoc, loaded);
+              mlir::Value searched =
+                  builder.createSelect(scanLoc, sought, loaded, inverted);
+              mlir::Value candidates =
+                  builder.createAnd(scanLoc, searched, validMask);
+              mlir::Value nonzero = builder.createCompare(
+                  scanLoc, cir::CmpOpKind::ne, candidates, wordZero);
+
+              cir::TernaryOp::create(
+                  builder, scanLoc, nonzero,
+                  [&](mlir::OpBuilder &, mlir::Location foundLoc) {
+                    mlir::Value bit = cir::BitCtzOp::create(builder, foundLoc,
+                                                            candidates, true);
+                    bit = builder.createIntCast(bit, bitOffsetTy);
+                    builder.createStore(foundLoc, wordPointer, foundWordAddr);
+                    builder.createStore(foundLoc, bit, foundOffsetAddr);
+                    builder.createStore(foundLoc, builder.getTrue(foundLoc),
+                                        foundAddr);
+                    builder.createYield(foundLoc);
+                  },
+                  [&](mlir::OpBuilder &, mlir::Location missLoc) {
+                    builder.createYield(missLoc);
+                  });
+            };
+
+            cir::TernaryOp::create(
+                builder, l, sameWord,
+                [&](mlir::OpBuilder &, mlir::Location sameLoc) {
+                  mlir::Value headMask = builder.createShiftLeft(
+                      sameLoc, wordAllOnes, firstOffset);
+                  mlir::Value endMask = builder.createSub(
+                      sameLoc,
+                      builder.createShiftLeft(sameLoc, wordOne, lastOffset),
+                      wordOne);
+                  mlir::Value validMask =
+                      builder.createAnd(sameLoc, headMask, endMask);
+                  mlir::Value hasValidBits = builder.createCompare(
+                      sameLoc, cir::CmpOpKind::ne, validMask, wordZero);
+
+                  // A zero same word mask must guard the load
+                  cir::TernaryOp::create(
+                      builder, sameLoc, hasValidBits,
+                      [&](mlir::OpBuilder &, mlir::Location scanLoc) {
+                        scanWord(scanLoc, firstWord, validMask);
+                        builder.createYield(scanLoc);
+                      },
+                      [&](mlir::OpBuilder &, mlir::Location missLoc) {
+                        builder.createYield(missLoc);
+                      });
+                  builder.createYield(sameLoc);
+                },
+                [&](mlir::OpBuilder &, mlir::Location differentLoc) {
+                  mlir::Value hasHead = builder.createCompare(
+                      differentLoc, cir::CmpOpKind::ne, firstOffset, bitZero);
+                  mlir::Value scanBegin =
+                      cir::TernaryOp::create(
+                          builder, differentLoc, hasHead,
+                          [&](mlir::OpBuilder &, mlir::Location headLoc) {
+                            mlir::Value headMask = builder.createShiftLeft(
+                                headLoc, wordAllOnes, firstOffset);
+                            scanWord(headLoc, firstWord, headMask);
+                            mlir::Value foundHead =
+                                builder.createLoad(headLoc, foundAddr);
+                            mlir::Value next = cir::PtrStrideOp::create(
+                                builder, headLoc, firstWord.getType(),
+                                firstWord, oneStride);
+                            builder.createYield(headLoc, builder.createSelect(
+                                                             headLoc, foundHead,
+                                                             lastWord, next));
+                          },
+                          [&](mlir::OpBuilder &, mlir::Location wholeLoc) {
+                            builder.createYield(wholeLoc, firstWord);
+                          })
+                          .getResult();
+                  builder.createStore(differentLoc, scanBegin, currentWordAddr);
+
+                  builder.createWhile(
+                      differentLoc,
+                      [&](mlir::OpBuilder &, mlir::Location conditionLoc) {
+                        mlir::Value current =
+                            builder.createLoad(conditionLoc, currentWordAddr);
+                        mlir::Value more = builder.createCompare(
+                            conditionLoc, cir::CmpOpKind::ne, current,
+                            lastWord);
+                        builder.createCondition(more);
+                      },
+                      [&](mlir::OpBuilder &, mlir::Location bodyLoc) {
+                        mlir::Value current =
+                            builder.createLoad(bodyLoc, currentWordAddr);
+                        scanWord(bodyLoc, current, wordAllOnes);
+                        mlir::Value found =
+                            builder.createLoad(bodyLoc, foundAddr);
+                        mlir::Value next = cir::PtrStrideOp::create(
+                            builder, bodyLoc, current.getType(), current,
+                            oneStride);
+                        mlir::Value updated = builder.createSelect(
+                            bodyLoc, found, lastWord, next);
+                        builder.createStore(bodyLoc, updated, currentWordAddr);
+                        builder.createYield(bodyLoc);
+                      });
+
+                  mlir::Value foundBeforeTail =
+                      builder.createLoad(differentLoc, foundAddr);
+                  mlir::Value notFound =
+                      builder.createNot(differentLoc, foundBeforeTail);
+                  mlir::Value hasTail = builder.createCompare(
+                      differentLoc, cir::CmpOpKind::ne, lastOffset, bitZero);
+                  mlir::Value needTail =
+                      builder.createLogicalAnd(differentLoc, notFound, hasTail);
+
+                  cir::TernaryOp::create(
+                      builder, differentLoc, needTail,
+                      [&](mlir::OpBuilder &, mlir::Location tailLoc) {
+                        mlir::Value tailMask =
+                            builder.createSub(tailLoc,
+                                              builder.createShiftLeft(
+                                                  tailLoc, wordOne, lastOffset),
+                                              wordOne);
+                        scanWord(tailLoc, lastWord, tailMask);
+                        builder.createYield(tailLoc);
+                      },
+                      [&](mlir::OpBuilder &, mlir::Location skipLoc) {
+                        builder.createYield(skipLoc);
+                      });
+                  builder.createYield(differentLoc);
+                });
+
+            mlir::Value found = builder.createLoad(l, foundAddr);
+            mlir::Value scanResult =
+                cir::TernaryOp::create(
+                    builder, l, found,
+                    [&](mlir::OpBuilder &, mlir::Location foundLoc) {
+                      mlir::Value rebuilt = findOp.getLast();
+                      rebuilt = insertPath(
+                          foundLoc, rebuilt, wordPath,
+                          builder.createLoad(foundLoc, foundWordAddr));
+                      rebuilt = insertPath(
+                          foundLoc, rebuilt, bitPath,
+                          builder.createLoad(foundLoc, foundOffsetAddr));
+                      builder.createYield(foundLoc, rebuilt);
+                    },
+                    [&](mlir::OpBuilder &, mlir::Location missLoc) {
+                      builder.createYield(missLoc, findOp.getLast());
+                    })
+                    .getResult();
+            builder.createYield(l, scanResult);
+          })
+          .getResult();
+
+  findOp.getResult().replaceAllUsesWith(result);
+  findOp.erase();
+  return true;
+}
+
 void LibOptPass::runOnOperation() {
   mlir::SymbolTableCollection symbolTables;
   getOperation()->walk([&](mlir::Operation *op) {
     llvm::TypeSwitch<mlir::Operation *>(op)
-        .Case<StdFindOp, StdFindIfOp, StdFindIfNotOp, StdRangesFindOp,
-              StdRangesFindRangeOp>(
+        .Case<StdFindOp, StdRangesFindOp, StdRangesFindRangeOp>(
             [&](auto find) { rewriteFindLikeToMemchr(find, symbolTables); })
+        .Case<StdFindIfOp, StdFindIfNotOp>([&](auto find) {
+          // The bit and byte rewrites accept disjoint iterator shapes, so
+          // whichever declines leaves the operation for the other.
+          if (!rewriteFindBitToWordScan(find))
+            rewriteFindLikeToMemchr(find, symbolTables);
+        })
         .Case<StdSearchOp>(
             [&](auto search) { rewriteSearchToMemmem(search, symbolTables); })
         .Case<StdEqualOp, StdEqualPredOp>(
