@@ -598,6 +598,218 @@ static void rewriteEqualToMemcmp(OpT equalOp,
   equalOp.erase();
 }
 
+// Rewrites a raised std::mismatch over licensed bytes into a chunked memcmp
+// loop. memcmp reports only whether a block differs while mismatch needs the
+// first differing position, so the loop compares fixed size chunks and
+// rescans just the failing chunk byte by byte. That bounds the scalar work
+// by one chunk regardless of range size while the bulk comparison stays in
+// the C library.
+template <typename OpT>
+static void
+rewriteMismatchToMemcmpLoop(OpT mismatchOp,
+                            mlir::SymbolTableCollection &symbolTables) {
+  constexpr bool predOp = std::is_same_v<OpT, StdMismatchPredOp>;
+  constexpr llvm::StringLiteral libcallName = "memcmp";
+  constexpr uint64_t blockSize = 256;
+  std::optional<LibCallEnv> env =
+      checkLibCallEnv(mismatchOp, libcallName, llvm::LibFunc_memcmp);
+  if (!env)
+    return;
+  // The loop carries its offset in an alloca, which has no home in a global
+  // initializer region, so only function bodies rewrite.
+  if (!env->enclosing)
+    return;
+
+  // Only the CIRGen fact licenses the rewrite because an enum or atomic
+  // element also lowers to a byte wide integer and a closure of the right
+  // shape can compute anything. The predicate form carries its own marker
+  // since the proof covers the lambda body, not just the iterators.
+  if (!mismatchOp->template getAttrOfType<mlir::UnitAttr>(
+          predOp ? cir::CIRDialect::getElemEqBinaryPredAttrName()
+                 : cir::CIRDialect::getNarrowCharParamsAttrName()))
+    return;
+
+  // The introduced operation uses the recorded int and size_t widths which
+  // its verifier checks against the result and length.
+  std::optional<unsigned> intWidth = cir::getRecordedIntegerWidth(
+      env->moduleOp, cir::CIRDialect::getIntTypeWidthAttrName());
+  std::optional<unsigned> sizeWidth = cir::getRecordedIntegerWidth(
+      env->moduleOp, cir::CIRDialect::getSizeTypeWidthAttrName());
+  if (!intWidth || !sizeWidth)
+    return;
+
+  CIRBaseBuilderTy builder(*mismatchOp.getContext());
+  auto sizeTy = builder.getUIntNTy(*sizeWidth);
+  auto intTy = builder.getSIntNTy(*intWidth);
+  if (!sharesLibCallSymbol(
+          env->moduleOp, symbolTables, libcallName,
+          cir::FuncType::get(
+              {builder.getVoidPtrTy(), builder.getVoidPtrTy(), sizeTy}, intTy)))
+    return;
+
+  // The CIRGen marker licenses trusting a one member record as a contiguous
+  // iterator that wraps its pointer. The two ranges are independent, so one
+  // may be wrapped while the other is raw.
+  cir::RecordType firstWrapperTy;
+  cir::RecordType secondWrapperTy;
+  cir::PointerType firstPtrTy = unwrapContiguousIterator(
+      mismatchOp.getFirst1().getType(), firstWrapperTy);
+  cir::PointerType secondPtrTy = unwrapContiguousIterator(
+      mismatchOp.getFirst2().getType(), secondWrapperTy);
+  // The libc interface cannot represent other address spaces and the two
+  // byte sequences must share an element type.
+  if (!firstPtrTy || !secondPtrTy || firstPtrTy.getAddrSpace() ||
+      secondPtrTy.getAddrSpace() ||
+      firstPtrTy.getPointee() != secondPtrTy.getPointee())
+    return;
+  // BitInt belongs to a separate type family and the rewrite is licensed
+  // only for fundamental eight bit characters.
+  auto elementTy = mlir::dyn_cast<cir::IntType>(firstPtrTy.getPointee());
+  if (!elementTy || elementTy.isBitInt() || elementTy.getWidth() != 8)
+    return;
+
+  // The result is the pair record holding both final iterators. Hand
+  // written IR can pair up anything, so the members are re proved against
+  // the operand types before the rebuild trusts them.
+  auto pairTy =
+      mlir::dyn_cast<cir::RecordType>(mismatchOp.getResult().getType());
+  if (!pairTy || pairTy.isUnion() || !pairTy.isComplete() ||
+      pairTy.getMembers().size() != 2 ||
+      pairTy.getMembers()[0] != mismatchOp.getFirst1().getType() ||
+      pairTy.getMembers()[1] != mismatchOp.getFirst2().getType())
+    return;
+
+  mlir::Location loc = mismatchOp.getLoc();
+  builder.setInsertionPointAfter(mismatchOp);
+  mlir::Value first1 = mismatchOp.getFirst1();
+  mlir::Value last1 = mismatchOp.getLast1();
+  mlir::Value first2 = mismatchOp.getFirst2();
+  if (firstWrapperTy) {
+    first1 = cir::ExtractMemberOp::create(builder, loc, first1, 0);
+    last1 = cir::ExtractMemberOp::create(builder, loc, last1, 0);
+  }
+  if (secondWrapperTy)
+    first2 = cir::ExtractMemberOp::create(builder, loc, first2, 0);
+
+  // These pointer differences are byte counts because the elements have
+  // width eight.
+  mlir::Value total =
+      cir::PtrDiffOp::create(builder, loc, sizeTy, last1, first1);
+  mlir::Value offAddr =
+      builder.createAlloca(loc, builder.getPointerTo(sizeTy), "mismatch_off",
+                           builder.getAlignmentAttr(*sizeWidth / 8));
+  builder.createStore(loc, builder.getUnsignedInt(loc, 0, *sizeWidth), offAddr);
+  mlir::Value block = builder.getUnsignedInt(loc, blockSize, *sizeWidth);
+  mlir::Value zero = builder.getNullValue(intTy, loc);
+
+  auto advance = [&](mlir::Location l, mlir::Value base,
+                     mlir::Value off) -> mlir::Value {
+    return cir::PtrStrideOp::create(builder, l, base.getType(), base, off);
+  };
+
+  // Advance whole chunks while they compare equal. The memcmp sits behind
+  // the remaining bytes test, so an empty range never reaches C with a
+  // possibly null pointer, and every call passes in bounds pointers with a
+  // nonzero length.
+  builder.createWhile(
+      loc,
+      [&](mlir::OpBuilder &, mlir::Location l) {
+        mlir::Value off = builder.createLoad(l, offAddr);
+        mlir::Value more =
+            builder.createCompare(l, cir::CmpOpKind::lt, off, total);
+        mlir::Value chunkEqual =
+            cir::TernaryOp::create(
+                builder, l, more,
+                [&](mlir::OpBuilder &, mlir::Location ll) {
+                  mlir::Value rem = builder.createSub(ll, total, off);
+                  mlir::Value overBlock =
+                      builder.createCompare(ll, cir::CmpOpKind::gt, rem, block);
+                  mlir::Value chunk =
+                      builder.createSelect(ll, overBlock, block, rem);
+                  mlir::Value lhs = builder.createBitcast(
+                      ll, advance(ll, first1, off), builder.getVoidPtrTy());
+                  mlir::Value rhs = builder.createBitcast(
+                      ll, advance(ll, first2, off), builder.getVoidPtrTy());
+                  mlir::Value cmp = cir::MemCmpOp::create(builder, ll, intTy,
+                                                          lhs, rhs, chunk);
+                  builder.createYield(
+                      ll,
+                      builder.createCompare(ll, cir::CmpOpKind::eq, cmp, zero)
+                          .getResult());
+                },
+                [&](mlir::OpBuilder &, mlir::Location ll) {
+                  builder.createYield(ll,
+                                      builder.getBool(false, ll).getResult());
+                })
+                .getResult();
+        builder.createCondition(chunkEqual);
+      },
+      [&](mlir::OpBuilder &, mlir::Location l) {
+        mlir::Value off = builder.createLoad(l, offAddr);
+        mlir::Value rem = builder.createSub(l, total, off);
+        mlir::Value overBlock =
+            builder.createCompare(l, cir::CmpOpKind::gt, rem, block);
+        mlir::Value chunk = builder.createSelect(l, overBlock, block, rem);
+        builder.createStore(l, builder.createAdd(l, off, chunk), offAddr);
+        builder.createYield(l);
+      });
+
+  // Rescan the failing chunk for the exact position. memcmp already proved
+  // a differing byte exists there, so the loop stops within one chunk, and
+  // the fully equal input skips it through the remaining bytes test that
+  // also guards the loads.
+  builder.createWhile(
+      loc,
+      [&](mlir::OpBuilder &, mlir::Location l) {
+        mlir::Value off = builder.createLoad(l, offAddr);
+        mlir::Value more =
+            builder.createCompare(l, cir::CmpOpKind::lt, off, total);
+        mlir::Value bytesEqual =
+            cir::TernaryOp::create(
+                builder, l, more,
+                [&](mlir::OpBuilder &, mlir::Location ll) {
+                  mlir::Value b1 =
+                      builder.createLoad(ll, advance(ll, first1, off));
+                  mlir::Value b2 =
+                      builder.createLoad(ll, advance(ll, first2, off));
+                  builder.createYield(
+                      ll, builder.createCompare(ll, cir::CmpOpKind::eq, b1, b2)
+                              .getResult());
+                },
+                [&](mlir::OpBuilder &, mlir::Location ll) {
+                  builder.createYield(ll,
+                                      builder.getBool(false, ll).getResult());
+                })
+                .getResult();
+        builder.createCondition(bytesEqual);
+      },
+      [&](mlir::OpBuilder &, mlir::Location l) {
+        mlir::Value off = builder.createLoad(l, offAddr);
+        builder.createStore(
+            l,
+            builder.createAdd(l, off, builder.getUnsignedInt(l, 1, *sizeWidth)),
+            offAddr);
+        builder.createYield(l);
+      });
+
+  mlir::Value finalOff = builder.createLoad(loc, offAddr);
+  mlir::Value res1 = advance(loc, first1, finalOff);
+  mlir::Value res2 = advance(loc, first2, finalOff);
+  if (firstWrapperTy)
+    res1 = cir::InsertMemberOp::create(builder, loc, mismatchOp.getFirst1(),
+                                       /*index=*/0, res1);
+  if (secondWrapperTy)
+    res2 = cir::InsertMemberOp::create(builder, loc, mismatchOp.getFirst2(),
+                                       /*index=*/0, res2);
+  // The pair has no incoming value to rebuild around, so it starts from
+  // undef and the two inserts define both members.
+  mlir::Value pair = builder.getConstant(loc, cir::UndefAttr::get(pairTy));
+  pair = cir::InsertMemberOp::create(builder, loc, pair, /*index=*/0, res1);
+  pair = cir::InsertMemberOp::create(builder, loc, pair, /*index=*/1, res2);
+  mismatchOp.getResult().replaceAllUsesWith(pair);
+  mismatchOp.erase();
+}
+
 void LibOptPass::runOnOperation() {
   mlir::SymbolTableCollection symbolTables;
   getOperation()->walk([&](mlir::Operation *op) {
@@ -608,7 +820,10 @@ void LibOptPass::runOnOperation() {
         .Case<StdSearchOp>(
             [&](auto search) { rewriteSearchToMemmem(search, symbolTables); })
         .Case<StdEqualOp, StdEqualPredOp>(
-            [&](auto equal) { rewriteEqualToMemcmp(equal, symbolTables); });
+            [&](auto equal) { rewriteEqualToMemcmp(equal, symbolTables); })
+        .Case<StdMismatchOp, StdMismatchPredOp>([&](auto mismatch) {
+          rewriteMismatchToMemcmpLoop(mismatch, symbolTables);
+        });
   });
 }
 

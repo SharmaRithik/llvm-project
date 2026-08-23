@@ -1,0 +1,198 @@
+// RUN: cir-opt --cir-lib-opt -split-input-file %s | FileCheck %s
+
+!u8i = !cir.int<u, 8>
+!u64i = !cir.int<u, 64>
+!pair = !cir.struct<class "Pair" {data !cir.ptr<!u8i>, data !cir.ptr<!u8i>}>
+!pred_closure = !cir.struct<class "PredClosure" {data !u8i}>
+!wrap = !cir.struct<class "wrap_iter" {data !cir.ptr<!u8i>}>
+!wpair = !cir.struct<class "WPair" {data !cir.struct<class "wrap_iter" {data !cir.ptr<!u8i>}>, data !cir.struct<class "wrap_iter" {data !cir.ptr<!u8i>}>}>
+!mpair = !cir.struct<class "MPair" {data !cir.struct<class "wrap_iter" {data !cir.ptr<!u8i>}>, data !cir.ptr<!u8i>}>
+
+module attributes {cir.triple = "x86_64-unknown-linux-gnu",
+                   cir.int_type_width = 32 : i32,
+                   cir.size_type_width = 64 : i32} {
+  cir.func private @_ZSt8mismatch(!cir.ptr<!u8i>, !cir.ptr<!u8i>, !cir.ptr<!u8i>) -> !pair func_info<#cir.func_identity<"std::mismatch">>
+  cir.func private @_ZSt8mismatchP(!cir.ptr<!u8i>, !cir.ptr<!u8i>, !cir.ptr<!u8i>, !pred_closure) -> !pair func_info<#cir.func_identity<"std::mismatch">>
+
+  cir.func @transforms(%first1: !cir.ptr<!u8i>, %last1: !cir.ptr<!u8i>, %first2: !cir.ptr<!u8i>) -> !pair {
+    %0 = cir.std.mismatch(%first1 : !cir.ptr<!u8i>, %last1 : !cir.ptr<!u8i>, %first2 : !cir.ptr<!u8i>, @_ZSt8mismatch) -> !pair {cir.narrow_char_params}
+    cir.return %0 : !pair
+  }
+// The chunk loop advances while whole blocks compare equal, then the byte
+// loop pins the exact position inside the failing block, and the pair is
+// rebuilt from undef with both final iterators.
+// CHECK-LABEL: @transforms
+// CHECK: %{{[0-9]+}} = cir.ptr_diff %{{.*}}, %{{.*}} : !cir.ptr<!u8i> -> !u64i
+// CHECK: %{{[0-9]+}} = cir.alloca "mismatch_off"
+// CHECK: cir.while {
+// CHECK: cir.ternary
+// CHECK: cir.libc.memcmp
+// CHECK: cir.condition
+// CHECK: cir.while {
+// CHECK: cir.condition
+// CHECK: %[[UNDEF:[0-9]+]] = cir.const #cir.undef : !rec_Pair
+// CHECK: %[[P0:[0-9]+]] = cir.insert_member %[[UNDEF]][0], %{{.*}} : !rec_Pair, !cir.ptr<!u8i>
+// CHECK: %{{[0-9]+}} = cir.insert_member %[[P0]][1], %{{.*}} : !rec_Pair, !cir.ptr<!u8i>
+// CHECK-NOT: cir.std.mismatch
+
+  cir.func @transforms_pred(%first1: !cir.ptr<!u8i>, %last1: !cir.ptr<!u8i>, %first2: !cir.ptr<!u8i>, %pred: !pred_closure) -> !pair {
+    %0 = cir.std.mismatch_pred(%first1 : !cir.ptr<!u8i>, %last1 : !cir.ptr<!u8i>, %first2 : !cir.ptr<!u8i>, %pred : !pred_closure, @_ZSt8mismatchP) -> !pair {cir.elem_eq_binary_pred}
+    cir.return %0 : !pair
+  }
+// CHECK-LABEL: @transforms_pred
+// CHECK: cir.libc.memcmp
+// CHECK-NOT: cir.std.mismatch_pred
+
+  cir.func @keeps_unmarked(%first1: !cir.ptr<!u8i>, %last1: !cir.ptr<!u8i>, %first2: !cir.ptr<!u8i>) -> !pair {
+    %0 = cir.std.mismatch(%first1 : !cir.ptr<!u8i>, %last1 : !cir.ptr<!u8i>, %first2 : !cir.ptr<!u8i>, @_ZSt8mismatch) -> !pair
+    cir.return %0 : !pair
+  }
+// CHECK-LABEL: @keeps_unmarked
+// CHECK: cir.std.mismatch
+// CHECK-NOT: cir.libc.memcmp
+
+  cir.func @keeps_narrow_marked_pred(%first1: !cir.ptr<!u8i>, %last1: !cir.ptr<!u8i>, %first2: !cir.ptr<!u8i>, %pred: !pred_closure) -> !pair {
+    %0 = cir.std.mismatch_pred(%first1 : !cir.ptr<!u8i>, %last1 : !cir.ptr<!u8i>, %first2 : !cir.ptr<!u8i>, %pred : !pred_closure, @_ZSt8mismatchP) -> !pair {cir.narrow_char_params}
+    cir.return %0 : !pair
+  }
+// The iterator marker alone says nothing about the predicate body, and the
+// four iterator overload raises with exactly this shape when its iterators
+// are wrapper records, with last2 riding in the predicate operand.
+// CHECK-LABEL: @keeps_narrow_marked_pred
+// CHECK: cir.std.mismatch_pred
+// CHECK-NOT: cir.libc.memcmp
+
+  cir.func private @_ZSt8mismatchW(!wrap, !wrap, !wrap, !wrap) -> !wpair func_info<#cir.func_identity<"std::mismatch">>
+  cir.func private @_ZSt8mismatchWW(!wrap, !wrap, !wrap) -> !wpair func_info<#cir.func_identity<"std::mismatch">>
+  cir.func private @_ZSt8mismatchWM(!wrap, !wrap, !cir.ptr<!u8i>) -> !mpair func_info<#cir.func_identity<"std::mismatch">>
+
+  cir.func @transforms_wrapped(%first1: !wrap, %last1: !wrap, %first2: !wrap) -> !wpair {
+    %0 = cir.std.mismatch(%first1 : !wrap, %last1 : !wrap, %first2 : !wrap, @_ZSt8mismatchWW) -> !wpair {cir.narrow_char_params}
+    cir.return %0 : !wpair
+  }
+// The wrapped form runs the loop on the extracted pointers, rebuilds each
+// iterator around its incoming operand, and pairs the two wrappers.
+// CHECK-LABEL: @transforms_wrapped
+// CHECK: cir.extract_member %{{.*}}[0] : !rec_wrap_iter -> !cir.ptr<!u8i>
+// CHECK: cir.libc.memcmp
+// CHECK: %[[W0:[0-9]+]] = cir.insert_member %{{.*}}[0], %{{.*}} : !rec_wrap_iter, !cir.ptr<!u8i>
+// CHECK: %[[W1:[0-9]+]] = cir.insert_member %{{.*}}[0], %{{.*}} : !rec_wrap_iter, !cir.ptr<!u8i>
+// CHECK: %[[WU:[0-9]+]] = cir.const #cir.undef : !rec_WPair
+// CHECK: cir.insert_member %[[WU]][0], %[[W0]] : !rec_WPair, !rec_wrap_iter
+// CHECK: cir.insert_member %{{[0-9]+}}[1], %[[W1]] : !rec_WPair, !rec_wrap_iter
+// CHECK-NOT: cir.std.mismatch
+
+  cir.func @transforms_mixed(%first1: !wrap, %last1: !wrap, %first2: !cir.ptr<!u8i>) -> !mpair {
+    %0 = cir.std.mismatch(%first1 : !wrap, %last1 : !wrap, %first2 : !cir.ptr<!u8i>, @_ZSt8mismatchWM) -> !mpair {cir.narrow_char_params}
+    cir.return %0 : !mpair
+  }
+// The two ranges are independent, so one may be wrapped while the other is
+// raw, and the pair reflects each side's own shape.
+// CHECK-LABEL: @transforms_mixed
+// CHECK: cir.libc.memcmp
+// CHECK: %[[M0:[0-9]+]] = cir.insert_member %{{.*}}[0], %{{.*}} : !rec_wrap_iter, !cir.ptr<!u8i>
+// CHECK: %[[MU:[0-9]+]] = cir.const #cir.undef : !rec_MPair
+// CHECK: cir.insert_member %[[MU]][0], %[[M0]] : !rec_MPair, !rec_wrap_iter
+// CHECK: cir.insert_member %{{[0-9]+}}[1], %{{.*}} : !rec_MPair, !cir.ptr<!u8i>
+// CHECK-NOT: cir.std.mismatch
+
+  cir.func @keeps_four_iterator_shape(%first1: !wrap, %last1: !wrap, %first2: !wrap, %last2: !wrap) -> !wpair {
+    %0 = cir.std.mismatch_pred(%first1 : !wrap, %last1 : !wrap, %first2 : !wrap, %last2 : !wrap, @_ZSt8mismatchW) -> !wpair {cir.narrow_char_params}
+    cir.return %0 : !wpair
+  }
+// The four iterator overload over wrapper records lands here with the
+// iterator marker. Rewriting it would read only one range's length, so it
+// must stay a call.
+// CHECK-LABEL: @keeps_four_iterator_shape
+// CHECK: cir.std.mismatch_pred
+// CHECK-NOT: cir.libc.memcmp
+}
+
+// -----
+
+!u8i = !cir.int<u, 8>
+!s8i = !cir.int<s, 8>
+!badpair = !cir.struct<class "BadPair" {data !cir.ptr<!u8i>, data !cir.ptr<!s8i>}>
+
+module attributes {cir.triple = "x86_64-unknown-linux-gnu",
+                   cir.int_type_width = 32 : i32,
+                   cir.size_type_width = 64 : i32} {
+  cir.func private @_ZSt8mismatchB(!cir.ptr<!u8i>, !cir.ptr<!u8i>, !cir.ptr<!u8i>) -> !badpair func_info<#cir.func_identity<"std::mismatch">>
+
+  cir.func @keeps_wrong_pair_member(%first1: !cir.ptr<!u8i>, %last1: !cir.ptr<!u8i>, %first2: !cir.ptr<!u8i>) -> !badpair {
+    %0 = cir.std.mismatch(%first1 : !cir.ptr<!u8i>, %last1 : !cir.ptr<!u8i>, %first2 : !cir.ptr<!u8i>, @_ZSt8mismatchB) -> !badpair {cir.narrow_char_params}
+    cir.return %0 : !badpair
+  }
+// The second pair member does not match the second range's iterator type,
+// so the rebuild cannot trust it.
+// CHECK-LABEL: @keeps_wrong_pair_member
+// CHECK: cir.std.mismatch
+// CHECK-NOT: cir.libc.memcmp
+}
+
+// -----
+
+!u8i = !cir.int<u, 8>
+!s64i = !cir.int<s, 64>
+!pair = !cir.struct<class "Pair" {data !cir.ptr<!u8i>, data !cir.ptr<!u8i>}>
+
+module attributes {cir.triple = "x86_64-unknown-linux-gnu",
+                   cir.int_type_width = 32 : i32,
+                   cir.size_type_width = 64 : i32} {
+  cir.func private @_ZSt8mismatch(!cir.ptr<!u8i>, !cir.ptr<!u8i>, !cir.ptr<!u8i>) -> !pair func_info<#cir.func_identity<"std::mismatch">>
+  cir.global "private" internal @storage_a = #cir.zero : !cir.array<!u8i x 4>
+  cir.global "private" internal @storage_b = #cir.zero : !cir.array<!u8i x 4>
+
+  cir.global external @global_pair = ctor : !pair {
+    %0 = cir.get_global @storage_a : !cir.ptr<!cir.array<!u8i x 4>>
+    %1 = cir.cast array_to_ptrdecay %0 : !cir.ptr<!cir.array<!u8i x 4>> -> !cir.ptr<!u8i>
+    %2 = cir.const #cir.int<4> : !s64i
+    %3 = cir.ptr_stride %1, %2 : (!cir.ptr<!u8i>, !s64i) -> !cir.ptr<!u8i>
+    %4 = cir.get_global @storage_b : !cir.ptr<!cir.array<!u8i x 4>>
+    %5 = cir.cast array_to_ptrdecay %4 : !cir.ptr<!cir.array<!u8i x 4>> -> !cir.ptr<!u8i>
+    %6 = cir.std.mismatch(%1 : !cir.ptr<!u8i>, %3 : !cir.ptr<!u8i>, %5 : !cir.ptr<!u8i>, @_ZSt8mismatch) -> !pair {cir.narrow_char_params}
+    %7 = cir.get_global @global_pair : !cir.ptr<!pair>
+    cir.store %6, %7 : !pair, !cir.ptr<!pair>
+  }
+// The loop's offset alloca has no home in a global initializer region, so
+// the operation stays and lowers back to the call.
+// CHECK-LABEL: cir.global external @global_pair = ctor
+// CHECK: cir.std.mismatch
+// CHECK-NOT: cir.libc.memcmp
+}
+
+// -----
+
+!u8i = !cir.int<u, 8>
+!pair = !cir.struct<class "Pair" {data !cir.ptr<!u8i>, data !cir.ptr<!u8i>}>
+
+module attributes {cir.triple = "x86_64-unknown-linux-gnu",
+                   cir.int_type_width = 32 : i32} {
+  cir.func private @_ZSt8mismatch(!cir.ptr<!u8i>, !cir.ptr<!u8i>, !cir.ptr<!u8i>) -> !pair func_info<#cir.func_identity<"std::mismatch">>
+
+  cir.func @keeps_without_size_width(%first1: !cir.ptr<!u8i>, %last1: !cir.ptr<!u8i>, %first2: !cir.ptr<!u8i>) -> !pair {
+    %0 = cir.std.mismatch(%first1 : !cir.ptr<!u8i>, %last1 : !cir.ptr<!u8i>, %first2 : !cir.ptr<!u8i>, @_ZSt8mismatch) -> !pair {cir.narrow_char_params}
+    cir.return %0 : !pair
+  }
+// CHECK-LABEL: @keeps_without_size_width
+// CHECK: cir.std.mismatch
+// CHECK-NOT: cir.libc.memcmp
+}
+
+// -----
+
+!u8i = !cir.int<u, 8>
+!pair = !cir.struct<class "Pair" {data !cir.ptr<!u8i>, data !cir.ptr<!u8i>}>
+
+module attributes {cir.triple = "x86_64-unknown-linux-gnu",
+                   cir.size_type_width = 64 : i32} {
+  cir.func private @_ZSt8mismatch(!cir.ptr<!u8i>, !cir.ptr<!u8i>, !cir.ptr<!u8i>) -> !pair func_info<#cir.func_identity<"std::mismatch">>
+
+  cir.func @keeps_without_int_width(%first1: !cir.ptr<!u8i>, %last1: !cir.ptr<!u8i>, %first2: !cir.ptr<!u8i>) -> !pair {
+    %0 = cir.std.mismatch(%first1 : !cir.ptr<!u8i>, %last1 : !cir.ptr<!u8i>, %first2 : !cir.ptr<!u8i>, @_ZSt8mismatch) -> !pair {cir.narrow_char_params}
+    cir.return %0 : !pair
+  }
+// CHECK-LABEL: @keeps_without_int_width
+// CHECK: cir.std.mismatch
+// CHECK-NOT: cir.libc.memcmp
+}

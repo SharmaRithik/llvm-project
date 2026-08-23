@@ -185,6 +185,53 @@ def CIR_StdEqualPredOp : CIR_StdOp<"equal_pred",
   }];
 }
 
+def CIR_StdMismatchOp : CIR_StdOp<"mismatch",
+  (ins CIR_AnyType:$first1, CIR_AnyType:$last1, CIR_AnyType:$first2),
+  (outs CIR_AnyType:$result),
+  [AllTypesMatch<["first1", "last1"]>], "StdMismatch"> {
+  let summary = "std::mismatch()";
+  let description = [{
+    A raised `std::mismatch`. The result is the pair record the call
+    returns, holding the first position where the ranges differ.
+    `cir.narrow_char_params` is carried here from the call when CIRGen
+    recorded it. It is discardable, so a pass that drops it costs the
+    rewrite rather than making it wrong.
+  }];
+  let assemblyFormat = [{
+    `(` $first1 `:` qualified(type($first1)) `,`
+        $last1 `:` qualified(type($last1)) `,`
+        $first2 `:` qualified(type($first2)) `,`
+        $original_fn `)` `->` qualified(type($result)) attr-dict
+  }];
+}
+
+def CIR_StdMismatchPredOp : CIR_StdOp<"mismatch_pred",
+  (ins CIR_AnyType:$first1, CIR_AnyType:$last1, CIR_AnyType:$first2,
+       CIR_AnyType:$pred),
+  (outs CIR_AnyType:$result),
+  [AllTypesMatch<["first1", "last1"]>], "StdMismatch"> {
+  let summary = "std::mismatch() with a predicate";
+  let description = [{
+    A raised call to the predicate overload of `std::mismatch`.
+    `cir.elem_eq_binary_pred` is carried here from the call when CIRGen
+    proved the predicate is a capture free equality of its two
+    parameters. It is discardable, so a pass that drops it costs the
+    rewrite rather than making it wrong. The predicate operand is
+    carried so lowering back to the original call loses nothing. The
+    four iterator overload also raises here when its iterators are
+    wrapper records, with last2 riding in the predicate operand and the
+    iterator marker on the call, so only the predicate marker may
+    license a rewrite.
+  }];
+  let assemblyFormat = [{
+    `(` $first1 `:` qualified(type($first1)) `,`
+        $last1 `:` qualified(type($last1)) `,`
+        $first2 `:` qualified(type($first2)) `,`
+        $pred `:` qualified(type($pred)) `,`
+        $original_fn `)` `->` qualified(type($result)) attr-dict
+  }];
+}
+
 def CIR_StdRangesFindOp : CIR_StdOp<"ranges.find",
   (ins CIR_AnyType:$cpo, CIR_AnyType:$first, CIR_AnyType:$last,
        CIR_AnyType:$pattern, CIR_AnyType:$proj),
