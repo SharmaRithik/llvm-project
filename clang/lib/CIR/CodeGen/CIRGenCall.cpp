@@ -398,6 +398,10 @@ void CIRGenModule::constructAttributeList(
             addUnitAttr(cir::CIRDialect::getByteEqPredAttrName());
           else if (cir::IntAttr value = getByteEqPredicateValue(func, *kind))
             attrs.set(cir::CIRDialect::getByteEqPredValueAttrName(), value);
+          else if (hasBoolEqPredicate(func, *kind))
+            addUnitAttr(cir::CIRDialect::getBoolEqPredAttrName());
+          else if (mlir::BoolAttr value = getBoolEqPredicateValue(func, *kind))
+            attrs.set(cir::CIRDialect::getBoolEqPredValueAttrName(), value);
         } else if ((kind == cir::KnownFuncKind::StdEqual ||
                     kind == cir::KnownFuncKind::StdMismatch) &&
                    hasElemEqBinaryPredicate(func)) {

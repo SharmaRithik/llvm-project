@@ -842,6 +842,10 @@ public:
   static bool hasByteEqPredicate(const clang::FunctionDecl *funcDecl,
                                  cir::KnownFuncKind kind);
 
+  /// Whether a bit iterator predicate seeks its single boolean capture
+  bool hasBoolEqPredicate(const clang::FunctionDecl *funcDecl,
+                          cir::KnownFuncKind kind);
+
   /// Whether every parameter designates the same non-volatile wchar_t
   /// through a pointer, a reference, or a standard library contiguous
   /// iterator.
@@ -858,6 +862,10 @@ public:
   /// the predicate does not have that shape.
   cir::IntAttr getByteEqPredicateValue(const clang::FunctionDecl *funcDecl,
                                        cir::KnownFuncKind kind);
+
+  /// The constant sought by a capture free bit iterator predicate
+  mlir::BoolAttr getBoolEqPredicateValue(const clang::FunctionDecl *funcDecl,
+                                         cir::KnownFuncKind kind);
 
   /// Whether the predicate overload of std::equal takes three narrow
   /// character iterators over one character type and a capture free lambda

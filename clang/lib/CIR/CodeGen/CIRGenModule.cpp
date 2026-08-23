@@ -3999,6 +3999,12 @@ struct ByteEqPredicateShape {
   clang::QualType charTy;
   const clang::Expr *other;
 };
+
+struct BoolEqPredicateShape {
+  const clang::CXXRecordDecl *closure;
+  const clang::ParmVarDecl *element;
+  const clang::Expr *result;
+};
 } // namespace
 
 /// Whether `side` is a direct reference to `decl`, looking through the
@@ -4068,6 +4074,61 @@ byteEqPredicateShape(const FunctionDecl *funcDecl, cir::KnownFuncKind kind) {
   else
     return std::nullopt;
   return ByteEqPredicateShape{closure, charTy, other};
+}
+
+static std::optional<BoolEqPredicateShape>
+boolEqPredicateShape(CIRGenModule &cgm, const FunctionDecl *funcDecl) {
+  if (funcDecl->getNumParams() != 3)
+    return std::nullopt;
+
+  clang::QualType iteratorTy = funcDecl->getParamDecl(0)->getType();
+  clang::QualType lastTy = funcDecl->getParamDecl(1)->getType();
+  if (iteratorTy.isVolatileQualified() || lastTy.isVolatileQualified() ||
+      !iteratorTy->isRecordType() || !lastTy->isRecordType())
+    return std::nullopt;
+  iteratorTy = iteratorTy.getCanonicalType().getUnqualifiedType();
+  lastTy = lastTy.getCanonicalType().getUnqualifiedType();
+  if (iteratorTy != lastTy)
+    return std::nullopt;
+
+  auto structTy = mlir::dyn_cast<cir::StructType>(cgm.convertType(iteratorTy));
+  cir::StdTypeInfoAttr info =
+      structTy ? structTy.getStdTypeInfo() : cir::StdTypeInfoAttr();
+  if (!info || info.getKind() != cir::StdTypeKind::StdBitIterator ||
+      info.getElement() != cgm.convertType(funcDecl->getASTContext().BoolTy))
+    return std::nullopt;
+
+  clang::QualType closureTy = funcDecl->getParamDecl(2)->getType();
+  if (closureTy.isVolatileQualified())
+    return std::nullopt;
+  const CXXRecordDecl *closure = closureTy->getAsCXXRecordDecl();
+  if (!closure || !closure->isLambda())
+    return std::nullopt;
+
+  const CXXMethodDecl *callOp = closure->getLambdaCallOperator();
+  if (!callOp || callOp->getNumParams() != 1)
+    return std::nullopt;
+  const ParmVarDecl *element = callOp->getParamDecl(0);
+  clang::QualType elementTy = element->getType();
+  clang::QualType valueTy = elementTy.getNonReferenceType();
+  if (valueTy.isVolatileQualified())
+    return std::nullopt;
+  if (!elementTy->isDependentType()) {
+    if (valueTy.getCanonicalType().getUnqualifiedType() !=
+        funcDecl->getASTContext().BoolTy)
+      return std::nullopt;
+    if (elementTy->isReferenceType() &&
+        (!elementTy->isLValueReferenceType() || !valueTy.isConstQualified()))
+      return std::nullopt;
+  }
+
+  const auto *body = dyn_cast_if_present<CompoundStmt>(callOp->getBody());
+  if (!body || body->size() != 1)
+    return std::nullopt;
+  const auto *ret = dyn_cast<ReturnStmt>(body->body_front());
+  if (!ret || !ret->getRetValue())
+    return std::nullopt;
+  return BoolEqPredicateShape{closure, element, ret->getRetValue()};
 }
 
 /// Whether `funcDecl` is the whole range call operator of ranges::find,
@@ -4153,6 +4214,80 @@ cir::IntAttr CIRGenModule::getByteEqPredicateValue(const FunctionDecl *funcDecl,
   mlir::Type valueTy = isUnsigned ? mlir::Type(builder.getUIntNTy(width))
                                   : mlir::Type(builder.getSIntNTy(width));
   return cir::IntAttr::get(valueTy, llvm::APSInt(bits, isUnsigned));
+}
+
+bool CIRGenModule::hasBoolEqPredicate(const FunctionDecl *funcDecl,
+                                      cir::KnownFuncKind kind) {
+  if (kind != cir::KnownFuncKind::StdFindIf &&
+      kind != cir::KnownFuncKind::StdFindIfNot)
+    return false;
+  std::optional<BoolEqPredicateShape> shape =
+      boolEqPredicateShape(*this, funcDecl);
+  if (!shape || shape->closure->capture_size() != 1)
+    return false;
+
+  const LambdaCapture &capture = *shape->closure->captures().begin();
+  if (!capture.capturesVariable())
+    return false;
+  const ValueDecl *capturedVar = capture.getCapturedVar();
+  clang::QualType capturedTy = capturedVar->getType().getNonReferenceType();
+  if (capturedTy.isVolatileQualified() ||
+      capturedTy.getCanonicalType().getUnqualifiedType() !=
+          funcDecl->getASTContext().BoolTy)
+    return false;
+
+  const auto *cmp =
+      dyn_cast<BinaryOperator>(shape->result->IgnoreParenImpCasts());
+  clang::BinaryOperatorKind wanted =
+      kind == cir::KnownFuncKind::StdFindIf ? BO_EQ : BO_NE;
+  if (!cmp || cmp->getOpcode() != wanted)
+    return false;
+  return (refersToDecl(cmp->getLHS(), shape->element) &&
+          refersToDecl(cmp->getRHS(), capturedVar)) ||
+         (refersToDecl(cmp->getRHS(), shape->element) &&
+          refersToDecl(cmp->getLHS(), capturedVar));
+}
+
+mlir::BoolAttr
+CIRGenModule::getBoolEqPredicateValue(const FunctionDecl *funcDecl,
+                                      cir::KnownFuncKind kind) {
+  if (kind != cir::KnownFuncKind::StdFindIf &&
+      kind != cir::KnownFuncKind::StdFindIfNot)
+    return {};
+  std::optional<BoolEqPredicateShape> shape =
+      boolEqPredicateShape(*this, funcDecl);
+  if (!shape || shape->closure->capture_size() != 0)
+    return {};
+
+  bool identity;
+  if (refersToDecl(shape->result, shape->element)) {
+    identity = true;
+  } else if (const auto *notExpr =
+                 dyn_cast<UnaryOperator>(shape->result->IgnoreParenImpCasts());
+             notExpr && notExpr->getOpcode() == UO_LNot &&
+             refersToDecl(notExpr->getSubExpr(), shape->element)) {
+    identity = false;
+  } else {
+    const auto *cmp =
+        dyn_cast<BinaryOperator>(shape->result->IgnoreParenImpCasts());
+    if (!cmp || (cmp->getOpcode() != BO_EQ && cmp->getOpcode() != BO_NE))
+      return {};
+
+    const CXXBoolLiteralExpr *literal = nullptr;
+    if (refersToDecl(cmp->getLHS(), shape->element))
+      literal =
+          dyn_cast<CXXBoolLiteralExpr>(cmp->getRHS()->IgnoreParenImpCasts());
+    else if (refersToDecl(cmp->getRHS(), shape->element))
+      literal =
+          dyn_cast<CXXBoolLiteralExpr>(cmp->getLHS()->IgnoreParenImpCasts());
+    if (!literal)
+      return {};
+    identity =
+        cmp->getOpcode() == BO_EQ ? literal->getValue() : !literal->getValue();
+  }
+
+  bool sought = kind == cir::KnownFuncKind::StdFindIf ? identity : !identity;
+  return builder.getBoolAttr(sought);
 }
 
 bool CIRGenModule::hasElemEqBinaryPredicate(const FunctionDecl *funcDecl) {
