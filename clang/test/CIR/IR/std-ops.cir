@@ -5,6 +5,7 @@
 !closure = !cir.struct<class "Closure" {data !s8i}>
 !pair = !cir.struct<class "Pair" {data !cir.ptr<!s8i>, data !cir.ptr<!s8i>}>
 !cpo = !cir.struct<class "std::__1::ranges::__find" {pad !s8i}>
+!cpo_if = !cir.struct<class "std::__1::ranges::__find_if" {pad !s8i}>
 !identity = !cir.struct<class "std::__1::identity" {pad !s8i}>
 !vec = !cir.struct<class "std::__1::vector<char>" {data !cir.ptr<!s8i>, data !cir.ptr<!s8i>}, std_type_info = #cir.std_type_info<"std::vector", !s8i, roles {begin = array<i32: 0>, end = array<i32: 1>}>>
 // CHECK: !cir.struct<class "std::__1::vector<char>" {data !cir.ptr<!s8i>, data !cir.ptr<!s8i>}, std_type_info = #cir.std_type_info<"std::vector", !s8i, roles {begin = array<i32: 0>, end = array<i32: 1>}>>
@@ -16,6 +17,8 @@ module {
   cir.func private @_ZSt11find_if_not(!cir.ptr<!s8i>, !cir.ptr<!s8i>, !closure) -> !cir.ptr<!s8i>
   cir.func private @_ZNKSt3__16ranges6__findcl(!cir.ptr<!cpo>, !cir.ptr<!s8i>, !cir.ptr<!s8i>, !cir.ptr<!s8i>, !identity) -> !cir.ptr<!s8i>
   cir.func private @_ZNKSt3__16ranges6__findclR(!cir.ptr<!cpo>, !cir.ptr<!vec>, !cir.ptr<!s8i>, !identity) -> !cir.ptr<!s8i>
+  cir.func private @_ZNKSt3__16ranges9__find_ifcl(!cir.ptr<!cpo>, !cir.ptr<!s8i>, !cir.ptr<!s8i>, !closure, !identity) -> !cir.ptr<!s8i>
+  cir.func private @_ZNKSt3__16ranges13__find_if_notcl(!cir.ptr<!cpo>, !cir.ptr<!s8i>, !cir.ptr<!s8i>, !closure, !identity) -> !cir.ptr<!s8i>
   cir.func private @_ZSt5equal(!cir.ptr<!s8i>, !cir.ptr<!s8i>, !cir.ptr<!s8i>) -> !cir.bool
   cir.func private @_ZSt5equalP(!cir.ptr<!s8i>, !cir.ptr<!s8i>, !cir.ptr<!s8i>, !closure) -> !cir.bool
   cir.func private @_ZSt8mismatch(!cir.ptr<!s8i>, !cir.ptr<!s8i>, !cir.ptr<!s8i>) -> !pair
@@ -49,6 +52,21 @@ module {
   }
   // CHECK: cir.func @test_find_if_not(%[[NOTFIRST:.*]]: !cir.ptr<!s8i>, %[[NOTLAST:.*]]: !cir.ptr<!s8i>, %[[NOTPRED:.*]]: !rec_Closure)
   // CHECK: cir.std.find_if_not(%[[NOTFIRST]] : !cir.ptr<!s8i>, %[[NOTLAST]] : !cir.ptr<!s8i>, %[[NOTPRED]] : !rec_Closure, @_ZSt11find_if_not) -> !cir.ptr<!s8i>
+
+  cir.func @test_ranges_find_if(%cpo: !cir.ptr<!cpo_if>, %first: !cir.ptr<!s8i>, %last: !cir.ptr<!s8i>, %pred: !closure, %proj: !identity) -> !cir.ptr<!s8i> {
+    %0 = cir.std.ranges.find_if(%cpo : !cir.ptr<!cpo_if>, %first : !cir.ptr<!s8i>, %last : !cir.ptr<!s8i>, %pred : !closure, %proj : !identity, @_ZNKSt3__16ranges9__find_ifcl) -> !cir.ptr<!s8i>
+    cir.return %0 : !cir.ptr<!s8i>
+  }
+  // CHECK: cir.func @test_ranges_find_if(%[[IFCPO:.*]]: !cir.ptr<!rec_std3A3A__13A3Aranges3A3A__find_if>, %[[RIFFIRST:.*]]: !cir.ptr<!s8i>, %[[RIFLAST:.*]]: !cir.ptr<!s8i>, %[[RIFPRED:.*]]: !rec_Closure, %[[RIFPROJ:.*]]: !rec_std3A3A__13A3Aidentity)
+  // CHECK: cir.std.ranges.find_if(%[[IFCPO]] : !cir.ptr<!rec_std3A3A__13A3Aranges3A3A__find_if>, %[[RIFFIRST]] : !cir.ptr<!s8i>, %[[RIFLAST]] : !cir.ptr<!s8i>, %[[RIFPRED]] : !rec_Closure, %[[RIFPROJ]] : !rec_std3A3A__13A3Aidentity, @_ZNKSt3__16ranges9__find_ifcl) -> !cir.ptr<!s8i>
+
+  cir.func @test_ranges_find_if_not(%cpo: !cir.ptr<!cpo_if>, %first: !cir.ptr<!s8i>, %last: !cir.ptr<!s8i>, %pred: !closure, %proj: !identity) -> !cir.ptr<!s8i> {
+    %0 = cir.std.ranges.find_if_not(%cpo : !cir.ptr<!cpo_if>, %first : !cir.ptr<!s8i>, %last : !cir.ptr<!s8i>, %pred : !closure, %proj : !identity, @_ZNKSt3__16ranges13__find_if_notcl) -> !cir.ptr<!s8i>
+    cir.return %0 : !cir.ptr<!s8i>
+  }
+  // CHECK: cir.func @test_ranges_find_if_not(%[[NOTCPO:.*]]: !cir.ptr<!rec_std3A3A__13A3Aranges3A3A__find_if>, %[[RNOTFIRST:.*]]: !cir.ptr<!s8i>, %[[RNOTLAST:.*]]: !cir.ptr<!s8i>, %[[RNOTPRED:.*]]: !rec_Closure, %[[RNOTPROJ:.*]]: !rec_std3A3A__13A3Aidentity)
+  // CHECK: cir.std.ranges.find_if_not(%[[NOTCPO]] : !cir.ptr<!rec_std3A3A__13A3Aranges3A3A__find_if>, %[[RNOTFIRST]] : !cir.ptr<!s8i>, %[[RNOTLAST]] : !cir.ptr<!s8i>, %[[RNOTPRED]] : !rec_Closure, %[[RNOTPROJ]] : !rec_std3A3A__13A3Aidentity, @_ZNKSt3__16ranges13__find_if_notcl) -> !cir.ptr<!s8i>
+
 
   cir.func @test_equal(%first1: !cir.ptr<!s8i>, %last1: !cir.ptr<!s8i>, %first2: !cir.ptr<!s8i>) -> !cir.bool {
     %0 = cir.std.equal(%first1 : !cir.ptr<!s8i>, %last1 : !cir.ptr<!s8i>, %first2 : !cir.ptr<!s8i>, @_ZSt5equal) -> !cir.bool

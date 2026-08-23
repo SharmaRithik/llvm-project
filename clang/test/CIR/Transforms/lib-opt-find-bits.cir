@@ -7,6 +7,7 @@
 !refclosure = !cir.struct<class "RefBoolClosure" {data !cir.ptr<!cir.bool>}>
 !s32i = !cir.int<s, 32>
 !baditer = !cir.struct<class "signed_offset_iterator" {data !cir.ptr<!u64i>, data !s32i}, std_type_info = #cir.std_type_info<"std::bit_iterator", !cir.bool, roles {bit_offset = array<i32: 1>, word_pointer = array<i32: 0>}>>
+!cpo = !cir.struct<class "std::__1::ranges::__find_if" {pad !u32i}>
 !identity = !cir.struct<class "std::__1::identity" {pad !u32i}>
 
 module attributes {cir.triple = "x86_64-unknown-linux-gnu",
@@ -15,6 +16,7 @@ module attributes {cir.triple = "x86_64-unknown-linux-gnu",
   cir.func private @_ZSt7find_ifB(!biter, !biter, !closure) -> !biter func_info<#cir.func_identity<"std::find_if">>
   cir.func private @_ZSt11find_if_notB(!biter, !biter, !closure) -> !biter func_info<#cir.func_identity<"std::find_if_not">>
   cir.func private @_ZSt7find_ifBR(!biter, !biter, !refclosure) -> !biter func_info<#cir.func_identity<"std::find_if">>
+  cir.func private @_ZNKSt3__16ranges9__find_ifcl(!cir.ptr<!cpo>, !biter, !biter, !closure, !identity) -> !biter func_info<#cir.func_identity<"std::ranges::find_if">>
 
   cir.func @transforms_constant(%first: !biter, %last: !biter, %pred: !closure) -> !biter {
     %0 = cir.std.find_if(%first : !biter, %last : !biter, %pred : !closure, @_ZSt7find_ifB) -> !biter {cir.bool_eq_pred_value = true}
@@ -26,6 +28,10 @@ module attributes {cir.triple = "x86_64-unknown-linux-gnu",
     cir.return %0 : !biter
   }
 
+  cir.func @transforms_ranges_constant(%this: !cir.ptr<!cpo>, %first: !biter, %last: !biter, %pred: !closure, %proj: !identity) -> !biter {
+    %0 = cir.std.ranges.find_if(%this : !cir.ptr<!cpo>, %first : !biter, %last : !biter, %pred : !closure, %proj : !identity, @_ZNKSt3__16ranges9__find_ifcl) -> !biter {cir.bool_eq_pred_value = true}
+    cir.return %0 : !biter
+  }
 
 
 
@@ -81,6 +87,10 @@ module attributes {cir.triple = "x86_64-unknown-linux-gnu",
 // CHECK: cir.extract_member %arg2[0] : !rec_BoolClosure -> !cir.bool
 // CHECK: cir.ctz
 // CHECK-NOT: cir.std.find_if
+
+// CHECK-LABEL: @transforms_ranges_constant
+// CHECK: cir.ctz
+// CHECK-NOT: cir.std.ranges.find_if
 
 // The inequality form and the clear bit constant share the same loop,
 // with the word inverted before masking.

@@ -77,8 +77,24 @@ struct __fn {
   operator()(Range &&r, const T &value, Proj proj = {}) const noexcept;
 };
 }
+namespace __find_if {
+struct __fn {
+  template <class Iter, class Sent, class Pred, class Proj = identity>
+  Iter operator()(Iter first, Sent last, Pred pred,
+                  Proj proj = {}) const noexcept;
+};
+}
+namespace __find_if_not {
+struct __fn {
+  template <class Iter, class Sent, class Pred, class Proj = identity>
+  Iter operator()(Iter first, Sent last, Pred pred,
+                  Proj proj = {}) const noexcept;
+};
+}
 inline namespace __cpo {
 inline constexpr __find::__fn find{};
+inline constexpr __find_if::__fn find_if{};
+inline constexpr __find_if_not::__fn find_if_not{};
 }
 }
 }
@@ -206,6 +222,31 @@ unsigned char *test_ranges_find(unsigned char *first, unsigned char *last,
 // FINAL: %[[RPROJ:.*]] = cir.load %
 // FINAL: cir.call @_ZNKSt6ranges6__find4__fnclIPhS3_hSt8identityEET_S5_T0_RKT1_T2_(%[[RCPO]], %[[RFIRST]], %[[RLAST]], %[[RVALUE]], %[[RPROJ]]) nothrow
 // FINAL-SAME: cir.narrow_char_params
+
+struct RangesPredicate {
+  unsigned char state;
+  bool operator()(unsigned char) const;
+};
+
+unsigned char *test_ranges_find_if(unsigned char *first,
+                                   unsigned char *last,
+                                   RangesPredicate pred) {
+  return std::ranges::find_if(first, last, pred);
+}
+// RAISED-LABEL: @_Z19test_ranges_find_ifPhS_15RangesPredicate
+// RAISED: cir.std.ranges.find_if({{.*}}@_ZNKSt6ranges9__find_if4__fnclIPhS3_15RangesPredicateSt8identityEET_S6_T0_T1_T2_)
+// FINAL-LABEL: @_Z19test_ranges_find_ifPhS_15RangesPredicate
+// FINAL: cir.call @_ZNKSt6ranges9__find_if4__fnclIPhS3_15RangesPredicateSt8identityEET_S6_T0_T1_T2_
+
+unsigned char *test_ranges_find_if_not(unsigned char *first,
+                                       unsigned char *last,
+                                       RangesPredicate pred) {
+  return std::ranges::find_if_not(first, last, pred);
+}
+// RAISED-LABEL: @_Z23test_ranges_find_if_notPhS_15RangesPredicate
+// RAISED: cir.std.ranges.find_if_not({{.*}}@_ZNKSt6ranges13__find_if_not4__fnclIPhS3_15RangesPredicateSt8identityEET_S6_T0_T1_T2_)
+// FINAL-LABEL: @_Z23test_ranges_find_if_notPhS_15RangesPredicate
+// FINAL: cir.call @_ZNKSt6ranges13__find_if_not4__fnclIPhS3_15RangesPredicateSt8identityEET_S6_T0_T1_T2_
 
 unsigned char *test_ranges_find_range(std::vector<unsigned char> &v,
                                        const unsigned char &value) {

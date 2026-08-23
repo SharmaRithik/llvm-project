@@ -103,17 +103,62 @@ Iter find_if_not(Iter first, Iter last, Pred pred) {
 struct identity {
   template <class T> T &&operator()(T &&t) const;
 };
+
+struct bit_alloc {
+  using word_type = unsigned long;
+  using pointer = word_type *;
+  using const_pointer = const word_type *;
+};
+
+template <class T, class Alloc = bit_alloc> class vector;
+template <class Alloc> class vector<bool, Alloc> {
+public:
+  using __storage_type = typename Alloc::word_type;
+  using __storage_pointer = typename Alloc::pointer;
+  using __const_storage_pointer = typename Alloc::const_pointer;
+};
+
+template <bool, class True, class False> struct __choose;
+template <class True, class False> struct __choose<true, True, False> {
+  using type = True;
+};
+template <class True, class False> struct __choose<false, True, False> {
+  using type = False;
+};
+
+template <class Cp, bool IsConst> class __bit_iterator {
+  using storage_pointer =
+      typename __choose<IsConst, typename Cp::__const_storage_pointer,
+                        typename Cp::__storage_pointer>::type;
+  storage_pointer __seg_;
+  unsigned __ctz_;
+
+public:
+  bool operator!=(const __bit_iterator &) const;
+  __bit_iterator &operator++();
+  bool operator*() const;
+};
+
 namespace ranges {
 struct __find {
   template <class Iter, class Sent, class T, class Proj = identity>
   Iter operator()(Iter first, Sent last, const T &value,
                   Proj proj = {}) const;
 };
+struct __find_if {
+  template <class Iter, class Sent, class Pred, class Proj = identity>
+  Iter operator()(Iter first, Sent last, Pred pred, Proj proj = {}) const {
+    return std::find_if(first, last, pred);
+  }
+};
 inline namespace __cpo {
 inline constexpr __find find{};
+inline constexpr __find_if find_if{};
 }
 }
 }
+
+using bit_iterator = std::__bit_iterator<std::vector<bool>, false>;
 
 unsigned char *test_byte_ranges_find(unsigned char *first, unsigned char *last,
                                      const unsigned char &value) {
@@ -123,6 +168,27 @@ unsigned char *test_byte_ranges_find(unsigned char *first, unsigned char *last,
 // CHECK-NOT: cir.call @_ZNKSt6ranges
 // CHECK: cir.libc.memchr
 // CHECK-NOT: cir.call @_ZNKSt6ranges
+
+unsigned char *test_literal_ranges_find_if(unsigned char *first,
+                                           unsigned char *last) {
+  return std::ranges::find_if(
+      first, last, [](unsigned char element) { return element == 0x80; });
+}
+// CHECK-LABEL: @_Z27test_literal_ranges_find_ifPhS_
+// CHECK: %[[RANGES_LITERAL_BYTE:.*]] = cir.const #cir.int<128> : !u8i
+// CHECK: %[[RANGES_LITERAL_PATTERN:.*]] = cir.cast integral %[[RANGES_LITERAL_BYTE]] : !u8i -> !s32i
+// CHECK: cir.libc.memchr(%{{.*}}, %[[RANGES_LITERAL_PATTERN]], %{{.*}}) : !cir.ptr<!void>, !s32i, !u64i
+// CHECK-NOT: cir.call @_ZNKSt6ranges9__find_if
+
+bit_iterator test_ranges_bool_find_if(bit_iterator first,
+                                      bit_iterator last) {
+  return std::ranges::find_if(
+      first, last, [](bool element) { return element; });
+}
+// CHECK-LABEL: @_Z24test_ranges_bool_find_if
+// CHECK: cir.alloca "find_bit_word"
+// CHECK: cir.ctz
+// CHECK-NOT: cir.call @_ZNKSt6ranges9__find_if
 
 int *test_wide_ranges_find(int *first, int *last, const int &value) {
   return std::ranges::find(first, last, value);

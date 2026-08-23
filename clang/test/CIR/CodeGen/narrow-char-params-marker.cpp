@@ -233,6 +233,39 @@ template <class Iter, class Pred> Iter find_if_not(Iter first, Iter last, Pred p
   return first;
 }
 
+// Real std::identity is empty and call convention lowering drops an empty
+// record argument, so this one carries a byte to keep the projection
+// operand visible.
+struct identity {
+  unsigned char state;
+  template <class T> T &&operator()(T &&value) const;
+};
+
+namespace ranges {
+namespace __find_if {
+struct __fn {
+  template <class Iter, class Sent, class Pred, class Proj = identity>
+  Iter operator()(Iter first, Sent last, Pred pred,
+                  Proj proj = {}) const {
+    return std::find_if(first, last, pred);
+  }
+};
+}
+namespace __find_if_not {
+struct __fn {
+  template <class Iter, class Sent, class Pred, class Proj = identity>
+  Iter operator()(Iter first, Sent last, Pred pred,
+                  Proj proj = {}) const {
+    return std::find_if_not(first, last, pred);
+  }
+};
+}
+inline namespace __cpo {
+inline constexpr __find_if::__fn find_if{};
+inline constexpr __find_if_not::__fn find_if_not{};
+}
+}
+
 struct bit_alloc {
   using word_type = unsigned long;
   using pointer = word_type *;
@@ -298,6 +331,43 @@ char *find_if_wrong_polarity(char *first, char *last, const char &value) {
 // CHECK-LABEL: cir.func{{.*}} @_Z22find_if_wrong_polarity
 // CHECK: cir.call @_ZNSt3__17find_ifIPcZ22find_if_wrong_polarity
 // CHECK-NOT: cir.byte_eq_pred
+
+char *ranges_byte_find_if_capture(char *first, char *last,
+                                  const char &value) {
+  return std::ranges::find_if(
+      first, last, [&](char element) { return element == value; });
+}
+// CHECK-LABEL: cir.func{{.*}} @_Z27ranges_byte_find_if_capture
+// CHECK: cir.call @_ZNKSt3__16ranges9__find_if4__fnclIPcS4_Z27ranges_byte_find_if_capture{{.*}} {cir.byte_eq_pred}
+
+unsigned char *ranges_byte_find_if_not_literal(unsigned char *first,
+                                                unsigned char *last) {
+  return std::ranges::find_if_not(
+      first, last, [](unsigned char element) { return element != 0x80; });
+}
+// CHECK-LABEL: cir.func{{.*}} @_Z31ranges_byte_find_if_not_literal
+// CHECK: cir.call @_ZNKSt3__16ranges13__find_if_not4__fnclIPhS4_Z31ranges_byte_find_if_not_literal{{.*}} {cir.byte_eq_pred_value = #cir.int<128> : !u8i}
+
+char *ranges_byte_find_if_wrong_polarity(char *first, char *last,
+                                         const char &value) {
+  return std::ranges::find_if(
+      first, last, [&](char element) { return element != value; });
+}
+// CHECK-LABEL: cir.func{{.*}} @_Z34ranges_byte_find_if_wrong_polarity
+// CHECK: cir.call @_ZNKSt3__16ranges9__find_if4__fnclIPcS4_Z34ranges_byte_find_if_wrong_polarity
+// CHECK-NOT: cir.byte_eq_pred
+
+struct ByteProjection {
+  char operator()(char) const;
+};
+char *ranges_byte_find_if_projected(char *first, char *last,
+                                    const char &value) {
+  return std::ranges::find_if(first, last,
+                              [&](char element) { return element == value; },
+                              ByteProjection{});
+}
+// CHECK-LABEL: cir.func{{.*}} @_Z29ranges_byte_find_if_projected
+// CHECK: cir.call @_ZNKSt3__16ranges9__find_if4__fnclIPcS4_Z29ranges_byte_find_if_projected{{.*}}) : (
 
 char *find_if_two_captures(char *first, char *last, const char &value, const char &other) {
   return std::find_if(first, last,
@@ -565,6 +635,33 @@ bit_iterator bool_find_if_not_wrong_polarity(bit_iterator first,
 // CHECK: cir.call @_ZNSt3__111find_if_notINS_14__bit_iterator
 // CHECK-NOT: cir.bool_eq_pred
 
+bit_iterator ranges_bool_find_if_capture(bit_iterator first,
+                                         bit_iterator last,
+                                         const bool &value) {
+  return std::ranges::find_if(
+      first, last, [&](bool element) { return element == value; });
+}
+// CHECK-LABEL: cir.func{{.*}} @_Z27ranges_bool_find_if_capture
+// CHECK: cir.call @_ZNKSt3__16ranges9__find_if4__fnclINS_14__bit_iterator{{.*}} {cir.bool_eq_pred}
+
+bit_iterator ranges_bool_find_if_not_identity(bit_iterator first,
+                                              bit_iterator last) {
+  return std::ranges::find_if_not(
+      first, last, [](bool element) { return element; });
+}
+// CHECK-LABEL: cir.func{{.*}} @_Z32ranges_bool_find_if_not_identity
+// CHECK: cir.call @_ZNKSt3__16ranges13__find_if_not4__fnclINS_14__bit_iterator{{.*}} {cir.bool_eq_pred_value = false}
+
+bit_iterator ranges_bool_find_if_not_wrong_polarity(bit_iterator first,
+                                                    bit_iterator last,
+                                                    const bool &value) {
+  return std::ranges::find_if_not(
+      first, last, [&](bool element) { return element == value; });
+}
+// CHECK-LABEL: cir.func{{.*}} @_Z38ranges_bool_find_if_not_wrong_polarity
+// CHECK: cir.call @_ZNKSt3__16ranges13__find_if_not4__fnclINS_14__bit_iterator
+// CHECK-NOT: cir.bool_eq_pred
+
 bit_iterator bool_find_if_two_captures(bit_iterator first, bit_iterator last,
                                        bool value, bool other) {
   return std::find_if(first, last, [value, other](bool element) {
@@ -801,3 +898,21 @@ bool mismatch_pred_int(int *first1, int *last1, int *first2) {
 // CHECK-LABEL: cir.func{{.*}} @_Z17mismatch_pred_int
 // CHECK: cir.call @_ZNSt3__18mismatchIPiS1_Z17mismatch_pred_intS1_S1_S1_E3$_0EENS_4pairIT_T0_EES4_S4_S5_T1_
 // CHECK-NOT: cir.elem_eq_binary_pred
+
+bool ranges_byte_wrong_not(char *first, char *last, char value) {
+  auto it = std::ranges::find_if_not(
+      first, last, [&](char element) { return element == value; });
+  return it != last;
+}
+// The equality body under find_if_not has the wrong polarity for the fold.
+// CHECK-LABEL: cir.func{{.*}} @_Z21ranges_byte_wrong_not
+// CHECK-NOT: cir.byte_eq_pred
+
+bit_iterator ranges_bool_wrong_if(bit_iterator first, bit_iterator last,
+                                  bool x) {
+  return std::ranges::find_if(
+      first, last, [&](auto element) { return element != x; });
+}
+// The inequality body under find_if has the wrong polarity for the fold.
+// CHECK-LABEL: cir.func{{.*}} @_Z20ranges_bool_wrong_if
+// CHECK-NOT: cir.bool_eq_pred
