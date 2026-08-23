@@ -596,16 +596,16 @@ module attributes {cir.triple = "x86_64-unknown-linux-gnu",
 !s8i = !cir.int<s, 8>
 !u8i = !cir.int<u, 8>
 !layout = !cir.struct<"std::__1::__vector_layout<char>" {data !cir.ptr<!s8i>, data !cir.ptr<!s8i>, data !cir.ptr<!s8i>}>
-!vec = !cir.struct<class "std::__1::vector<char>" {data !layout}, std_type_info = #cir.std_type_info<"std::vector", !s8i, begin[0, 0], end[0, 1]>>
-!vec_bad_path = !cir.struct<class "std::__1::vector<signed char>" {data !cir.ptr<!s8i>}, std_type_info = #cir.std_type_info<"std::vector", !s8i, begin[7], end[0]>>
-!vec_wide = !cir.struct<class "std::__1::vector<int>" {data !cir.ptr<!cir.int<s, 32>>, data !cir.ptr<!cir.int<s, 32>>}, std_type_info = #cir.std_type_info<"std::vector", !cir.int<s, 32>, begin[0], end[1]>>
+!vec = !cir.struct<class "std::__1::vector<char>" {data !layout}, std_type_info = #cir.std_type_info<"std::vector", !s8i, roles {begin = array<i32: 0, 0>, end = array<i32: 0, 1>}>>
+!vec_bad_path = !cir.struct<class "std::__1::vector<signed char>" {data !cir.ptr<!s8i>}, std_type_info = #cir.std_type_info<"std::vector", !s8i, roles {begin = array<i32: 7>, end = array<i32: 0>}>>
+!vec_wide = !cir.struct<class "std::__1::vector<int>" {data !cir.ptr<!cir.int<s, 32>>, data !cir.ptr<!cir.int<s, 32>>}, std_type_info = #cir.std_type_info<"std::vector", !cir.int<s, 32>, roles {begin = array<i32: 0>, end = array<i32: 1>}>>
 !witer = !cir.struct<class "std::__1::__wrap_iter<char *>" {data !cir.ptr<!s8i>}>
 !impl_data = !cir.struct<"std::_Vector_impl_data" {data !cir.ptr<!s8i>, data !cir.ptr<!s8i>, data !cir.ptr<!s8i>}>
 !impl = !cir.struct<"std::_Vector_impl" {data !impl_data}>
 !vbase = !cir.struct<"std::_Vector_base" {data !impl}>
-!gvec = !cir.struct<class "std::vector<char>" {data !vbase}, std_type_info = #cir.std_type_info<"std::vector", !s8i, begin[0, 0, 0, 0], end[0, 0, 0, 1]>>
+!gvec = !cir.struct<class "std::vector<char>" {data !vbase}, std_type_info = #cir.std_type_info<"std::vector", !s8i, roles {begin = array<i32: 0, 0, 0, 0>, end = array<i32: 0, 0, 0, 1>}>>
 !uinner = !cir.union<"inner_union" {data !cir.ptr<!s8i>, data !cir.ptr<!cir.int<u, 64>>}, padding = {!u8i}>
-!uvec = !cir.struct<class "std::__1::vector<char8_t>" {data !uinner}, std_type_info = #cir.std_type_info<"std::vector", !s8i, begin[0, 0], end[0, 1]>>
+!uvec = !cir.struct<class "std::__1::vector<char8_t>" {data !uinner}, std_type_info = #cir.std_type_info<"std::vector", !s8i, roles {begin = array<i32: 0, 0>, end = array<i32: 0, 1>}>>
 !plainvec = !cir.struct<class "std::__1::vector<wchar_t>" {data !cir.ptr<!s8i>, data !cir.ptr<!s8i>}>
 !identity = !cir.struct<class "std::__1::identity" {pad !u8i}>
 !cpo = !cir.struct<class "std::__1::ranges::__find" {pad !u8i}>

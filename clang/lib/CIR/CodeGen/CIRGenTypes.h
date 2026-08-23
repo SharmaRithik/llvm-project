@@ -143,7 +143,7 @@ public:
   /// the declaration names a known std type with a recognized layout.
   void attachStdTypeInfo(const clang::RecordDecl *rd, cir::RecordType entry);
   bool findFieldPath(const clang::RecordDecl *rd, llvm::StringRef name,
-                     llvm::SmallVectorImpl<uint32_t> &path);
+                     llvm::SmallVectorImpl<int32_t> &path);
 
   /// Convert type T into an mlir::Type. This differs from convertType in that
   /// it is used to convert to the memory representation for a type. For

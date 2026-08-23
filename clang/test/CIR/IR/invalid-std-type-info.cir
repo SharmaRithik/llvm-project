@@ -3,19 +3,40 @@
 !s8i = !cir.int<s, 8>
 
 // expected-error@below {{std_type_info requires a complete identified record}}
-!bad = !cir.struct<{data !cir.ptr<!s8i>}, std_type_info = #cir.std_type_info<"std::vector", !s8i, begin[0], end[0]>>
+!bad = !cir.struct<{data !cir.ptr<!s8i>}, std_type_info = #cir.std_type_info<"std::vector", !s8i, roles {begin = array<i32: 0>, end = array<i32: 0>}>>
 
 // -----
 
 !s8i = !cir.int<s, 8>
 
 // expected-error@below {{std_type_info requires a complete identified record}}
-!bad = !cir.struct<"incomplete_carrier" incomplete, std_type_info = #cir.std_type_info<"std::vector", !s8i, begin[0], end[0]>>
+!bad = !cir.struct<"incomplete_carrier" incomplete, std_type_info = #cir.std_type_info<"std::vector", !s8i, roles {begin = array<i32: 0>, end = array<i32: 0>}>>
 
 // -----
 
 !s8i = !cir.int<s, 8>
 
-!first = !cir.struct<"conflicted" {data !cir.ptr<!s8i>, data !cir.ptr<!s8i>}, std_type_info = #cir.std_type_info<"std::vector", !s8i, begin[0], end[1]>>
+!first = !cir.struct<"conflicted" {data !cir.ptr<!s8i>, data !cir.ptr<!s8i>}, std_type_info = #cir.std_type_info<"std::vector", !s8i, roles {begin = array<i32: 0>, end = array<i32: 1>}>>
 // expected-error@below {{std_type_info contradicts an earlier spelling of the same record}}
-!second = !cir.struct<"conflicted" {data !cir.ptr<!s8i>, data !cir.ptr<!s8i>}, std_type_info = #cir.std_type_info<"std::vector", !s8i, begin[1], end[0]>>
+!second = !cir.struct<"conflicted" {data !cir.ptr<!s8i>, data !cir.ptr<!s8i>}, std_type_info = #cir.std_type_info<"std::vector", !s8i, roles {begin = array<i32: 1>, end = array<i32: 0>}>>
+
+// -----
+
+!s8i = !cir.int<s, 8>
+
+// expected-error@below {{role "begin" must carry a dense i32 member index path}}
+!bad = !cir.struct<"bad_role_value" {data !cir.ptr<!s8i>}, std_type_info = #cir.std_type_info<"std::vector", !s8i, roles {begin = "zero", end = array<i32: 0>}>>
+
+// -----
+
+!s8i = !cir.int<s, 8>
+
+// expected-error@below {{role "begin" has a negative member index}}
+!bad = !cir.struct<"bad_role_index" {data !cir.ptr<!s8i>}, std_type_info = #cir.std_type_info<"std::vector", !s8i, roles {begin = array<i32: -1>, end = array<i32: 0>}>>
+
+// -----
+
+!s8i = !cir.int<s, 8>
+
+// expected-error@below {{a contiguous container identity requires the begin and end roles}}
+!bad = !cir.struct<"missing_role" {data !cir.ptr<!s8i>}, std_type_info = #cir.std_type_info<"std::vector", !s8i, roles {begin = array<i32: 0>}>>
