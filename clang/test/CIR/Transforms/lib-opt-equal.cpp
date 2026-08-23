@@ -37,6 +37,14 @@
 // CIR-NEXT: %[[EQUAL:[0-9]+]] = cir.cmp eq %[[MEMCMP]], %[[ZERO]] : !s32i
 // CIR-NEXT: cir.yield %[[EQUAL]] : !cir.bool
 
+// The proven capture free equality lambda licenses the same rewrite,
+// including the emptiness guard around the call.
+// CIR-LABEL: cir.func dso_local @_Z15byte_equal_predPhS_S_
+// CIR: %[[PRED_EMPTY:[0-9]+]] = cir.cmp eq %{{[0-9]+}}, %{{[0-9]+}} : !cir.ptr<!u8i>
+// CIR: cir.ternary(%[[PRED_EMPTY]], true {
+// CIR: %[[PRED_MEMCMP:[0-9]+]] = cir.libc.memcmp(%{{[0-9]+}}, %{{[0-9]+}}, %{{[0-9]+}}) : !cir.ptr<!void>, !cir.ptr<!void>, !u64i -> !s32i
+// CIR: cir.cmp eq %[[PRED_MEMCMP]], %{{[0-9]+}} : !s32i
+
 // CIR-LABEL: cir.func dso_local @_Z11empty_equalPhS_
 // CIR: %[[EMPTY:[0-9]+]] = cir.cmp eq %{{[0-9]+}}, %{{[0-9]+}} : !cir.ptr<!u8i>
 // CIR-NEXT: %{{[0-9]+}} = cir.ternary(%[[EMPTY]], true {
@@ -78,15 +86,30 @@
 
 // NOXFORM-LABEL: cir.func dso_local @_Z10byte_equalPhS_S_
 // NOXFORM: cir.call @_ZSt5equalIPhS0_EbT_S1_T0_
+// NOXFORM-LABEL: cir.func dso_local @_Z15byte_equal_predPhS_S_
+// NOXFORM: cir.call @_ZSt5equalIPhS0_
 
 namespace std {
 template <class Iter1, class Iter2>
 bool equal(Iter1 first1, Iter1 last1, Iter2 first2);
+template <class Iter1, class Iter2, class Pred>
+bool equal(Iter1 first1, Iter1 last1, Iter2 first2, Pred pred) {
+  for (; first1 != last1; ++first1, ++first2)
+    if (!pred(*first1, *first2))
+      return false;
+  return true;
+}
 }
 
 bool byte_equal(unsigned char *first1, unsigned char *last1,
                 unsigned char *first2) {
   return std::equal(first1, last1, first2);
+}
+
+bool byte_equal_pred(unsigned char *first1, unsigned char *last1,
+                     unsigned char *first2) {
+  return std::equal(first1, last1, first2,
+                    [](auto a, auto b) { return a == b; });
 }
 
 bool empty_equal(unsigned char *first1, unsigned char *first2) {

@@ -5027,6 +5027,19 @@ bool cir::StdEqualOp::signatureMatches(mlir::TypeRange operands,
   return isIterator(operands[0]) && isIterator(operands[2]);
 }
 
+bool cir::StdEqualPredOp::signatureMatches(mlir::TypeRange operands,
+                                           mlir::TypeRange results) {
+  // The predicate operand is a closure record carried for lowering back.
+  if (operands.size() != getNumArgs() || results.size() != 1 ||
+      !mlir::isa<cir::BoolType>(results[0]) || operands[0] != operands[1] ||
+      !mlir::isa<cir::RecordType>(operands[3]))
+    return false;
+  auto isIterator = [](mlir::Type type) {
+    return mlir::isa<cir::PointerType, cir::RecordType>(type);
+  };
+  return isIterator(operands[0]) && isIterator(operands[2]);
+}
+
 bool cir::StdRangesFindOp::signatureMatches(mlir::TypeRange operands,
                                             mlir::TypeRange results) {
   // Operand 0 is the customization point object the call was made through

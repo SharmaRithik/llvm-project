@@ -4000,7 +4000,10 @@ struct ByteEqPredicateShape {
 } // namespace
 
 /// Whether `side` is a direct reference to `decl`, looking through the
-/// implicit conversions a comparison wraps around it.
+/// implicit conversions a comparison wraps around it. Only implicit casts
+/// may be skipped. An explicit cast changes what the comparison computes,
+/// as in comparing against the other parameter cast to a different
+/// signedness, so it must make this return false.
 static bool refersToDecl(const Expr *side, const ValueDecl *decl) {
   const auto *ref = dyn_cast<DeclRefExpr>(side->IgnoreParenImpCasts());
   return ref && ref->getDecl()->getCanonicalDecl() == decl->getCanonicalDecl();
@@ -4148,6 +4151,62 @@ cir::IntAttr CIRGenModule::getByteEqPredicateValue(const FunctionDecl *funcDecl,
   mlir::Type valueTy = isUnsigned ? mlir::Type(builder.getUIntNTy(width))
                                   : mlir::Type(builder.getSIntNTy(width));
   return cir::IntAttr::get(valueTy, llvm::APSInt(bits, isUnsigned));
+}
+
+bool CIRGenModule::hasElemEqBinaryPredicate(const FunctionDecl *funcDecl) {
+  if (funcDecl->getNumParams() != 4)
+    return false;
+
+  clang::QualType charTy = narrowCharPointee(funcDecl->getParamDecl(0));
+  if (charTy.isNull() ||
+      narrowCharPointee(funcDecl->getParamDecl(1)) != charTy ||
+      narrowCharPointee(funcDecl->getParamDecl(2)) != charTy)
+    return false;
+
+  // A capture would carry state the pure two parameter equality proof
+  // cannot account for.
+  const CXXRecordDecl *closure =
+      funcDecl->getParamDecl(3)->getType()->getAsCXXRecordDecl();
+  if (!closure || !closure->isLambda() || closure->capture_size() != 0)
+    return false;
+
+  const CXXMethodDecl *callOp = closure->getLambdaCallOperator();
+  if (!callOp || callOp->getNumParams() != 2)
+    return false;
+  // A generic lambda leaves each parameter dependent here, and the call
+  // shape instantiates it to the character the iterators designate. A
+  // concrete parameter has to be that character already, by value or by
+  // const reference.
+  for (unsigned i = 0; i < 2; ++i) {
+    clang::QualType paramTy = callOp->getParamDecl(i)->getType();
+    if (paramTy->isDependentType())
+      continue;
+    if (paramTy.getNonReferenceType().isVolatileQualified())
+      return false;
+    if (paramTy.getNonReferenceType().getCanonicalType().getUnqualifiedType() !=
+        charTy)
+      return false;
+  }
+
+  // The body has to be a lone return of a builtin equality with one lambda
+  // parameter on each side, in either order. Any other shape can compute
+  // something memcmp equality does not.
+  const auto *body = dyn_cast_if_present<CompoundStmt>(callOp->getBody());
+  if (!body || body->size() != 1)
+    return false;
+  const auto *ret = dyn_cast<ReturnStmt>(body->body_front());
+  if (!ret || !ret->getRetValue())
+    return false;
+  const auto *cmp =
+      dyn_cast<BinaryOperator>(ret->getRetValue()->IgnoreParenImpCasts());
+  if (!cmp || cmp->getOpcode() != BO_EQ)
+    return false;
+  const ParmVarDecl *lhsParam = callOp->getParamDecl(0);
+  const ParmVarDecl *rhsParam = callOp->getParamDecl(1);
+  return (refersToDecl(cmp->getLHS(), lhsParam) &&
+          refersToDecl(cmp->getRHS(), rhsParam)) ||
+         (refersToDecl(cmp->getLHS(), rhsParam) &&
+          refersToDecl(cmp->getRHS(), lhsParam));
 }
 
 static void setWindowsItaniumDLLImport(CIRGenModule &cgm, bool isLocal,

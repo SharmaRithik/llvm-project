@@ -495,8 +495,10 @@ static void rewriteSearchToMemmem(StdSearchOp searchOp,
   searchOp.erase();
 }
 
-static void rewriteEqualToMemcmp(StdEqualOp equalOp,
+template <typename OpT>
+static void rewriteEqualToMemcmp(OpT equalOp,
                                  mlir::SymbolTableCollection &symbolTables) {
+  constexpr bool predOp = std::is_same_v<OpT, StdEqualPredOp>;
   constexpr llvm::StringLiteral libcallName = "memcmp";
   std::optional<LibCallEnv> env =
       checkLibCallEnv(equalOp, libcallName, llvm::LibFunc_memcmp);
@@ -504,9 +506,16 @@ static void rewriteEqualToMemcmp(StdEqualOp equalOp,
     return;
 
   // Only the CIRGen fact licenses the rewrite because an enum or atomic
-  // element also lowers to a byte wide integer.
-  if (!equalOp->getAttrOfType<mlir::UnitAttr>(
-          cir::CIRDialect::getNarrowCharParamsAttrName()))
+  // element also lowers to a byte wide integer and a closure of the right
+  // shape can compute anything. The predicate form accepts only its own
+  // marker since the proof covers the lambda body, and because the four
+  // iterator overload raises as the predicate form when its iterators are
+  // wrapper records, carrying last2 in the predicate operand and the
+  // iterator marker on the call. Rewriting that shape would read only one
+  // range's length.
+  if (!equalOp->template getAttrOfType<mlir::UnitAttr>(
+          predOp ? cir::CIRDialect::getElemEqBinaryPredAttrName()
+                 : cir::CIRDialect::getNarrowCharParamsAttrName()))
     return;
 
   // The introduced operation uses the recorded int and size_t widths which
@@ -598,7 +607,7 @@ void LibOptPass::runOnOperation() {
             [&](auto find) { rewriteFindLikeToMemchr(find, symbolTables); })
         .Case<StdSearchOp>(
             [&](auto search) { rewriteSearchToMemmem(search, symbolTables); })
-        .Case<StdEqualOp>(
+        .Case<StdEqualOp, StdEqualPredOp>(
             [&](auto equal) { rewriteEqualToMemcmp(equal, symbolTables); });
   });
 }
