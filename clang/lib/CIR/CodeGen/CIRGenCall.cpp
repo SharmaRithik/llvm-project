@@ -393,7 +393,9 @@ void CIRGenModule::constructAttributeList(
                    hasWideCharParams(func)) {
           addUnitAttr(cir::CIRDialect::getWideCharParamsAttrName());
         } else if (kind == cir::KnownFuncKind::StdFindIf ||
-                   kind == cir::KnownFuncKind::StdFindIfNot) {
+                   kind == cir::KnownFuncKind::StdFindIfNot ||
+                   kind == cir::KnownFuncKind::StdRangesFindIf ||
+                   kind == cir::KnownFuncKind::StdRangesFindIfNot) {
           if (hasByteEqPredicate(func, *kind))
             addUnitAttr(cir::CIRDialect::getByteEqPredAttrName());
           else if (cir::IntAttr value = getByteEqPredicateValue(func, *kind))

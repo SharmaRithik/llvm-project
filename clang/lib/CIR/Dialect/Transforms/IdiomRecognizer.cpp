@@ -104,7 +104,8 @@ public:
 using RecognizedStdOps =
     StdRecognizer<StdFindOp, StdSearchOp, StdFindIfOp, StdFindIfNotOp,
                   StdEqualOp, StdEqualPredOp, StdMismatchOp, StdMismatchPredOp,
-                  StdRangesFindOp, StdRangesFindRangeOp, StrLenOp>;
+                  StdRangesFindOp, StdRangesFindIfOp, StdRangesFindIfNotOp,
+                  StdRangesFindRangeOp, StrLenOp>;
 
 struct IdiomRecognizerPass
     : public impl::IdiomRecognizerBase<IdiomRecognizerPass> {

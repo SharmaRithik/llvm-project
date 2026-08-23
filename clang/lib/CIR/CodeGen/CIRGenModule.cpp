@@ -3820,9 +3820,14 @@ CIRGenModule::getKnownFuncKind(const FunctionDecl *funcDecl) {
   // operator of a customization point object, whose identity is the
   // object's declared name.
   if (method) {
-    if (method->getOverloadedOperator() == clang::OO_Call &&
-        isStdRangesCpo(method->getParent(), "find"))
-      return cir::StdRangesFindOp::getFuncKind();
+    if (method->getOverloadedOperator() == clang::OO_Call) {
+      if (isStdRangesCpo(method->getParent(), "find"))
+        return cir::StdRangesFindOp::getFuncKind();
+      if (isStdRangesCpo(method->getParent(), "find_if"))
+        return cir::StdRangesFindIfOp::getFuncKind();
+      if (isStdRangesCpo(method->getParent(), "find_if_not"))
+        return cir::StdRangesFindIfNotOp::getFuncKind();
+    }
     return std::nullopt;
   }
 
@@ -3968,6 +3973,12 @@ bool CIRGenModule::hasNarrowCharParams(const FunctionDecl *funcDecl) {
   return hasCharacterParams(funcDecl, narrowCharPointee);
 }
 
+static bool isStdIdentityProjection(const ParmVarDecl *param) {
+  const clang::CXXRecordDecl *projRec = param->getType()->getAsCXXRecordDecl();
+  return projRec && projRec->isInStdNamespace() && projRec->getIdentifier() &&
+         projRec->getName() == "identity";
+}
+
 /// Whether `funcDecl` is a call operator taking a narrow character
 /// iterator pair and value like std::find, plus a projection parameter
 /// that has to be std::identity, so projecting changes nothing and the
@@ -3982,10 +3993,7 @@ bool CIRGenModule::hasNarrowCharRangesFindParams(const FunctionDecl *funcDecl) {
       narrowCharPointee(funcDecl->getParamDecl(1)) != charTy ||
       narrowCharPointee(funcDecl->getParamDecl(2)) != charTy)
     return false;
-  const clang::CXXRecordDecl *projRec =
-      funcDecl->getParamDecl(3)->getType()->getAsCXXRecordDecl();
-  return projRec && projRec->isInStdNamespace() && projRec->getIdentifier() &&
-         projRec->getName() == "identity";
+  return isStdIdentityProjection(funcDecl->getParamDecl(3));
 }
 
 namespace {
@@ -4017,9 +4025,34 @@ static bool refersToDecl(const Expr *side, const ValueDecl *decl) {
   return ref && ref->getDecl()->getCanonicalDecl() == decl->getCanonicalDecl();
 }
 
+static bool isRangesFindPredKind(cir::KnownFuncKind kind) {
+  return kind == cir::KnownFuncKind::StdRangesFindIf ||
+         kind == cir::KnownFuncKind::StdRangesFindIfNot;
+}
+
+static bool isFindIfKind(cir::KnownFuncKind kind) {
+  return kind == cir::KnownFuncKind::StdFindIf ||
+         kind == cir::KnownFuncKind::StdRangesFindIf;
+}
+
+static bool isFindIfNotKind(cir::KnownFuncKind kind) {
+  return kind == cir::KnownFuncKind::StdFindIfNot ||
+         kind == cir::KnownFuncKind::StdRangesFindIfNot;
+}
+
+// Whether the kind is any of the four predicate find forms, std or ranges,
+// which the byte and bool predicate proofs serve.
+static bool isFindPredKind(cir::KnownFuncKind kind) {
+  return isFindIfKind(kind) || isFindIfNotKind(kind);
+}
+
 static std::optional<ByteEqPredicateShape>
 byteEqPredicateShape(const FunctionDecl *funcDecl, cir::KnownFuncKind kind) {
-  if (funcDecl->getNumParams() != 3)
+  if (!isFindPredKind(kind))
+    return std::nullopt;
+  bool rangesKind = isRangesFindPredKind(kind);
+  if (funcDecl->getNumParams() != (rangesKind ? 4u : 3u) ||
+      (rangesKind && !isStdIdentityProjection(funcDecl->getParamDecl(3))))
     return std::nullopt;
 
   clang::QualType charTy = narrowCharPointee(funcDecl->getParamDecl(0));
@@ -4061,8 +4094,7 @@ byteEqPredicateShape(const FunctionDecl *funcDecl, cir::KnownFuncKind kind) {
     return std::nullopt;
   const auto *cmp =
       dyn_cast<BinaryOperator>(ret->getRetValue()->IgnoreParenImpCasts());
-  clang::BinaryOperatorKind wanted =
-      kind == cir::KnownFuncKind::StdFindIf ? BO_EQ : BO_NE;
+  clang::BinaryOperatorKind wanted = isFindIfKind(kind) ? BO_EQ : BO_NE;
   if (!cmp || cmp->getOpcode() != wanted)
     return std::nullopt;
 
@@ -4077,8 +4109,13 @@ byteEqPredicateShape(const FunctionDecl *funcDecl, cir::KnownFuncKind kind) {
 }
 
 static std::optional<BoolEqPredicateShape>
-boolEqPredicateShape(CIRGenModule &cgm, const FunctionDecl *funcDecl) {
-  if (funcDecl->getNumParams() != 3)
+boolEqPredicateShape(CIRGenModule &cgm, const FunctionDecl *funcDecl,
+                     cir::KnownFuncKind kind) {
+  if (!isFindPredKind(kind))
+    return std::nullopt;
+  bool rangesKind = isRangesFindPredKind(kind);
+  if (funcDecl->getNumParams() != (rangesKind ? 4u : 3u) ||
+      (rangesKind && !isStdIdentityProjection(funcDecl->getParamDecl(3))))
     return std::nullopt;
 
   clang::QualType iteratorTy = funcDecl->getParamDecl(0)->getType();
@@ -4148,10 +4185,7 @@ bool CIRGenModule::hasNarrowCharRangesFindRangeParams(
   clang::QualType charTy = narrowCharPointee(funcDecl->getParamDecl(1));
   if (charTy.isNull())
     return false;
-  const clang::CXXRecordDecl *projRec =
-      funcDecl->getParamDecl(2)->getType()->getAsCXXRecordDecl();
-  if (!projRec || !projRec->isInStdNamespace() || !projRec->getIdentifier() ||
-      projRec->getName() != "identity")
+  if (!isStdIdentityProjection(funcDecl->getParamDecl(2)))
     return false;
   auto structTy = mlir::dyn_cast<cir::StructType>(
       convertType(rangeTy.getCanonicalType().getUnqualifiedType()));
@@ -4218,11 +4252,10 @@ cir::IntAttr CIRGenModule::getByteEqPredicateValue(const FunctionDecl *funcDecl,
 
 bool CIRGenModule::hasBoolEqPredicate(const FunctionDecl *funcDecl,
                                       cir::KnownFuncKind kind) {
-  if (kind != cir::KnownFuncKind::StdFindIf &&
-      kind != cir::KnownFuncKind::StdFindIfNot)
+  if (!isFindPredKind(kind))
     return false;
   std::optional<BoolEqPredicateShape> shape =
-      boolEqPredicateShape(*this, funcDecl);
+      boolEqPredicateShape(*this, funcDecl, kind);
   if (!shape || shape->closure->capture_size() != 1)
     return false;
 
@@ -4238,8 +4271,7 @@ bool CIRGenModule::hasBoolEqPredicate(const FunctionDecl *funcDecl,
 
   const auto *cmp =
       dyn_cast<BinaryOperator>(shape->result->IgnoreParenImpCasts());
-  clang::BinaryOperatorKind wanted =
-      kind == cir::KnownFuncKind::StdFindIf ? BO_EQ : BO_NE;
+  clang::BinaryOperatorKind wanted = isFindIfKind(kind) ? BO_EQ : BO_NE;
   if (!cmp || cmp->getOpcode() != wanted)
     return false;
   return (refersToDecl(cmp->getLHS(), shape->element) &&
@@ -4251,11 +4283,10 @@ bool CIRGenModule::hasBoolEqPredicate(const FunctionDecl *funcDecl,
 mlir::BoolAttr
 CIRGenModule::getBoolEqPredicateValue(const FunctionDecl *funcDecl,
                                       cir::KnownFuncKind kind) {
-  if (kind != cir::KnownFuncKind::StdFindIf &&
-      kind != cir::KnownFuncKind::StdFindIfNot)
+  if (!isFindPredKind(kind))
     return {};
   std::optional<BoolEqPredicateShape> shape =
-      boolEqPredicateShape(*this, funcDecl);
+      boolEqPredicateShape(*this, funcDecl, kind);
   if (!shape || shape->closure->capture_size() != 0)
     return {};
 
@@ -4286,7 +4317,7 @@ CIRGenModule::getBoolEqPredicateValue(const FunctionDecl *funcDecl,
         cmp->getOpcode() == BO_EQ ? literal->getValue() : !literal->getValue();
   }
 
-  bool sought = kind == cir::KnownFuncKind::StdFindIf ? identity : !identity;
+  bool sought = isFindIfKind(kind) ? identity : !identity;
   return builder.getBoolAttr(sought);
 }
 

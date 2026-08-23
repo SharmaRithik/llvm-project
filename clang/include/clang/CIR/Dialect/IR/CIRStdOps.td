@@ -257,6 +257,39 @@ def CIR_StdRangesFindOp : CIR_StdOp<"ranges.find",
   }];
 }
 
+class CIR_StdRangesFindPredOp<string functionName, string cxxName,
+                              string knownKind>
+    : CIR_StdOp<functionName,
+  (ins CIR_AnyType:$cpo, CIR_AnyType:$first, CIR_AnyType:$last,
+       CIR_AnyType:$pred, CIR_AnyType:$proj),
+  (outs CIR_AnyType:$result),
+  [AllTypesMatch<["first", "last", "result"]>], knownKind> {
+  let summary = "std::" # cxxName # "()";
+  let description = [{
+    A raised call to `std::}] # cxxName # [{` over an iterator pair.
+    The customization point object and projection stay as operands so generic
+    lowering restores the original member call with its operands in order.
+    The predicate markers carry the same source proofs as the corresponding
+    `std` algorithm.
+  }];
+  let assemblyFormat = [{
+    `(` $cpo `:` qualified(type($cpo)) `,`
+        $first `:` qualified(type($first)) `,`
+        $last `:` qualified(type($last)) `,`
+        $pred `:` qualified(type($pred)) `,`
+        $proj `:` qualified(type($proj)) `,`
+        $original_fn `)` `->` qualified(type($result)) attr-dict
+  }];
+}
+
+def CIR_StdRangesFindIfOp :
+    CIR_StdRangesFindPredOp<"ranges.find_if", "ranges::find_if",
+                            "StdRangesFindIf">;
+
+def CIR_StdRangesFindIfNotOp :
+    CIR_StdRangesFindPredOp<"ranges.find_if_not", "ranges::find_if_not",
+                            "StdRangesFindIfNot">;
+
 def CIR_StdRangesFindRangeOp : CIR_StdOp<"ranges.find_range",
   (ins CIR_AnyType:$cpo, CIR_AnyType:$range, CIR_AnyType:$pattern,
        CIR_AnyType:$proj),

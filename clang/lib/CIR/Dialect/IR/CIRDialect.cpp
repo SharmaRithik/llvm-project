@@ -5077,6 +5077,30 @@ bool cir::StdRangesFindOp::signatureMatches(mlir::TypeRange operands,
          StdFindOp::signatureMatches(operands.slice(1, 3), results);
 }
 
+static bool stdRangesFindPredSignatureMatches(mlir::TypeRange operands,
+                                              mlir::TypeRange results,
+                                              unsigned numArgs) {
+  if (operands.size() != numArgs || results.size() != 1)
+    return false;
+  auto cpoTy = mlir::dyn_cast<cir::PointerType>(operands[0]);
+  mlir::Type iterTy = operands[1];
+  return cpoTy && mlir::isa<cir::RecordType>(cpoTy.getPointee()) &&
+         (mlir::isa<cir::PointerType, cir::RecordType>(iterTy)) &&
+         iterTy == operands[2] && iterTy == results[0] &&
+         mlir::isa<cir::RecordType>(operands[3]) &&
+         mlir::isa<cir::RecordType>(operands[4]);
+}
+
+bool cir::StdRangesFindIfOp::signatureMatches(mlir::TypeRange operands,
+                                              mlir::TypeRange results) {
+  return stdRangesFindPredSignatureMatches(operands, results, getNumArgs());
+}
+
+bool cir::StdRangesFindIfNotOp::signatureMatches(mlir::TypeRange operands,
+                                                 mlir::TypeRange results) {
+  return stdRangesFindPredSignatureMatches(operands, results, getNumArgs());
+}
+
 bool cir::StdRangesFindRangeOp::signatureMatches(mlir::TypeRange operands,
                                                  mlir::TypeRange results) {
   // Operand 0 is the customization point object and the last operand is

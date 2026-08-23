@@ -147,19 +147,21 @@ static cir::PointerType unwrapContiguousIterator(mlir::Type ty,
 }
 
 // Rewrites cir.std.find, cir.std.ranges.find, cir.std.ranges.find_range,
-// and the byte-equality-predicate forms of cir.std.find_if and
-// cir.std.find_if_not. All five search for the first equal byte, so they
-// share everything except where the byte and the bounds come from: the
-// by-reference pattern for the find forms, a closure capture or recorded
-// constant for the predicate forms, and for the whole range form the
-// bounds are loaded through the member paths its record's standard
-// library identity carries. The cpo and proj operands of the ranges forms
-// are carried only for lowering back and play no part here.
+// and the byte equality predicate forms of cir.std.find_if,
+// cir.std.find_if_not, cir.std.ranges.find_if, and
+// cir.std.ranges.find_if_not. All of them search for the first equal byte
+// and share everything except where the byte and bounds come from. The find
+// forms use a referenced pattern. The predicate forms use a closure capture or
+// recorded constant. The whole range form loads bounds through the member paths
+// its record's library identity carries. The cpo and proj operands of the
+// ranges forms are carried only for lowering back and play no part here.
 template <typename OpT>
 static void rewriteFindLikeToMemchr(OpT findOp,
                                     mlir::SymbolTableCollection &symbolTables) {
-  constexpr bool predOp =
-      std::is_same_v<OpT, StdFindIfOp> || std::is_same_v<OpT, StdFindIfNotOp>;
+  constexpr bool predOp = std::is_same_v<OpT, StdFindIfOp> ||
+                          std::is_same_v<OpT, StdFindIfNotOp> ||
+                          std::is_same_v<OpT, StdRangesFindIfOp> ||
+                          std::is_same_v<OpT, StdRangesFindIfNotOp>;
   constexpr bool rangeOp = std::is_same_v<OpT, StdRangesFindRangeOp>;
   // A std contiguous iterator wraps the pointer as its only member.  The
   // narrow character fact CIRGen recorded is what licenses reading that
@@ -821,7 +823,9 @@ rewriteMismatchToMemcmpLoop(OpT mismatchOp,
 // mask shifts rely on.
 template <typename OpT> static bool rewriteFindBitToWordScan(OpT findOp) {
   static_assert(std::is_same_v<OpT, StdFindIfOp> ||
-                std::is_same_v<OpT, StdFindIfNotOp>);
+                std::is_same_v<OpT, StdFindIfNotOp> ||
+                std::is_same_v<OpT, StdRangesFindIfOp> ||
+                std::is_same_v<OpT, StdRangesFindIfNotOp>);
 
   // The loop state needs a function allocation scope
   cir::FuncOp enclosing = findOp->template getParentOfType<cir::FuncOp>();
@@ -829,6 +833,9 @@ template <typename OpT> static bool rewriteFindBitToWordScan(OpT findOp) {
     return false;
 
   llvm::StringRef algorithmName = OpT::getFunctionName();
+  // The std and ranges forms share one nobuiltin disable key, the std
+  // algorithm family name.
+  algorithmName.consume_front("ranges.");
   if (isNoBuiltin(findOp, algorithmName) ||
       noBuiltinListDisables(enclosing, algorithmName))
     return false;
@@ -1157,7 +1164,8 @@ void LibOptPass::runOnOperation() {
     llvm::TypeSwitch<mlir::Operation *>(op)
         .Case<StdFindOp, StdRangesFindOp, StdRangesFindRangeOp>(
             [&](auto find) { rewriteFindLikeToMemchr(find, symbolTables); })
-        .Case<StdFindIfOp, StdFindIfNotOp>([&](auto find) {
+        .Case<StdFindIfOp, StdFindIfNotOp, StdRangesFindIfOp,
+              StdRangesFindIfNotOp>([&](auto find) {
           // The bit and byte rewrites accept disjoint iterator shapes, so
           // whichever declines leaves the operation for the other.
           if (!rewriteFindBitToWordScan(find))
