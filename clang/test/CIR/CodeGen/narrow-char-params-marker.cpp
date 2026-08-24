@@ -13,6 +13,13 @@ bool equal(Iter1 first1, Iter1 last1, Iter2 first2);
 template <class Iter1, class Iter2>
 bool equal(Iter1 first1, Iter1 last1, Iter2 first2, Iter2 last2);
 template <class Iter1, class Iter2, class Pred>
+bool equal(Iter1 first1, Iter1 last1, Iter2 first2, Iter2 last2, Pred pred) {
+  for (; first1 != last1 && first2 != last2; ++first1, ++first2)
+    if (!pred(*first1, *first2))
+      return false;
+  return first1 == last1 && first2 == last2;
+}
+template <class Iter1, class Iter2, class Pred>
 bool equal(Iter1 first1, Iter1 last1, Iter2 first2, Pred pred) {
   for (; first1 != last1; ++first1, ++first2)
     if (!pred(*first1, *first2))
@@ -33,6 +40,23 @@ pair<Iter1, Iter2> mismatch(Iter1 first1, Iter1 last1, Iter2 first2,
       break;
   return {first1, first2};
 }
+template <class Iter1, class Iter2>
+pair<Iter1, Iter2> mismatch(Iter1 first1, Iter1 last1, Iter2 first2,
+                            Iter2 last2) {
+  for (; first1 != last1 && first2 != last2; ++first1, ++first2)
+    if (!(*first1 == *first2))
+      break;
+  return {first1, first2};
+}
+template <class Iter1, class Iter2, class Pred>
+pair<Iter1, Iter2> mismatch(Iter1 first1, Iter1 last1, Iter2 first2,
+                            Iter2 last2, Pred pred) {
+  for (; first1 != last1 && first2 != last2; ++first1, ++first2)
+    if (!pred(*first1, *first2))
+      break;
+  return {first1, first2};
+}
+
 }
 }
 
@@ -899,6 +923,42 @@ bool mismatch_pred_int(int *first1, int *last1, int *first2) {
 // CHECK: cir.call @_ZNSt3__18mismatchIPiS1_Z17mismatch_pred_intS1_S1_S1_E3$_0EENS_4pairIT_T0_EES4_S4_S5_T1_
 // CHECK-NOT: cir.elem_eq_binary_pred
 
+bool mismatch_bounded_char(char *first1, char *last1, char *first2,
+                           char *last2) {
+  auto r = std::mismatch(first1, last1, first2, last2);
+  return r.first == last1;
+}
+// CHECK-LABEL: cir.func{{.*}} @_Z21mismatch_bounded_char
+// CHECK: cir.call @_ZNSt3__18mismatchIPcS1_EENS_4pairIT_T0_EES3_S3_S4_S4_({{.*}}) {cir.narrow_char_params}
+
+bool mismatch_bounded_int(int *first1, int *last1, int *first2,
+                          int *last2) {
+  auto r = std::mismatch(first1, last1, first2, last2);
+  return r.first == last1;
+}
+// CHECK-LABEL: cir.func{{.*}} @_Z20mismatch_bounded_int
+// CHECK: cir.call @_ZNSt3__18mismatchIPiS1_EENS_4pairIT_T0_EES3_S3_S4_S4_
+// CHECK-NOT: cir.narrow_char_params
+
+bool mismatch_bounded_pred_generic(char *first1, char *last1, char *first2,
+                                   char *last2) {
+  auto r = std::mismatch(first1, last1, first2, last2,
+                         [](auto a, auto b) { return a == b; });
+  return r.first == last1;
+}
+// CHECK-LABEL: cir.func{{.*}} @_Z29mismatch_bounded_pred_generic
+// CHECK: cir.call @_ZNSt3__18mismatchIPcS1_Z29mismatch_bounded_pred_genericS1_S1_S1_S1_E3$_0EENS_4pairIT_T0_EES4_S4_S5_S5_T1_({{.*}}) {cir.elem_eq_binary_pred}
+
+bool mismatch_bounded_pred_int(int *first1, int *last1, int *first2,
+                               int *last2) {
+  auto r = std::mismatch(first1, last1, first2, last2,
+                         [](int a, int b) { return a == b; });
+  return r.first == last1;
+}
+// CHECK-LABEL: cir.func{{.*}} @_Z25mismatch_bounded_pred_int
+// CHECK: cir.call @_ZNSt3__18mismatchIPiS1_Z25mismatch_bounded_pred_intS1_S1_S1_S1_E3$_0EENS_4pairIT_T0_EES4_S4_S5_S5_T1_
+// CHECK-NOT: cir.elem_eq_binary_pred
+
 bool ranges_byte_wrong_not(char *first, char *last, char value) {
   auto it = std::ranges::find_if_not(
       first, last, [&](char element) { return element == value; });
@@ -1029,3 +1089,14 @@ int *ranges_wide_find_if_capture(int *first, int *last, const int &value) {
 }
 // CHECK-LABEL: cir.func{{.*}} @_Z27ranges_wide_find_if_capture
 // CHECK: cir.call @_ZNKSt3__16ranges9__find_if4__fnclIPiS4_Z27ranges_wide_find_if_capture{{.*}} {cir.wide_eq_pred}
+
+bool equal_bounded_pred(char *first1, char *last1, char *first2,
+                        char *last2) {
+  return std::equal(first1, last1, first2, last2,
+                    [](char x, char y) { return x == y; });
+}
+// The proof would pass, but no raised operation consumes the marker on
+// the five parameter overload, so it stays unmarked.
+// CHECK-LABEL: cir.func{{.*}} @_Z18equal_bounded_pred
+// CHECK: cir.call @_ZNSt3__15equalIPcS1_Z18equal_bounded_predS1_S1_S1_S1_E3$_0EEbT_S3_T0_S4_T1_
+// CHECK-NOT: cir.elem_eq_binary_pred

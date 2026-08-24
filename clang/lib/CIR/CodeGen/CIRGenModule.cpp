@@ -4379,19 +4379,21 @@ CIRGenModule::getBoolEqPredicateValue(const FunctionDecl *funcDecl,
 }
 
 bool CIRGenModule::hasElemEqBinaryPredicate(const FunctionDecl *funcDecl) {
-  if (funcDecl->getNumParams() != 4)
+  unsigned numParams = funcDecl->getNumParams();
+  if (numParams != 4 && numParams != 5)
     return false;
 
   clang::QualType charTy = narrowCharPointee(funcDecl->getParamDecl(0));
-  if (charTy.isNull() ||
-      narrowCharPointee(funcDecl->getParamDecl(1)) != charTy ||
-      narrowCharPointee(funcDecl->getParamDecl(2)) != charTy)
+  if (charTy.isNull())
     return false;
+  for (unsigned i = 1; i + 1 < numParams; ++i)
+    if (narrowCharPointee(funcDecl->getParamDecl(i)) != charTy)
+      return false;
 
   // A capture would carry state the pure two parameter equality proof
   // cannot account for.
   const CXXRecordDecl *closure =
-      funcDecl->getParamDecl(3)->getType()->getAsCXXRecordDecl();
+      funcDecl->getParamDecl(numParams - 1)->getType()->getAsCXXRecordDecl();
   if (!closure || !closure->isLambda() || closure->capture_size() != 0)
     return false;
 

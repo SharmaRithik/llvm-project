@@ -410,9 +410,13 @@ void CIRGenModule::constructAttributeList(
             addUnitAttr(cir::CIRDialect::getBoolEqPredAttrName());
           else if (mlir::BoolAttr value = getBoolEqPredicateValue(func, *kind))
             attrs.set(cir::CIRDialect::getBoolEqPredValueAttrName(), value);
-        } else if ((kind == cir::KnownFuncKind::StdEqual ||
-                    kind == cir::KnownFuncKind::StdMismatch) &&
+        } else if ((kind == cir::KnownFuncKind::StdMismatch ||
+                    (kind == cir::KnownFuncKind::StdEqual &&
+                     func->getNumParams() == 4)) &&
                    hasElemEqBinaryPredicate(func)) {
+          // The five parameter std::equal overload would also pass the
+          // proof, but no raised operation consumes the marker there yet,
+          // so it stays unmarked until one exists.
           addUnitAttr(cir::CIRDialect::getElemEqBinaryPredAttrName());
         }
       }

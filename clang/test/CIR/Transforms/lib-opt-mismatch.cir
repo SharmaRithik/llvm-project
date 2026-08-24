@@ -55,9 +55,7 @@ module attributes {cir.triple = "x86_64-unknown-linux-gnu",
     %0 = cir.std.mismatch_pred(%first1 : !cir.ptr<!u8i>, %last1 : !cir.ptr<!u8i>, %first2 : !cir.ptr<!u8i>, %pred : !pred_closure, @_ZSt8mismatchP) -> !pair {cir.narrow_char_params}
     cir.return %0 : !pair
   }
-// The iterator marker alone says nothing about the predicate body, and the
-// four iterator overload raises with exactly this shape when its iterators
-// are wrapper records, with last2 riding in the predicate operand.
+// The iterator marker does not prove the predicate body
 // CHECK-LABEL: @keeps_narrow_marked_pred
 // CHECK: cir.std.mismatch_pred
 // CHECK-NOT: cir.libc.memcmp
@@ -97,14 +95,22 @@ module attributes {cir.triple = "x86_64-unknown-linux-gnu",
 // CHECK-NOT: cir.std.mismatch
 
   cir.func @keeps_four_iterator_shape(%first1: !wrap, %last1: !wrap, %first2: !wrap, %last2: !wrap) -> !wpair {
-    %0 = cir.std.mismatch_pred(%first1 : !wrap, %last1 : !wrap, %first2 : !wrap, %last2 : !wrap, @_ZSt8mismatchW) -> !wpair {cir.narrow_char_params}
+    %0 = cir.std.mismatch_bounded(%first1 : !wrap, %last1 : !wrap, %first2 : !wrap, %last2 : !wrap, @_ZSt8mismatchW) -> !wpair {cir.narrow_char_params}
     cir.return %0 : !wpair
   }
-// The four iterator overload over wrapper records lands here with the
-// iterator marker. Rewriting it would read only one range's length, so it
-// must stay a call.
+// LibOpt has no rewrite for the bounded operations yet, so both survive.
 // CHECK-LABEL: @keeps_four_iterator_shape
-// CHECK: cir.std.mismatch_pred
+// CHECK: cir.std.mismatch_bounded
+// CHECK-NOT: cir.libc.memcmp
+
+  cir.func private @_ZSt8mismatchWP(!wrap, !wrap, !wrap, !wrap, !pred_closure) -> !wpair func_info<#cir.func_identity<"std::mismatch">>
+
+  cir.func @keeps_bounded_pred_shape(%first1: !wrap, %last1: !wrap, %first2: !wrap, %last2: !wrap, %pred: !pred_closure) -> !wpair {
+    %0 = cir.std.mismatch_bounded_pred(%first1 : !wrap, %last1 : !wrap, %first2 : !wrap, %last2 : !wrap, %pred : !pred_closure, @_ZSt8mismatchWP) -> !wpair {cir.elem_eq_binary_pred}
+    cir.return %0 : !wpair
+  }
+// CHECK-LABEL: @keeps_bounded_pred_shape
+// CHECK: cir.std.mismatch_bounded_pred
 // CHECK-NOT: cir.libc.memcmp
 }
 

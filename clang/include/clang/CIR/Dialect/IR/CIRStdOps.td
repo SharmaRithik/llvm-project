@@ -205,6 +205,30 @@ def CIR_StdMismatchOp : CIR_StdOp<"mismatch",
   }];
 }
 
+def CIR_StdMismatchBoundedOp : CIR_StdOp<"mismatch_bounded",
+  (ins CIR_AnyType:$first1, CIR_AnyType:$last1, CIR_AnyType:$first2,
+       CIR_AnyType:$last2),
+  (outs CIR_AnyType:$result),
+  [AllTypesMatch<["first1", "last1"]>,
+   AllTypesMatch<["first2", "last2"]>], "StdMismatch"> {
+  let summary = "std::mismatch() over bounded ranges";
+  let description = [{
+    A raised mismatch call over two bounded iterator ranges. The result is
+    the pair record holding the first position where the ranges differ.
+    `cir.narrow_char_params` is carried here from the call when CIRGen
+    recorded it. It is discardable, so a pass that drops it costs the
+    rewrite rather than making it wrong. Both bounds remain as operands so
+    lowering back to the original call loses nothing.
+  }];
+  let assemblyFormat = [{
+    `(` $first1 `:` qualified(type($first1)) `,`
+        $last1 `:` qualified(type($last1)) `,`
+        $first2 `:` qualified(type($first2)) `,`
+        $last2 `:` qualified(type($last2)) `,`
+        $original_fn `)` `->` qualified(type($result)) attr-dict
+  }];
+}
+
 def CIR_StdMismatchPredOp : CIR_StdOp<"mismatch_pred",
   (ins CIR_AnyType:$first1, CIR_AnyType:$last1, CIR_AnyType:$first2,
        CIR_AnyType:$pred),
@@ -217,16 +241,37 @@ def CIR_StdMismatchPredOp : CIR_StdOp<"mismatch_pred",
     proved the predicate is a capture free equality of its two
     parameters. It is discardable, so a pass that drops it costs the
     rewrite rather than making it wrong. The predicate operand is
-    carried so lowering back to the original call loses nothing. The
-    four iterator overload also raises here when its iterators are
-    wrapper records, with last2 riding in the predicate operand and the
-    iterator marker on the call, so only the predicate marker may
-    license a rewrite.
+    carried so lowering back to the original call loses nothing.
   }];
   let assemblyFormat = [{
     `(` $first1 `:` qualified(type($first1)) `,`
         $last1 `:` qualified(type($last1)) `,`
         $first2 `:` qualified(type($first2)) `,`
+        $pred `:` qualified(type($pred)) `,`
+        $original_fn `)` `->` qualified(type($result)) attr-dict
+  }];
+}
+
+def CIR_StdMismatchBoundedPredOp : CIR_StdOp<"mismatch_bounded_pred",
+  (ins CIR_AnyType:$first1, CIR_AnyType:$last1, CIR_AnyType:$first2,
+       CIR_AnyType:$last2, CIR_AnyType:$pred),
+  (outs CIR_AnyType:$result),
+  [AllTypesMatch<["first1", "last1"]>,
+   AllTypesMatch<["first2", "last2"]>], "StdMismatch"> {
+  let summary = "std::mismatch() over bounded ranges with a predicate";
+  let description = [{
+    A raised predicate mismatch call over two bounded iterator ranges.
+    `cir.elem_eq_binary_pred` is carried here from the call when CIRGen
+    proved the predicate is a capture free equality of its two parameters.
+    It is discardable, so a pass that drops it costs the rewrite rather than
+    making it wrong. Both bounds and the predicate remain as operands so
+    lowering back to the original call loses nothing.
+  }];
+  let assemblyFormat = [{
+    `(` $first1 `:` qualified(type($first1)) `,`
+        $last1 `:` qualified(type($last1)) `,`
+        $first2 `:` qualified(type($first2)) `,`
+        $last2 `:` qualified(type($last2)) `,`
         $pred `:` qualified(type($pred)) `,`
         $original_fn `)` `->` qualified(type($result)) attr-dict
   }];

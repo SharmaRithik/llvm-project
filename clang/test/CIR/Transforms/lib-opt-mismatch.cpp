@@ -35,10 +35,7 @@
 // CIR: cir.call @_ZSt8mismatchIPiS0_ESt4pairIT_T0_ES2_S2_S3_
 // CIR-NOT: cir.libc.memcmp
 
-// The four iterator overload over wrapper records raises as the predicate
-// form with last2 in the predicate operand and the iterator marker on the
-// call, so it declines and lowers back to the call. Rewriting it would
-// read only one range's length.
+// The bounded operation has no LibOpt rewrite and lowers back to the call
 // CIR-LABEL: cir.func dso_local @_Z13four_iteratorSt11__wrap_iterIcES0_S0_S0_
 // CIR: cir.call @_ZSt8mismatchISt11__wrap_iterIcES1_ESt4pairIT_T0_ES3_S3_S4_S4_({{.*}}) {cir.narrow_char_params}
 // CIR-NOT: cir.libc.memcmp
