@@ -1556,6 +1556,9 @@ def CIR_StdTypeKind : CIR_I32EnumAttr<"StdTypeKind",
   // No library spells this name. It denotes the abstract kind the two
   // verified vector<bool> iterator representations share.
   I32EnumAttrCase<"StdBitIterator", 2, "std::bit_iterator">,
+  // No library spells this name. It denotes the abstract kind the two
+  // verified deque iterator representations share.
+  I32EnumAttrCase<"StdDequeIterator", 3, "std::deque_iterator">,
 ]> {
   let genSpecializedAttr = 0;
   // A name like std::vector is not a bare identifier, so print it as a
@@ -1583,6 +1586,16 @@ def CIR_StdTypeInfoAttr : CIR_Attr<"StdTypeInfo", "std_type_info"> {
     with `kind` and `element` as the common core.
     A bit iterator carries `word_pointer` and `bit_offset`, which locate
     its storage word pointer and the offset within that word.
+    A deque iterator carries `current_pointer` and `map_pointer`, which
+    locate its current element pointer and the pointer into the map array.
+    It also carries `block_size`, the element count in each block. The optional
+    `block_first_pointer` and `block_last_pointer` roles locate cached block
+    bounds when the implementation stores them. A consumer walking the map
+    trusts pointers loaded from implementation owned storage. This is the same
+    trust the iterator exercises whenever increment crosses a block. The
+    identity is read oriented and records the unqualified element, so the const
+    and mutable iterators carry the same facts and a consumer that writes
+    through the paths needs its own license.
 
     A consumer has to run before ABI lowering rewrites record types,
     which re-creates records and carries the identity over but may
@@ -1614,6 +1627,14 @@ def CIR_StdTypeInfoAttr : CIR_Attr<"StdTypeInfo", "std_type_info"> {
     static constexpr llvm::StringLiteral kRoleEnd = "end";
     static constexpr llvm::StringLiteral kRoleWordPointer = "word_pointer";
     static constexpr llvm::StringLiteral kRoleBitOffset = "bit_offset";
+    static constexpr llvm::StringLiteral kRoleCurrentPointer =
+        "current_pointer";
+    static constexpr llvm::StringLiteral kRoleMapPointer = "map_pointer";
+    static constexpr llvm::StringLiteral kRoleBlockFirstPointer =
+        "block_first_pointer";
+    static constexpr llvm::StringLiteral kRoleBlockLastPointer =
+        "block_last_pointer";
+    static constexpr llvm::StringLiteral kBlockSize = "block_size";
 
     /// The member type a path resolves to through `root`, walking complete
     /// non-union records only, or null when the path leaves that shape.
@@ -1647,6 +1668,15 @@ def CIR_StdTypeInfoAttr : CIR_Attr<"StdTypeInfo", "std_type_info"> {
     getBitIteratorRoles(mlir::MLIRContext *ctx,
                         llvm::ArrayRef<int32_t> wordPointerPath,
                         llvm::ArrayRef<int32_t> bitOffsetPath);
+
+    /// Builds the roles dictionary of a deque iterator.
+    static mlir::DictionaryAttr
+    getDequeIteratorRoles(mlir::MLIRContext *ctx,
+                          llvm::ArrayRef<int32_t> currentPointerPath,
+                          llvm::ArrayRef<int32_t> mapPointerPath,
+                          int64_t blockSize,
+                          llvm::ArrayRef<int32_t> blockFirstPointerPath,
+                          llvm::ArrayRef<int32_t> blockLastPointerPath);
   }];
 
   let canHaveIllegalCXXABIType = 0;

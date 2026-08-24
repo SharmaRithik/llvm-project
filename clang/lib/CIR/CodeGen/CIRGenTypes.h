@@ -147,6 +147,9 @@ public:
                           cir::StructType structTy);
   void attachStdBitIteratorTypeInfo(const clang::RecordDecl *rd,
                                     cir::StructType structTy);
+  void attachStdDequeIteratorTypeInfo(
+      const clang::ClassTemplateSpecializationDecl *spec,
+      cir::StructType structTy);
   bool findFieldPath(const clang::RecordDecl *rd, llvm::StringRef name,
                      llvm::SmallVectorImpl<int32_t> &path);
 
