@@ -5026,12 +5026,42 @@ bool cir::StdMismatchOp::signatureMatches(mlir::TypeRange operands,
   return isIterator(operands[0]) && isIterator(operands[2]);
 }
 
+bool cir::StdMismatchBoundedOp::signatureMatches(mlir::TypeRange operands,
+                                                 mlir::TypeRange results) {
+  if (operands.size() != getNumArgs() || results.size() != 1 ||
+      !mlir::isa<cir::RecordType>(results[0]) || operands[0] != operands[1] ||
+      operands[2] != operands[3])
+    return false;
+  auto isIterator = [](mlir::Type type) {
+    return mlir::isa<cir::PointerType, cir::RecordType>(type);
+  };
+  return isIterator(operands[0]) && isIterator(operands[2]);
+}
+
 bool cir::StdMismatchPredOp::signatureMatches(mlir::TypeRange operands,
                                               mlir::TypeRange results) {
   // The predicate operand is a closure record carried for lowering back.
+  // Requiring its type to differ from both iterator types keeps this form
+  // disjoint from the bounded default overload, whose last2 has first2's
+  // type. The price is a functor that is also the iterator type, a legal
+  // shape that now stays a call rather than raising.
   if (operands.size() != getNumArgs() || results.size() != 1 ||
       !mlir::isa<cir::RecordType>(results[0]) || operands[0] != operands[1] ||
-      !mlir::isa<cir::RecordType>(operands[3]))
+      !mlir::isa<cir::RecordType>(operands[3]) || operands[3] == operands[0] ||
+      operands[3] == operands[2])
+    return false;
+  auto isIterator = [](mlir::Type type) {
+    return mlir::isa<cir::PointerType, cir::RecordType>(type);
+  };
+  return isIterator(operands[0]) && isIterator(operands[2]);
+}
+
+bool cir::StdMismatchBoundedPredOp::signatureMatches(mlir::TypeRange operands,
+                                                     mlir::TypeRange results) {
+  if (operands.size() != getNumArgs() || results.size() != 1 ||
+      !mlir::isa<cir::RecordType>(results[0]) || operands[0] != operands[1] ||
+      operands[2] != operands[3] || !mlir::isa<cir::RecordType>(operands[4]) ||
+      operands[4] == operands[0] || operands[4] == operands[2])
     return false;
   auto isIterator = [](mlir::Type type) {
     return mlir::isa<cir::PointerType, cir::RecordType>(type);
