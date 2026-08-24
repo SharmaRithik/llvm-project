@@ -3872,16 +3872,78 @@ static bool inStdImplementationNamespace(const clang::CXXRecordDecl *rec) {
   return false;
 }
 
+bool CIRGenModule::isPrimaryTemplateInstantiation(
+    const clang::ClassTemplateSpecializationDecl *spec) {
+  return clang::isTemplateInstantiation(spec->getSpecializationKind()) &&
+         isa<clang::ClassTemplateDecl *>(
+             spec->getSpecializedTemplateOrPartial());
+}
+
+/// Accepts inline version namespaces between the iterator and a top
+/// level __gnu_cxx, and rejects any ordinary nested namespace.
+static bool isInGnuCxxNamespace(const clang::Decl *decl) {
+  const clang::DeclContext *ctx = decl->getDeclContext();
+  if (!ctx)
+    return false;
+  ctx = ctx->getNonTransparentContext();
+  while (ctx->isInlineNamespace())
+    ctx = ctx->getParent()->getRedeclContext();
+
+  const auto *ns = dyn_cast<clang::NamespaceDecl>(ctx);
+  return ns && ns->getIdentifier() && ns->getName() == "__gnu_cxx" &&
+         ns->getParent()->getRedeclContext()->isTranslationUnit();
+}
+
+/// The name license for translation units older than C++20, where no
+/// iterator_concept typedef exists. Exactly two reserved wrapper names
+/// are accepted, as primary template instantiations whose first argument
+/// is the unqualified pointer the single field stores. A program that
+/// declares its own member of these namespaces has undefined behavior,
+/// so only the implementation can spell these shapes, and both
+/// implementations document them as raw pointer wrappers.
+static bool
+isKnownStdContiguousIteratorInstantiation(const clang::CXXRecordDecl *rec,
+                                          clang::QualType fieldType) {
+  const auto *spec = dyn_cast<clang::ClassTemplateSpecializationDecl>(rec);
+  if (!spec || spec->isUnion() || spec->isPolymorphic() ||
+      !spec->getIdentifier() ||
+      !CIRGenModule::isPrimaryTemplateInstantiation(spec))
+    return false;
+
+  const clang::TemplateArgumentList &args = spec->getTemplateArgs();
+  if (spec->getName() == "__wrap_iter") {
+    if (!spec->isInStdNamespace() || args.size() != 1)
+      return false;
+  } else if (spec->getName() == "__normal_iterator") {
+    if (!isInGnuCxxNamespace(spec) || args.size() != 2 ||
+        args[1].getKind() != clang::TemplateArgument::Type)
+      return false;
+  } else {
+    return false;
+  }
+
+  if (args[0].getKind() != clang::TemplateArgument::Type)
+    return false;
+  clang::QualType iteratorType = args[0].getAsType();
+  return !iteratorType.getCanonicalType().hasQualifiers() &&
+         iteratorType->isPointerType() &&
+         clang::ASTContext::hasSameType(iteratorType, fieldType);
+}
+
 /// The pointee a standard library contiguous iterator designates, or a
 /// null type. The class has to come from the implementation's namespace
-/// and name the C++20 contiguous iterator concept through its
-/// iterator_concept typedef, which is what licenses treating it as the
-/// pointer it wraps. It also has to hold exactly that pointer as its
-/// only field with no base classes: a contiguous iterator's position
-/// fully determines std::to_address, so when one pointer is the whole
-/// state, that pointer is the position. An iterator carrying more, such
-/// as MSVC's checked iterators or libc++'s hardened __bounded_iter, has
-/// several fields and stays out.
+/// and hold exactly one pointer field with no base classes. A contiguous
+/// iterator's position fully determines std::to_address, so when one
+/// pointer is the whole state, that pointer is the position. An iterator
+/// carrying more, such as MSVC's checked iterators or libc++'s hardened
+/// __bounded_iter, has several fields and stays out. Two licenses grant
+/// the classification. The stronger one is an iterator_concept typedef
+/// naming the C++20 contiguous tag. When the record has no member of
+/// that name at all, as in a C++17 translation unit, the reserved
+/// wrapper names are accepted by name and structure instead. Any member
+/// named iterator_concept that does not name the tag vetoes both, since
+/// a shape that spells the name wrong is not one the implementations
+/// produce.
 static clang::QualType stdContiguousIteratorPointee(clang::QualType ty) {
   const clang::CXXRecordDecl *rec = ty->getAsCXXRecordDecl();
   if (!rec || !inStdImplementationNamespace(rec) || !rec->hasDefinition())
@@ -3900,9 +3962,11 @@ static clang::QualType stdContiguousIteratorPointee(clang::QualType ty) {
     return {};
 
   clang::ASTContext &ctx = rec->getASTContext();
+  bool hasIteratorConceptMember = false;
   bool taggedContiguous = false;
   for (const NamedDecl *found : rec->lookup(
            clang::DeclarationName(&ctx.Idents.get("iterator_concept")))) {
+    hasIteratorConceptMember = true;
     const auto *alias = dyn_cast<TypedefNameDecl>(found);
     if (!alias)
       continue;
@@ -3912,7 +3976,10 @@ static clang::QualType stdContiguousIteratorPointee(clang::QualType ty) {
         tag->getName() == "contiguous_iterator_tag")
       taggedContiguous = true;
   }
-  if (!taggedContiguous)
+
+  if (!taggedContiguous &&
+      (hasIteratorConceptMember ||
+       !isKnownStdContiguousIteratorInstantiation(rec, onlyField->getType())))
     return {};
   return onlyField->getType()->getPointeeType();
 }
