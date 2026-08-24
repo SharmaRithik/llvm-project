@@ -143,17 +143,19 @@ char *ranges_find_eligible(char *first, char *last, const char &value) {
 int *ranges_find_wide(int *first, int *last, const int &value) {
   return std::ranges::find(first, last, value);
 }
+// An int of the target wchar_t width takes the wide marker, never the
+// narrow one.
 // CHECK-LABEL: cir.func{{.*}} @_Z16ranges_find_wide
-// CHECK: cir.call @_ZNKSt3__16ranges6__find4__fnclIPiS4_iNS_8identityEEET_S6_T0_RKT1_T2_
+// CHECK: cir.call @_ZNKSt3__16ranges6__find4__fnclIPiS4_iNS_8identityEEET_S6_T0_RKT1_T2_({{.*}}) {cir.wide_char_params}
 // CHECK-NOT: cir.narrow_char_params
 // GNU-LABEL: cir.func{{.*}} @_Z16ranges_find_wide
-// GNU: cir.call @_ZNKSt6ranges9__find_fnclIPiiSt8identityEET_S4_S4_RKT0_T1_
+// GNU: cir.call @_ZNKSt6ranges9__find_fnclIPiiSt8identityEET_S4_S4_RKT0_T1_({{.*}}) {cir.wide_char_params}
 // GNU-NOT: cir.narrow_char_params
 // MSVC-LABEL: cir.func{{.*}} @_Z16ranges_find_wide
-// MSVC: cir.call @_ZNKSt6ranges8_Find_fnclIPiiSt8identityEET_S4_S4_RKT0_T1_
+// MSVC: cir.call @_ZNKSt6ranges8_Find_fnclIPiiSt8identityEET_S4_S4_RKT0_T1_({{.*}}) {cir.wide_char_params}
 // MSVC-NOT: cir.narrow_char_params
 // USING-LABEL: cir.func{{.*}} @_Z16ranges_find_wide
-// USING: cir.call @_ZNKSt6ranges8__hidden9__find_fnclIPiiSt8identityEET_S5_S5_RKT0_T1_
+// USING: cir.call @_ZNKSt6ranges8__hidden9__find_fnclIPiiSt8identityEET_S5_S5_RKT0_T1_({{.*}}) {cir.wide_char_params}
 // USING-NOT: cir.narrow_char_params
 
 #if !defined(GNU_SHAPE) && !defined(MSVC_SHAPE) && !defined(USING_SHAPE)

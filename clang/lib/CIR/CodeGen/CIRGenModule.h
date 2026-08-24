@@ -829,11 +829,20 @@ public:
   static bool
   hasNarrowCharRangesFindParams(const clang::FunctionDecl *funcDecl);
 
+  /// The wide sibling of hasNarrowCharRangesFindParams, over the elements
+  /// hasWideCharParams accepts.
+  static bool hasWideCharRangesFindParams(const clang::FunctionDecl *funcDecl);
+
   /// Whether `funcDecl` takes two narrow character iterators and a lambda
   /// proven to be a single equality comparison of the element against its
   /// only capture, with the polarity that makes a search of `kind` stop at
   /// the first equal byte.
   static bool hasByteEqPredicate(const clang::FunctionDecl *funcDecl,
+                                 cir::KnownFuncKind kind);
+
+  /// The wide sibling of hasByteEqPredicate, over the elements
+  /// hasWideCharParams accepts.
+  static bool hasWideEqPredicate(const clang::FunctionDecl *funcDecl,
                                  cir::KnownFuncKind kind);
 
   /// Whether a bit iterator predicate seeks its single boolean capture
@@ -855,6 +864,11 @@ public:
   /// is representable in the element's narrow character type. Null when
   /// the predicate does not have that shape.
   cir::IntAttr getByteEqPredicateValue(const clang::FunctionDecl *funcDecl,
+                                       cir::KnownFuncKind kind);
+
+  /// The wide sibling of getByteEqPredicateValue, over the elements
+  /// hasWideCharParams accepts.
+  cir::IntAttr getWideEqPredicateValue(const clang::FunctionDecl *funcDecl,
                                        cir::KnownFuncKind kind);
 
   /// The constant sought by a capture free bit iterator predicate

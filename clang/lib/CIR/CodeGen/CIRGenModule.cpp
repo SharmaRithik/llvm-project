@@ -3888,17 +3888,32 @@ static clang::QualType narrowCharPointee(const ParmVarDecl *param) {
   return pointee.getCanonicalType().getUnqualifiedType();
 }
 
-/// Like narrowCharPointee for the target's wchar_t: the pointee behind a
-/// pointer or std contiguous iterator parameter when it is non-volatile
-/// wchar_t, and a null type otherwise. Other wide characters have no libc
-/// search function, so only wchar_t counts.
+/// Like narrowCharPointee for wide elements: the pointee behind a pointer
+/// or std contiguous iterator parameter when it is non-volatile wchar_t or
+/// a plain int or unsigned int of the target wchar_t width, and a null
+/// type otherwise. wmemchr compares wchar_t values, and for a same width
+/// integer that equality is bit equality, which is what the builtin == on
+/// such elements computes, regardless of the signedness on either side.
+/// The rule is that whitelist and nothing more. An enum of the right
+/// width can carry a user defined operator==, another width has no libc
+/// search function, and char32_t on a 32 bit wchar_t target would satisfy
+/// the same bit equality argument but stays out to keep the trusted
+/// surface minimal.
 static clang::QualType wideCharPointee(const ParmVarDecl *param) {
   clang::QualType pointee = param->getType()->getPointeeType();
   if (pointee.isNull())
     pointee = stdContiguousIteratorPointee(param->getType());
-  if (pointee.isNull() || pointee.isVolatileQualified() ||
-      !pointee->isWideCharType())
+  if (pointee.isNull() || pointee.isVolatileQualified())
     return {};
+  if (!pointee->isWideCharType()) {
+    const auto *builtin = pointee->getAs<clang::BuiltinType>();
+    if (!builtin || (builtin->getKind() != clang::BuiltinType::Int &&
+                     builtin->getKind() != clang::BuiltinType::UInt))
+      return {};
+    clang::ASTContext &ctx = param->getASTContext();
+    if (ctx.getIntWidth(pointee) != ctx.getTargetInfo().getWCharWidth())
+      return {};
+  }
   return pointee.getCanonicalType().getUnqualifiedType();
 }
 
@@ -3914,8 +3929,9 @@ static bool hasCharacterParams(
              return false;
            if (firstPointee.isNull())
              firstPointee = pointee;
-           // This check only distinguishes the narrow character flavors
-           // since each target has one wchar_t type.
+           // This check distinguishes the narrow character flavors from
+           // each other and wchar_t from the same width plain integers,
+           // so a call mixing element types never gets the marker.
            return pointee == firstPointee;
          });
 }
@@ -3934,32 +3950,43 @@ static bool isStdIdentityProjection(const ParmVarDecl *param) {
          projRec->getName() == "identity";
 }
 
-/// Whether `funcDecl` is a call operator taking a narrow character
-/// iterator pair and value like std::find, plus a projection parameter
-/// that has to be std::identity, so projecting changes nothing and the
-/// search compares raw bytes. Every implementation declares the
-/// defaulted projection as a real parameter, so the operator has
-/// exactly four.
-bool CIRGenModule::hasNarrowCharRangesFindParams(const FunctionDecl *funcDecl) {
+/// Whether `funcDecl` is a call operator taking an iterator pair and value
+/// like std::find over the element `classifyPointee` accepts, plus a
+/// projection parameter that has to be std::identity, so projecting
+/// changes nothing and the search compares raw representations. Every
+/// implementation declares the defaulted projection as a real parameter,
+/// so the operator has exactly four.
+static bool hasRangesFindParamsImpl(
+    const FunctionDecl *funcDecl,
+    llvm::function_ref<clang::QualType(const clang::ParmVarDecl *)>
+        classifyPointee) {
   if (funcDecl->getNumParams() != 4)
     return false;
-  clang::QualType charTy = narrowCharPointee(funcDecl->getParamDecl(0));
-  if (charTy.isNull() ||
-      narrowCharPointee(funcDecl->getParamDecl(1)) != charTy ||
-      narrowCharPointee(funcDecl->getParamDecl(2)) != charTy)
+  clang::QualType charTy = classifyPointee(funcDecl->getParamDecl(0));
+  if (charTy.isNull() || classifyPointee(funcDecl->getParamDecl(1)) != charTy ||
+      classifyPointee(funcDecl->getParamDecl(2)) != charTy)
     return false;
   return isStdIdentityProjection(funcDecl->getParamDecl(3));
 }
 
+bool CIRGenModule::hasNarrowCharRangesFindParams(const FunctionDecl *funcDecl) {
+  return hasRangesFindParamsImpl(funcDecl, narrowCharPointee);
+}
+
+bool CIRGenModule::hasWideCharRangesFindParams(const FunctionDecl *funcDecl) {
+  return hasRangesFindParamsImpl(funcDecl, wideCharPointee);
+}
+
 namespace {
-// The shared shape of a byte equality predicate: the function takes a
-// narrow character iterator pair and a lambda whose body is a lone return
-// of a builtin comparison of its element parameter, == for find_if and !=
-// for find_if_not, in either operand order. The callers classify `other`,
-// the side opposite the element, as the single capture or a constant.
-struct ByteEqPredicateShape {
+// The shared shape of an element equality predicate: the function takes
+// an iterator pair over the element a classifier accepts, byte or wide,
+// and a lambda whose body is a lone return of a builtin comparison of its
+// element parameter, == for find_if and != for find_if_not, in either
+// operand order. The callers classify `other`, the side opposite the
+// element, as the single capture or a constant.
+struct ElemEqPredicateShape {
   const clang::CXXRecordDecl *closure;
-  clang::QualType charTy;
+  clang::QualType elemTy;
   const clang::Expr *other;
 };
 
@@ -4001,8 +4028,9 @@ static bool isFindPredKind(cir::KnownFuncKind kind) {
   return isFindIfKind(kind) || isFindIfNotKind(kind);
 }
 
-static std::optional<ByteEqPredicateShape>
-byteEqPredicateShape(const FunctionDecl *funcDecl, cir::KnownFuncKind kind) {
+static std::optional<ElemEqPredicateShape> elemEqPredicateShape(
+    const FunctionDecl *funcDecl, cir::KnownFuncKind kind,
+    llvm::function_ref<clang::QualType(const ParmVarDecl *)> classifyPointee) {
   if (!isFindPredKind(kind))
     return std::nullopt;
   bool rangesKind = isRangesFindPredKind(kind);
@@ -4010,8 +4038,8 @@ byteEqPredicateShape(const FunctionDecl *funcDecl, cir::KnownFuncKind kind) {
       (rangesKind && !isStdIdentityProjection(funcDecl->getParamDecl(3))))
     return std::nullopt;
 
-  clang::QualType charTy = narrowCharPointee(funcDecl->getParamDecl(0));
-  if (charTy.isNull() || narrowCharPointee(funcDecl->getParamDecl(1)) != charTy)
+  clang::QualType elemTy = classifyPointee(funcDecl->getParamDecl(0));
+  if (elemTy.isNull() || classifyPointee(funcDecl->getParamDecl(1)) != elemTy)
     return std::nullopt;
 
   const CXXRecordDecl *closure =
@@ -4024,23 +4052,23 @@ byteEqPredicateShape(const FunctionDecl *funcDecl, cir::KnownFuncKind kind) {
     return std::nullopt;
   const ParmVarDecl *element = callOp->getParamDecl(0);
   // A generic lambda leaves the parameter dependent here, and the call
-  // shape instantiates it to the character the iterators designate, so the
-  // element side of the comparison is that narrow character either way. A
-  // concrete parameter has to be that character already, by value or by
-  // const reference.
-  clang::QualType elementTy = element->getType();
-  if (!elementTy->isDependentType()) {
-    if (elementTy.getNonReferenceType().isVolatileQualified())
+  // shape instantiates it to the element the iterators designate, so the
+  // element side of the comparison is that type either way. A concrete
+  // parameter has to be that element type already, by value or by const
+  // reference.
+  clang::QualType lambdaParamTy = element->getType();
+  if (!lambdaParamTy->isDependentType()) {
+    if (lambdaParamTy.getNonReferenceType().isVolatileQualified())
       return std::nullopt;
-    if (elementTy.getNonReferenceType()
+    if (lambdaParamTy.getNonReferenceType()
             .getCanonicalType()
-            .getUnqualifiedType() != charTy)
+            .getUnqualifiedType() != elemTy)
       return std::nullopt;
   }
 
   // The body has to be a lone return of a comparison with the element on
   // one side, == for find_if or != for find_if_not. Both make the search
-  // stop at the first equal byte.
+  // stop at the first equal element.
   const auto *body = dyn_cast_if_present<CompoundStmt>(callOp->getBody());
   if (!body || body->size() != 1)
     return std::nullopt;
@@ -4060,7 +4088,7 @@ byteEqPredicateShape(const FunctionDecl *funcDecl, cir::KnownFuncKind kind) {
     other = cmp->getLHS();
   else
     return std::nullopt;
-  return ByteEqPredicateShape{closure, charTy, other};
+  return ElemEqPredicateShape{closure, elemTy, other};
 }
 
 static std::optional<BoolEqPredicateShape>
@@ -4150,12 +4178,13 @@ bool CIRGenModule::hasNarrowCharRangesFindRangeParams(
          info.getElement() == convertType(charTy);
 }
 
-bool CIRGenModule::hasByteEqPredicate(const FunctionDecl *funcDecl,
-                                      cir::KnownFuncKind kind) {
-  std::optional<ByteEqPredicateShape> shape =
-      byteEqPredicateShape(funcDecl, kind);
-  // The lambda has to hold a single capture of the element's character
-  // type, compared against the element. A single comparison against it
+static bool hasElemEqPredicateImpl(
+    const FunctionDecl *funcDecl, cir::KnownFuncKind kind,
+    llvm::function_ref<clang::QualType(const ParmVarDecl *)> classifyPointee) {
+  std::optional<ElemEqPredicateShape> shape =
+      elemEqPredicateShape(funcDecl, kind, classifyPointee);
+  // The lambda has to hold a single capture of the element's type,
+  // compared against the element. A single comparison against it
   // cannot observe anything the search would change, since neither the
   // search nor the comparison writes, so a by-reference capture is as loop
   // invariant as a copy.
@@ -4169,40 +4198,68 @@ bool CIRGenModule::hasByteEqPredicate(const FunctionDecl *funcDecl,
   const ValueDecl *capturedVar = capture.getCapturedVar();
   clang::QualType capturedTy = capturedVar->getType().getNonReferenceType();
   if (capturedTy.isVolatileQualified() ||
-      capturedTy.getCanonicalType().getUnqualifiedType() != shape->charTy)
+      capturedTy.getCanonicalType().getUnqualifiedType() != shape->elemTy)
     return false;
   return refersToDecl(shape->other, capturedVar);
 }
 
-cir::IntAttr CIRGenModule::getByteEqPredicateValue(const FunctionDecl *funcDecl,
-                                                   cir::KnownFuncKind kind) {
-  std::optional<ByteEqPredicateShape> shape =
-      byteEqPredicateShape(funcDecl, kind);
+bool CIRGenModule::hasByteEqPredicate(const FunctionDecl *funcDecl,
+                                      cir::KnownFuncKind kind) {
+  return hasElemEqPredicateImpl(funcDecl, kind, narrowCharPointee);
+}
+
+bool CIRGenModule::hasWideEqPredicate(const FunctionDecl *funcDecl,
+                                      cir::KnownFuncKind kind) {
+  return hasElemEqPredicateImpl(funcDecl, kind, wideCharPointee);
+}
+
+static cir::IntAttr getElemEqPredicateValueImpl(
+    CIRGenBuilderTy &builder, const FunctionDecl *funcDecl,
+    cir::KnownFuncKind kind,
+    llvm::function_ref<clang::QualType(const ParmVarDecl *)> classifyPointee) {
+  std::optional<ElemEqPredicateShape> shape =
+      elemEqPredicateShape(funcDecl, kind, classifyPointee);
   // A capture-free lambda can only compare the element against a constant.
   // The constant side may be any integer type, since soundness comes from
   // the representability check and the normalization to the element's
-  // character type below, not from the operand types matching.
+  // type below, not from the operand types matching.
   if (!shape || shape->closure->capture_size() != 0)
     return {};
 
   ASTContext &ctx = funcDecl->getASTContext();
-  clang::QualType charTy = shape->charTy;
+  clang::QualType elemTy = shape->elemTy;
   std::optional<llvm::APSInt> value = shape->other->getIntegerConstantExpr(ctx);
   // isRepresentableIntegerValue accepts a negative value for an unsigned
-  // type by bit width, but the source comparison happens at int, where a
-  // negative constant never equals an unsigned character, so it has to
-  // decline rather than record the wrapped byte.
-  if (!value || (value->isNegative() && charTy->isUnsignedIntegerType()) ||
-      !ctx.isRepresentableIntegerValue(*value, charTy))
+  // type by bit width, but a negative value evaluated from the constant
+  // side means the source comparison happens at a signed type wider than
+  // the unsigned element, where the element never equals it, so recording
+  // the wrapped bits would invent matches. A comparison that does wrap in
+  // the source, as unsigned int against a negative int literal, arrives
+  // here already folded to the wrapped unsigned value by the implicit
+  // conversion the AST places on the constant side, and recording that is
+  // exact.
+  if (!value || (value->isNegative() && elemTy->isUnsignedIntegerType()) ||
+      !ctx.isRepresentableIntegerValue(*value, elemTy))
     return {};
 
-  unsigned width = ctx.getIntWidth(charTy);
-  bool isUnsigned = charTy->isUnsignedIntegerType();
+  unsigned width = ctx.getIntWidth(elemTy);
+  bool isUnsigned = elemTy->isUnsignedIntegerType();
   llvm::APInt bits =
       isUnsigned ? value->zextOrTrunc(width) : value->sextOrTrunc(width);
   mlir::Type valueTy = isUnsigned ? mlir::Type(builder.getUIntNTy(width))
                                   : mlir::Type(builder.getSIntNTy(width));
   return cir::IntAttr::get(valueTy, llvm::APSInt(bits, isUnsigned));
+}
+
+cir::IntAttr CIRGenModule::getByteEqPredicateValue(const FunctionDecl *funcDecl,
+                                                   cir::KnownFuncKind kind) {
+  return getElemEqPredicateValueImpl(builder, funcDecl, kind,
+                                     narrowCharPointee);
+}
+
+cir::IntAttr CIRGenModule::getWideEqPredicateValue(const FunctionDecl *funcDecl,
+                                                   cir::KnownFuncKind kind) {
+  return getElemEqPredicateValueImpl(builder, funcDecl, kind, wideCharPointee);
 }
 
 bool CIRGenModule::hasBoolEqPredicate(const FunctionDecl *funcDecl,

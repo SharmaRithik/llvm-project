@@ -290,9 +290,14 @@ signed char *test_signed_char_find(signed char *first, signed char *last,
 int *test_int_find(int *first, int *last, const int &value) {
   return std::find(first, last, value);
 }
+// An int of the target wchar_t width rewrites to wmemchr, whose count is
+// elements rather than bytes, so no width scaling appears here.
 // CHECK-LABEL: @_Z13test_int_findPiS_RKi
-// CHECK: cir.call @_ZSt4find{{.*}}(
-// CHECK-NOT: cir.libc.memchr
+// CHECK-NOT: cir.call
+// CHECK: %[[ILEN:.*]] = cir.ptr_diff %{{.*}}, %{{.*}} : !cir.ptr<!s32i> -> !u64i
+// CHECK: %[[IPTR:.*]] = cir.libc.wmemchr(%{{.*}}, %{{.*}}, %[[ILEN]]) : !cir.ptr<!s32i>, !s32i, !u64i
+// CHECK: %[[IMISS:.*]] = cir.cmp eq %[[IPTR]], %{{.*}}
+// CHECK: cir.select if %[[IMISS]] then %{{.*}} else %[[IPTR]]
 // CHECK-NOT: cir.std.find
 
 char *test_sign_mismatch(char *first, char *last, const unsigned char &value) {

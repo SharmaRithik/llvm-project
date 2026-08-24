@@ -916,3 +916,116 @@ bit_iterator ranges_bool_wrong_if(bit_iterator first, bit_iterator last,
 // The inequality body under find_if has the wrong polarity for the fold.
 // CHECK-LABEL: cir.func{{.*}} @_Z20ranges_bool_wrong_if
 // CHECK-NOT: cir.bool_eq_pred
+
+int *int_eligible(int *first, int *last, const int &value) {
+  return std::find(first, last, value);
+}
+// An int of the target wchar_t width searches like wchar_t does.
+// CHECK-LABEL: cir.func{{.*}} @_Z12int_eligible
+// CHECK: cir.call @_ZNSt3__14findIPiiEET_S2_S2_RKT0_({{.*}}) {cir.wide_char_params}
+// UCHAR-LABEL: cir.func{{.*}} @_Z12int_eligible
+// UCHAR: cir.call @_ZNSt3__14findIPiiEET_S2_S2_RKT0_({{.*}}) {cir.wide_char_params}
+
+unsigned *uint_wrapped(std::span_iter<unsigned *> first,
+                       std::span_iter<unsigned *> last,
+                       const unsigned &value) {
+  return std::find(first, last, value).ptr;
+}
+// CHECK-LABEL: cir.func{{.*}} @_Z12uint_wrapped
+// CHECK: cir.call @_ZNSt3__14findINS_9span_iterIPjEEjEET_S4_S4_RKT0_({{.*}}) {cir.wide_char_params}
+
+short *wide_short(short *first, short *last, const short &value) {
+  return std::find(first, last, value);
+}
+// CHECK-LABEL: cir.func{{.*}} @_Z10wide_short
+// CHECK: cir.call @_ZNSt3__14findIPssEET_S2_S2_RKT0_
+// CHECK-NOT: cir.wide_char_params
+
+long long *wide_longlong(long long *first, long long *last,
+                         const long long &value) {
+  return std::find(first, last, value);
+}
+// CHECK-LABEL: cir.func{{.*}} @_Z13wide_longlong
+// CHECK: cir.call @_ZNSt3__14findIPxxEET_S2_S2_RKT0_
+// CHECK-NOT: cir.wide_char_params
+
+enum IntSized : int { kZero };
+IntSized *wide_enum(IntSized *first, IntSized *last, const IntSized &value) {
+  return std::find(first, last, value);
+}
+// An enum of the right width can carry a user defined operator==.
+// CHECK-LABEL: cir.func{{.*}} @_Z9wide_enum
+// CHECK-NOT: cir.wide_char_params
+
+int *int_long_value(int *first, int *last, const long &value) {
+  return std::find(first, last, value);
+}
+// The comparison converts the elements to long, so this is not a search
+// for any single int bit pattern.
+// CHECK-LABEL: cir.func{{.*}} @_Z14int_long_value
+// CHECK: cir.call @_ZNSt3__14findIPilEET_S2_S2_RKT0_
+// CHECK-NOT: cir.wide_char_params
+
+volatile int *wide_volatile(volatile int *first, volatile int *last,
+                            const int &value) {
+  return std::find(first, last, value);
+}
+// CHECK-LABEL: cir.func{{.*}} @_Z13wide_volatile
+// CHECK: cir.call @_ZNSt3__14findIPViiEET_S3_S3_RKT0_
+// CHECK-NOT: cir.wide_char_params
+
+int *wide_find_if_ref_capture(int *first, int *last, const int &value) {
+  return std::find_if(first, last,
+                      [&](int element) { return element == value; });
+}
+// CHECK-LABEL: cir.func{{.*}} @_Z24wide_find_if_ref_capture
+// CHECK: cir.call @_ZNSt3__17find_ifIPiZ24wide_find_if_ref_capture{{.*}} {cir.wide_eq_pred}
+
+int *wide_find_if_not_ne(int *first, int *last, const int &value) {
+  return std::find_if_not(first, last,
+                          [&](int element) { return element != value; });
+}
+// CHECK-LABEL: cir.func{{.*}} @_Z19wide_find_if_not_ne
+// CHECK: cir.call @_ZNSt3__111find_if_notIPiZ19wide_find_if_not_ne{{.*}} {cir.wide_eq_pred}
+
+int *wide_find_if_literal(int *first, int *last) {
+  return std::find_if(first, last,
+                      [](int element) { return element == 70000; });
+}
+// CHECK-LABEL: cir.func{{.*}} @_Z20wide_find_if_literal
+// CHECK: cir.call @_ZNSt3__17find_ifIPiZ20wide_find_if_literal{{.*}} {cir.wide_eq_pred_value = #cir.int<70000> : !s32i}
+
+unsigned *wide_find_if_negative_literal(unsigned *first, unsigned *last) {
+  return std::find_if(first, last,
+                      [](unsigned element) { return element == -1; });
+}
+// The AST converts the int literal to unsigned before this side is
+// evaluated, so the recorded bits are exactly the source comparison.
+// CHECK-LABEL: cir.func{{.*}} @_Z29wide_find_if_negative_literal
+// CHECK: cir.call @_ZNSt3__17find_ifIPjZ29wide_find_if_negative_literal{{.*}} {cir.wide_eq_pred_value = #cir.int<4294967295> : !u32i}
+
+unsigned *wide_find_if_negative_long(unsigned *first, unsigned *last) {
+  return std::find_if(first, last,
+                      [](unsigned element) { return element == -1L; });
+}
+// The comparison happens at long, where the unsigned int element never
+// equals the negative constant.
+// CHECK-LABEL: cir.func{{.*}} @_Z26wide_find_if_negative_long
+// CHECK: cir.call @_ZNSt3__17find_ifIPjZ26wide_find_if_negative_long
+// CHECK-NOT: cir.wide_eq_pred
+
+int *wide_find_if_wrong_polarity(int *first, int *last, const int &value) {
+  return std::find_if(first, last,
+                      [&](int element) { return element != value; });
+}
+// The inequality body under find_if has the wrong polarity for the fold.
+// CHECK-LABEL: cir.func{{.*}} @_Z27wide_find_if_wrong_polarity
+// CHECK: cir.call @_ZNSt3__17find_ifIPiZ27wide_find_if_wrong_polarity
+// CHECK-NOT: cir.wide_eq_pred
+
+int *ranges_wide_find_if_capture(int *first, int *last, const int &value) {
+  return std::ranges::find_if(first, last,
+                              [&](int element) { return element == value; });
+}
+// CHECK-LABEL: cir.func{{.*}} @_Z27ranges_wide_find_if_capture
+// CHECK: cir.call @_ZNKSt3__16ranges9__find_if4__fnclIPiS4_Z27ranges_wide_find_if_capture{{.*}} {cir.wide_eq_pred}
