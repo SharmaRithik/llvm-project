@@ -860,6 +860,10 @@ public:
   /// iterator.
   static bool hasWideCharParams(const clang::FunctionDecl *funcDecl);
 
+  /// Whether every iterator parameter of a mismatch overload designates
+  /// the same wide element wideCharPointee accepts.
+  static bool hasWideCharMismatchParams(const clang::FunctionDecl *funcDecl);
+
   /// Whether the call operator takes a whole range whose record carries a
   /// standard library identity over the searched narrow character type,
   /// plus the value and a std::identity projection.
@@ -881,9 +885,11 @@ public:
   mlir::BoolAttr getBoolEqPredicateValue(const clang::FunctionDecl *funcDecl,
                                          cir::KnownFuncKind kind);
 
-  /// Whether the predicate overload of std::equal takes three narrow
-  /// character iterators over one character type and a capture free lambda
-  /// whose body is a lone return comparing its two parameters for equality.
+  /// Whether a binary predicate overload carries a proven equality
+  /// predicate over one narrow or wide element type. A capture free lambda
+  /// proves its body. The standard library's internal __equal_to functor
+  /// is licensed by its reserved name and empty shape instead, since its
+  /// body is usually a pending instantiation when the call is emitted.
   static bool hasElemEqBinaryPredicate(const clang::FunctionDecl *funcDecl);
 
   cir::FuncOp createRuntimeFunction(cir::FuncType ty, llvm::StringRef name,

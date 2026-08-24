@@ -68,10 +68,12 @@ def CIR_Dialect : Dialect {
     static llvm::StringRef getBoolEqPredValueAttrName() {
       return "cir.bool_eq_pred_value";
     }
-    // Set by CIRGen on a call to the predicate overload of std::equal whose
-    // three iterators satisfy the narrow character rules above and whose
-    // predicate is a capture free lambda proven to be a lone return of a
-    // builtin equality of its two parameters.
+    // Set by CIRGen on a call to a predicate overload of std::equal or
+    // std::mismatch whose iterators satisfy the narrow character rules
+    // above or the wide element rules below, and whose predicate is a
+    // capture free lambda proven to be a lone return of a builtin equality
+    // of its two parameters, or the standard library's own __equal_to
+    // functor licensed by its reserved name and empty shape.
     static llvm::StringRef getElemEqBinaryPredAttrName() {
       return "cir.elem_eq_binary_pred";
     }

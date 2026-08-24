@@ -37,6 +37,7 @@
 #include "clang/CIR/Interfaces/CIROpInterfaces.h"
 #include "clang/CIR/MissingFeatures.h"
 #include "llvm/ADT/STLExtras.h"
+#include "llvm/ADT/SmallPtrSet.h"
 #include "llvm/ADT/StringExtras.h"
 #include "llvm/ADT/StringRef.h"
 #include "llvm/ADT/StringSwitch.h"
@@ -3989,6 +3990,30 @@ bool CIRGenModule::hasNarrowCharParams(const FunctionDecl *funcDecl) {
   return hasCharacterParams(funcDecl, narrowCharPointee);
 }
 
+bool CIRGenModule::hasWideCharMismatchParams(const FunctionDecl *funcDecl) {
+  unsigned numParams = funcDecl->getNumParams();
+  if (numParams < 3 || numParams > 5)
+    return false;
+
+  // Three parameters is the unbounded default overload and five is the
+  // bounded predicate overload, whose last parameter is the predicate.
+  unsigned numIterators = numParams == 5 ? 4 : numParams;
+  // Four parameters is either the bounded default overload, where the
+  // last parameter is the second bound, or the unbounded predicate
+  // overload, where it is the predicate and stays out of the element
+  // check.
+  if (numParams == 4 && wideCharPointee(funcDecl->getParamDecl(3)).isNull())
+    numIterators = 3;
+
+  clang::QualType elemTy = wideCharPointee(funcDecl->getParamDecl(0));
+  if (elemTy.isNull())
+    return false;
+  for (unsigned i = 1; i < numIterators; ++i)
+    if (wideCharPointee(funcDecl->getParamDecl(i)) != elemTy)
+      return false;
+  return true;
+}
+
 static bool isStdIdentityProjection(const ParmVarDecl *param) {
   const clang::CXXRecordDecl *projRec = param->getType()->getAsCXXRecordDecl();
   return projRec && projRec->isInStdNamespace() && projRec->getIdentifier() &&
@@ -4378,16 +4403,23 @@ CIRGenModule::getBoolEqPredicateValue(const FunctionDecl *funcDecl,
   return builder.getBoolAttr(sought);
 }
 
-bool CIRGenModule::hasElemEqBinaryPredicate(const FunctionDecl *funcDecl) {
+static bool hasEqLambdaBinaryPredicate(const FunctionDecl *funcDecl) {
   unsigned numParams = funcDecl->getNumParams();
   if (numParams != 4 && numParams != 5)
     return false;
 
+  // The iterators may designate a narrow character or a wide element, the
+  // same split the functor proof below makes.
   clang::QualType charTy = narrowCharPointee(funcDecl->getParamDecl(0));
+  auto classifyPointee = narrowCharPointee;
+  if (charTy.isNull()) {
+    charTy = wideCharPointee(funcDecl->getParamDecl(0));
+    classifyPointee = wideCharPointee;
+  }
   if (charTy.isNull())
     return false;
   for (unsigned i = 1; i + 1 < numParams; ++i)
-    if (narrowCharPointee(funcDecl->getParamDecl(i)) != charTy)
+    if (classifyPointee(funcDecl->getParamDecl(i)) != charTy)
       return false;
 
   // A capture would carry state the pure two parameter equality proof
@@ -4434,6 +4466,50 @@ bool CIRGenModule::hasElemEqBinaryPredicate(const FunctionDecl *funcDecl) {
           refersToDecl(cmp->getRHS(), rhsParam)) ||
          (refersToDecl(cmp->getLHS(), rhsParam) &&
           refersToDecl(cmp->getRHS(), lhsParam));
+}
+
+// The one nonlambda predicate this licenses is the standard library's own
+// internal equality functor. The call is emitted before Sema's pending
+// instantiation queue flushes the operator's body, so no body proof can
+// run here. The license is the reserved identifier instead. Per
+// [reserved.names.general] and [namespace.std] a program may not declare
+// names containing a double underscore in std, so only the implementation
+// can spell __equal_to there and its documented meaning is builtin
+// equality. The structural checks pin the shape that meaning implies, an
+// empty class with no bases and no virtual functions.
+static bool hasStdEqualToBinaryPredicate(const FunctionDecl *funcDecl) {
+  unsigned numParams = funcDecl->getNumParams();
+  if (numParams != 4 && numParams != 5)
+    return false;
+
+  clang::QualType elemTy = narrowCharPointee(funcDecl->getParamDecl(0));
+  auto classifyPointee = narrowCharPointee;
+  if (elemTy.isNull()) {
+    elemTy = wideCharPointee(funcDecl->getParamDecl(0));
+    classifyPointee = wideCharPointee;
+  }
+  if (elemTy.isNull())
+    return false;
+  for (unsigned i = 1; i + 1 < numParams; ++i)
+    if (classifyPointee(funcDecl->getParamDecl(i)) != elemTy)
+      return false;
+
+  clang::QualType predicateTy =
+      funcDecl->getParamDecl(numParams - 1)->getType();
+  if (predicateTy.isVolatileQualified())
+    return false;
+  const CXXRecordDecl *predicate = predicateTy->getAsCXXRecordDecl();
+  const CXXRecordDecl *definition =
+      predicate ? predicate->getDefinition() : nullptr;
+  return definition && definition->isInStdNamespace() &&
+         definition->isEmpty() && !definition->isPolymorphic() &&
+         definition->getNumBases() == 0 && definition->getIdentifier() &&
+         definition->getName() == "__equal_to";
+}
+
+bool CIRGenModule::hasElemEqBinaryPredicate(const FunctionDecl *funcDecl) {
+  return hasEqLambdaBinaryPredicate(funcDecl) ||
+         hasStdEqualToBinaryPredicate(funcDecl);
 }
 
 static void setWindowsItaniumDLLImport(CIRGenModule &cgm, bool isLocal,
