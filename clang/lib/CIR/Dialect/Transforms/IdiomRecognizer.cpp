@@ -18,6 +18,7 @@
 #include "clang/CIR/Dialect/Passes.h"
 #include "llvm/ADT/StringRef.h"
 
+#include <tuple>
 #include <utility>
 
 using namespace mlir;
@@ -32,6 +33,10 @@ namespace {
 
 // Raises a direct cir.call to the first candidate in `TargetOps` that matches.
 template <typename... TargetOps> class StdRecognizer {
+  // The dummy parameter only makes the alias expandable over the pack.
+  template <typename> using StatisticRef = mlir::Pass::Statistic &;
+  using Statistics = std::tuple<StatisticRef<TargetOps>...>;
+
   template <typename TargetOp, size_t... Indices>
   static TargetOp buildCall(cir::CIRBaseBuilderTy &builder, CallOp call,
                             std::index_sequence<Indices...>) {
@@ -42,7 +47,8 @@ template <typename... TargetOps> class StdRecognizer {
 
   template <typename TargetOp>
   static bool raiseOne(CallOp call, mlir::MLIRContext &context,
-                       mlir::SymbolTableCollection &symbolTables) {
+                       mlir::SymbolTableCollection &symbolTables,
+                       mlir::Pass::Statistic &numRaised) {
     // A musttail call must stay a call, so it is never raised.
     if (!call.getCallee() || call.getMusttail() ||
         !TargetOp::signatureMatches(call->getOperandTypes(),
@@ -89,14 +95,27 @@ template <typename... TargetOps> class StdRecognizer {
         op->setAttr(attr.getName(), attr.getValue());
     call.replaceAllUsesWith(op);
     call.erase();
+    ++numRaised;
     return true;
+  }
+
+  template <size_t... Indices>
+  static bool raiseImpl(CallOp call, mlir::MLIRContext &context,
+                        mlir::SymbolTableCollection &symbolTables,
+                        const Statistics &statistics,
+                        std::index_sequence<Indices...>) {
+    return (raiseOne<TargetOps>(call, context, symbolTables,
+                                std::get<Indices>(statistics)) ||
+            ...);
   }
 
 public:
   // Tries each candidate in order and stops at the first that raises.
   static bool raise(CallOp call, mlir::MLIRContext &context,
-                    mlir::SymbolTableCollection &symbolTables) {
-    return (raiseOne<TargetOps>(call, context, symbolTables) || ...);
+                    mlir::SymbolTableCollection &symbolTables,
+                    const Statistics &statistics) {
+    return raiseImpl(call, context, symbolTables, statistics,
+                     std::index_sequence_for<TargetOps...>());
   }
 };
 
@@ -121,7 +140,17 @@ struct IdiomRecognizerPass
 
 void IdiomRecognizerPass::recognizeStandardLibraryCall(
     CallOp call, mlir::SymbolTableCollection &symbolTables) {
-  RecognizedStdOps::raise(call, getContext(), symbolTables);
+  RecognizedStdOps::raise(
+      call, getContext(), symbolTables,
+      // The tie order must match the RecognizedStdOps pack order, nothing
+      // else checks the pairing since every element has the same type.
+      std::tie(numRaisedStdFind, numRaisedStdSearch, numRaisedStdFindIf,
+               numRaisedStdFindIfNot, numRaisedStdEqual, numRaisedStdEqualPred,
+               numRaisedStdMismatch, numRaisedStdMismatchBounded,
+               numRaisedStdMismatchPred, numRaisedStdMismatchBoundedPred,
+               numRaisedStdRangesFind, numRaisedStdRangesFindIf,
+               numRaisedStdRangesFindIfNot, numRaisedStdRangesFindRange,
+               numRaisedStrLen));
 }
 
 void IdiomRecognizerPass::runOnOperation() {

@@ -191,6 +191,39 @@ def IdiomRecognizer : Pass<"cir-idiom-recognizer", "mlir::ModuleOp"> {
     standard library containers, library functions calls, and types into CIR
     operations, attributes and types.
   }];
+  let statistics = [
+    Statistic<"numRaisedStdFind", "raised-std-find",
+              "Number of calls raised to cir.std.find">,
+    Statistic<"numRaisedStdSearch", "raised-std-search",
+              "Number of calls raised to cir.std.search">,
+    Statistic<"numRaisedStdFindIf", "raised-std-find-if",
+              "Number of calls raised to cir.std.find_if">,
+    Statistic<"numRaisedStdFindIfNot", "raised-std-find-if-not",
+              "Number of calls raised to cir.std.find_if_not">,
+    Statistic<"numRaisedStdEqual", "raised-std-equal",
+              "Number of calls raised to cir.std.equal">,
+    Statistic<"numRaisedStdEqualPred", "raised-std-equal-pred",
+              "Number of calls raised to cir.std.equal with a predicate">,
+    Statistic<"numRaisedStdMismatch", "raised-std-mismatch",
+              "Number of calls raised to cir.std.mismatch">,
+    Statistic<"numRaisedStdMismatchBounded", "raised-std-mismatch-bounded",
+              "Number of calls raised to bounded cir.std.mismatch">,
+    Statistic<"numRaisedStdMismatchPred", "raised-std-mismatch-pred",
+              "Number of calls raised to cir.std.mismatch with a predicate">,
+    Statistic<"numRaisedStdMismatchBoundedPred",
+              "raised-std-mismatch-bounded-pred",
+              "Number of calls raised to bounded predicate cir.std.mismatch">,
+    Statistic<"numRaisedStdRangesFind", "raised-std-ranges-find",
+              "Number of calls raised to cir.std.ranges.find">,
+    Statistic<"numRaisedStdRangesFindIf", "raised-std-ranges-find-if",
+              "Number of calls raised to cir.std.ranges.find_if">,
+    Statistic<"numRaisedStdRangesFindIfNot", "raised-std-ranges-find-if-not",
+              "Number of calls raised to cir.std.ranges.find_if_not">,
+    Statistic<"numRaisedStdRangesFindRange", "raised-std-ranges-find-range",
+              "Number of calls raised to cir.std.ranges.find_range">,
+    Statistic<"numRaisedStrLen", "raised-strlen",
+              "Number of calls raised to cir.std.strlen">
+  ];
   let constructor = "mlir::createIdiomRecognizerPass()";
   let dependentDialects = ["cir::CIRDialect"];
 }
@@ -203,6 +236,23 @@ def LibOpt : Pass<"cir-lib-opt"> {
      using the `cir-idiom-recognize` pass.
   }];
 
+  let statistics = [
+    Statistic<"numFindLikeToMemchr", "find-like-to-memchr",
+              "Number of find family operations rewritten to memchr">,
+    Statistic<"numFindLikeToWmemchr", "find-like-to-wmemchr",
+              "Number of find family operations rewritten to wmemchr">,
+    Statistic<"numSearchEqualLengthToMemcmp",
+              "search-equal-length-to-memcmp",
+              "Number of search rewrites that also emitted the equal length memcmp arm, a subset of search-to-memmem">,
+    Statistic<"numSearchToMemmem", "search-to-memmem",
+              "Number of std search operations rewritten to memmem">,
+    Statistic<"numEqualToMemcmp", "equal-to-memcmp",
+              "Number of std equal operations rewritten to memcmp">,
+    Statistic<"numMismatchToMemcmpLoop", "mismatch-to-memcmp-loop",
+              "Number of std mismatch operations rewritten to a memcmp loop">,
+    Statistic<"numFindBitToWordScan", "find-bit-to-word-scan",
+              "Number of vector bool find operations rewritten to a word scan">
+  ];
   let constructor = "mlir::createLibOptPass()";
   let dependentDialects = ["cir::CIRDialect"];
 }

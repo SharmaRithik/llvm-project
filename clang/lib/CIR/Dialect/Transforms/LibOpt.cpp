@@ -156,8 +156,10 @@ static cir::PointerType unwrapContiguousIterator(mlir::Type ty,
 // its record's library identity carries. The cpo and proj operands of the
 // ranges forms are carried only for lowering back and play no part here.
 template <typename OpT>
-static void rewriteFindLikeToMemchr(OpT findOp,
-                                    mlir::SymbolTableCollection &symbolTables) {
+static void
+rewriteFindLikeToMemchr(OpT findOp, mlir::SymbolTableCollection &symbolTables,
+                        mlir::Pass::Statistic &numFindLikeToMemchr,
+                        mlir::Pass::Statistic &numFindLikeToWmemchr) {
   constexpr bool predOp = std::is_same_v<OpT, StdFindIfOp> ||
                           std::is_same_v<OpT, StdFindIfNotOp> ||
                           std::is_same_v<OpT, StdRangesFindIfOp> ||
@@ -417,11 +419,18 @@ static void rewriteFindLikeToMemchr(OpT findOp,
   }
   findOp.getResult().replaceAllUsesWith(result);
   findOp.erase();
+  if (wide)
+    ++numFindLikeToWmemchr;
+  else
+    ++numFindLikeToMemchr;
 }
 
 // Rewrites the four iterator form of std::search over licensed bytes.
-static void rewriteSearchToMemmem(StdSearchOp searchOp,
-                                  mlir::SymbolTableCollection &symbolTables) {
+static void
+rewriteSearchToMemmem(StdSearchOp searchOp,
+                      mlir::SymbolTableCollection &symbolTables,
+                      mlir::Pass::Statistic &numSearchToMemmem,
+                      mlir::Pass::Statistic &numSearchEqualLengthToMemcmp) {
   cir::RecordType haystackWrapperTy;
   cir::RecordType needleWrapperTy;
   cir::PointerType haystackIterTy = unwrapContiguousIterator(
@@ -572,11 +581,15 @@ static void rewriteSearchToMemmem(StdSearchOp searchOp,
   }
   searchOp.getResult().replaceAllUsesWith(result);
   searchOp.erase();
+  ++numSearchToMemmem;
+  if (memCmpAdmitted)
+    ++numSearchEqualLengthToMemcmp;
 }
 
 template <typename OpT>
 static void rewriteEqualToMemcmp(OpT equalOp,
-                                 mlir::SymbolTableCollection &symbolTables) {
+                                 mlir::SymbolTableCollection &symbolTables,
+                                 mlir::Pass::Statistic &numEqualToMemcmp) {
   constexpr bool predOp = std::is_same_v<OpT, StdEqualPredOp>;
   constexpr llvm::StringLiteral libcallName = "memcmp";
   std::optional<LibCallEnv> env =
@@ -675,6 +688,7 @@ static void rewriteEqualToMemcmp(OpT equalOp,
           .getResult();
   equalOp.getResult().replaceAllUsesWith(result);
   equalOp.erase();
+  ++numEqualToMemcmp;
 }
 
 // Rewrites a raised mismatch over licensed integers into a chunked
@@ -683,7 +697,8 @@ static void rewriteEqualToMemcmp(OpT equalOp,
 template <typename OpT>
 static void
 rewriteMismatchToMemcmpLoop(OpT mismatchOp,
-                            mlir::SymbolTableCollection &symbolTables) {
+                            mlir::SymbolTableCollection &symbolTables,
+                            mlir::Pass::Statistic &numMismatchToMemcmpLoop) {
   constexpr bool boundedOp = std::is_same_v<OpT, StdMismatchBoundedOp> ||
                              std::is_same_v<OpT, StdMismatchBoundedPredOp>;
   constexpr bool predOp = std::is_same_v<OpT, StdMismatchPredOp> ||
@@ -923,6 +938,7 @@ rewriteMismatchToMemcmpLoop(OpT mismatchOp,
   pair = cir::InsertMemberOp::create(builder, loc, pair, /*index=*/1, res2);
   mismatchOp.getResult().replaceAllUsesWith(pair);
   mismatchOp.erase();
+  ++numMismatchToMemcmpLoop;
 }
 
 // Both markers mean seek the recorded value, because CIRGen marks find_if
@@ -933,7 +949,10 @@ rewriteMismatchToMemcmpLoop(OpT mismatchOp,
 // touched, and the last word only when its offset is nonzero. The
 // verified identity guarantees offsets below the word width, which the
 // mask shifts rely on.
-template <typename OpT> static bool rewriteFindBitToWordScan(OpT findOp) {
+template <typename OpT>
+static bool
+rewriteFindBitToWordScan(OpT findOp,
+                         mlir::Pass::Statistic &numFindBitToWordScan) {
   static_assert(std::is_same_v<OpT, StdFindIfOp> ||
                 std::is_same_v<OpT, StdFindIfNotOp> ||
                 std::is_same_v<OpT, StdRangesFindIfOp> ||
@@ -1267,6 +1286,7 @@ template <typename OpT> static bool rewriteFindBitToWordScan(OpT findOp) {
 
   findOp.getResult().replaceAllUsesWith(result);
   findOp.erase();
+  ++numFindBitToWordScan;
   return true;
 }
 
@@ -1274,22 +1294,29 @@ void LibOptPass::runOnOperation() {
   mlir::SymbolTableCollection symbolTables;
   getOperation()->walk([&](mlir::Operation *op) {
     llvm::TypeSwitch<mlir::Operation *>(op)
-        .Case<StdFindOp, StdRangesFindOp, StdRangesFindRangeOp>(
-            [&](auto find) { rewriteFindLikeToMemchr(find, symbolTables); })
+        .Case<StdFindOp, StdRangesFindOp, StdRangesFindRangeOp>([&](auto find) {
+          rewriteFindLikeToMemchr(find, symbolTables, numFindLikeToMemchr,
+                                  numFindLikeToWmemchr);
+        })
         .Case<StdFindIfOp, StdFindIfNotOp, StdRangesFindIfOp,
               StdRangesFindIfNotOp>([&](auto find) {
           // The bit and byte rewrites accept disjoint iterator shapes, so
           // whichever declines leaves the operation for the other.
-          if (!rewriteFindBitToWordScan(find))
-            rewriteFindLikeToMemchr(find, symbolTables);
+          if (!rewriteFindBitToWordScan(find, numFindBitToWordScan))
+            rewriteFindLikeToMemchr(find, symbolTables, numFindLikeToMemchr,
+                                    numFindLikeToWmemchr);
         })
-        .Case<StdSearchOp>(
-            [&](auto search) { rewriteSearchToMemmem(search, symbolTables); })
-        .Case<StdEqualOp, StdEqualPredOp>(
-            [&](auto equal) { rewriteEqualToMemcmp(equal, symbolTables); })
+        .Case<StdSearchOp>([&](auto search) {
+          rewriteSearchToMemmem(search, symbolTables, numSearchToMemmem,
+                                numSearchEqualLengthToMemcmp);
+        })
+        .Case<StdEqualOp, StdEqualPredOp>([&](auto equal) {
+          rewriteEqualToMemcmp(equal, symbolTables, numEqualToMemcmp);
+        })
         .Case<StdMismatchOp, StdMismatchBoundedOp, StdMismatchPredOp,
               StdMismatchBoundedPredOp>([&](auto mismatch) {
-          rewriteMismatchToMemcmpLoop(mismatch, symbolTables);
+          rewriteMismatchToMemcmpLoop(mismatch, symbolTables,
+                                      numMismatchToMemcmpLoop);
         });
   });
 }
