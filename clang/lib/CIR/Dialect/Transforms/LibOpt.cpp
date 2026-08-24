@@ -465,6 +465,19 @@ static void rewriteSearchToMemmem(StdSearchOp searchOp,
                              voidPtrTy)))
     return;
 
+  // Equal lengths admit exactly one candidate position, which one memcmp
+  // decides. The guard arm is emitted only when the recorded widths, the
+  // no builtin lists, and the symbol table all admit memcmp, otherwise
+  // the emission keeps the memmem only shape.
+  std::optional<unsigned> intWidth = cir::getRecordedIntegerWidth(
+      env->moduleOp, cir::CIRDialect::getIntTypeWidthAttrName());
+  const bool memCmpAdmitted =
+      intWidth.has_value() &&
+      checkLibCallEnv(searchOp, "memcmp", llvm::LibFunc_memcmp).has_value() &&
+      sharesLibCallSymbol(env->moduleOp, symbolTables, "memcmp",
+                          cir::FuncType::get({voidPtrTy, voidPtrTy, sizeTy},
+                                             builder.getSIntNTy(*intWidth)));
+
   mlir::Location loc = searchOp.getLoc();
   builder.setInsertionPointAfter(searchOp);
   mlir::Value first1 = searchOp.getFirst1();
@@ -499,6 +512,17 @@ static void rewriteSearchToMemmem(StdSearchOp searchOp,
             // as long, so every pointer and length passed to C is valid.
             mlir::Value needleIsLonger = builder.createCompare(
                 loc, cir::CmpOpKind::gt, needleLen, haystackLen);
+            auto emitMemMem = [&]() -> mlir::Value {
+              mlir::Value haystack =
+                  builder.createBitcast(loc, first1, builder.getVoidPtrTy());
+              mlir::Value needle =
+                  builder.createBitcast(loc, first2, builder.getVoidPtrTy());
+              mlir::Value found = cir::MemMemOp::create(
+                  builder, loc, haystack, haystackLen, needle, needleLen);
+              found = builder.createBitcast(loc, found, haystackIterTy);
+              return builder.createSelect(loc, builder.createPtrIsNull(found),
+                                          last1, found);
+            };
             mlir::Value nonEmptyResult =
                 cir::TernaryOp::create(
                     builder, loc, needleIsLonger,
@@ -506,18 +530,36 @@ static void rewriteSearchToMemmem(StdSearchOp searchOp,
                       builder.createYield(loc, last1);
                     },
                     [&](mlir::OpBuilder &, mlir::Location) {
-                      mlir::Value haystack = builder.createBitcast(
-                          loc, first1, builder.getVoidPtrTy());
-                      mlir::Value needle = builder.createBitcast(
-                          loc, first2, builder.getVoidPtrTy());
-                      mlir::Value found =
-                          cir::MemMemOp::create(builder, loc, haystack,
-                                                haystackLen, needle, needleLen);
-                      found = builder.createBitcast(loc, found, haystackIterTy);
-                      builder.createYield(
-                          loc, builder.createSelect(
-                                   loc, builder.createPtrIsNull(found), last1,
-                                   found));
+                      if (!memCmpAdmitted) {
+                        builder.createYield(loc, emitMemMem());
+                        return;
+                      }
+                      mlir::Value sameLength = builder.createCompare(
+                          loc, cir::CmpOpKind::eq, needleLen, haystackLen);
+                      mlir::Value guarded =
+                          cir::TernaryOp::create(
+                              builder, loc, sameLength,
+                              [&](mlir::OpBuilder &, mlir::Location) {
+                                mlir::Value lhs = builder.createBitcast(
+                                    loc, first1, builder.getVoidPtrTy());
+                                mlir::Value rhs = builder.createBitcast(
+                                    loc, first2, builder.getVoidPtrTy());
+                                mlir::Value cmp = cir::MemCmpOp::create(
+                                    builder, loc, builder.getSIntNTy(*intWidth),
+                                    lhs, rhs, needleLen);
+                                mlir::Value zero = builder.getNullValue(
+                                    builder.getSIntNTy(*intWidth), loc);
+                                mlir::Value equal = builder.createCompare(
+                                    loc, cir::CmpOpKind::eq, cmp, zero);
+                                builder.createYield(
+                                    loc, builder.createSelect(loc, equal,
+                                                              first1, last1));
+                              },
+                              [&](mlir::OpBuilder &, mlir::Location) {
+                                builder.createYield(loc, emitMemMem());
+                              })
+                              .getResult();
+                      builder.createYield(loc, guarded);
                     })
                     .getResult();
             builder.createYield(loc, nonEmptyResult);
