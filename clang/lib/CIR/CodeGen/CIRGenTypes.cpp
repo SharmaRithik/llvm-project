@@ -7,13 +7,17 @@
 #include "mlir/IR/BuiltinTypes.h"
 
 #include "clang/AST/ASTContext.h"
+#include "clang/AST/Expr.h"
 #include "clang/AST/GlobalDecl.h"
+#include "clang/AST/Stmt.h"
 #include "clang/AST/Type.h"
 #include "clang/Basic/TargetInfo.h"
 #include "clang/CIR/Dialect/IR/CIRTypes.h"
 #include "clang/CIR/MissingFeatures.h"
 
 #include <cassert>
+#include <limits>
+#include <optional>
 
 using namespace clang;
 using namespace clang::CIRGen;
@@ -560,6 +564,307 @@ void CIRGenTypes::attachStdBitIteratorTypeInfo(const clang::RecordDecl *rd,
           &getMLIRContext(), wordPointerPath, bitOffsetPath)));
 }
 
+static const clang::Expr *getSingleReturnExpr(const clang::FunctionDecl *fn) {
+  const auto *body = dyn_cast_or_null<clang::CompoundStmt>(fn->getBody());
+  if (!body || body->size() != 1)
+    return nullptr;
+  const auto *returnStmt = dyn_cast<clang::ReturnStmt>(body->body_front());
+  return returnStmt ? returnStmt->getRetValue() : nullptr;
+}
+
+static const clang::IntegerLiteral *getIntegerLiteral(const clang::Expr *expr) {
+  return dyn_cast<clang::IntegerLiteral>(expr->IgnoreParenCasts());
+}
+
+static bool isParameterReference(const clang::Expr *expr,
+                                 const clang::ParmVarDecl *param) {
+  const auto *ref = dyn_cast<clang::DeclRefExpr>(expr->IgnoreParenCasts());
+  return ref && ref->getDecl()->getCanonicalDecl() == param->getCanonicalDecl();
+}
+
+static std::optional<uint64_t> getIntegerLiteralValue(const clang::Expr *expr) {
+  const clang::IntegerLiteral *literal = getIntegerLiteral(expr);
+  if (!literal || literal->getValue().getActiveBits() > 64)
+    return std::nullopt;
+  return literal->getValue().getZExtValue();
+}
+
+static const clang::CXXMethodDecl *
+findDirectMethod(const clang::CXXRecordDecl *rd, llvm::StringRef name) {
+  const clang::CXXMethodDecl *result = nullptr;
+  for (const clang::Decl *decl : rd->decls()) {
+    const auto *method = dyn_cast<clang::CXXMethodDecl>(decl);
+    if (!method || !method->getIdentifier() || method->getName() != name)
+      continue;
+    if (result)
+      return nullptr;
+    result = method;
+  }
+  return result;
+}
+
+static std::optional<uint64_t> getLibstdcxxDequeBufferBytes(
+    const clang::ClassTemplateSpecializationDecl *spec) {
+  const clang::CXXMethodDecl *method = findDirectMethod(spec, "_S_buffer_size");
+  if (!method || !method->isStatic() || method->getNumParams() != 0 ||
+      !method->getReturnType()->isUnsignedIntegerType())
+    return std::nullopt;
+
+  const clang::FunctionDecl *pattern = method;
+  while (const clang::FunctionDecl *from =
+             pattern->getInstantiatedFromMemberFunction())
+    pattern = from;
+  const clang::Expr *methodResult = getSingleReturnExpr(pattern);
+  const auto *call =
+      methodResult ? dyn_cast<clang::CallExpr>(methodResult->IgnoreParenCasts())
+                   : nullptr;
+  const clang::FunctionDecl *formula = call ? call->getDirectCallee() : nullptr;
+  if (!formula || !formula->getIdentifier() ||
+      formula->getName() != "__deque_buf_size" ||
+      !isDirectlyInStdNamespace(formula) || !formula->isConstexpr() ||
+      formula->getNumParams() != 1 || call->getNumArgs() != 1)
+    return std::nullopt;
+
+  const auto *sizeOf = dyn_cast<clang::UnaryExprOrTypeTraitExpr>(
+      call->getArg(0)->IgnoreParenCasts());
+  if (!sizeOf || sizeOf->getKind() != clang::UETT_SizeOf ||
+      !sizeOf->isArgumentType())
+    return std::nullopt;
+  const auto *typeParam =
+      sizeOf->getArgumentType()->getAs<clang::TemplateTypeParmType>();
+  if (!typeParam || typeParam->getDepth() != 0 || typeParam->getIndex() != 0 ||
+      typeParam->isParameterPack())
+    return std::nullopt;
+
+  const clang::Expr *formulaResult = getSingleReturnExpr(formula);
+  const auto *choice = formulaResult ? dyn_cast<clang::ConditionalOperator>(
+                                           formulaResult->IgnoreParenCasts())
+                                     : nullptr;
+  if (!choice)
+    return std::nullopt;
+  const auto *condition =
+      dyn_cast<clang::BinaryOperator>(choice->getCond()->IgnoreParenCasts());
+  const auto *division = dyn_cast<clang::BinaryOperator>(
+      choice->getTrueExpr()->IgnoreParenCasts());
+  const clang::ParmVarDecl *sizeParam = formula->getParamDecl(0);
+  if (!condition || condition->getOpcode() != clang::BO_LT || !division ||
+      division->getOpcode() != clang::BO_Div ||
+      !isParameterReference(condition->getLHS(), sizeParam) ||
+      !isParameterReference(division->getRHS(), sizeParam))
+    return std::nullopt;
+
+  std::optional<uint64_t> threshold =
+      getIntegerLiteralValue(condition->getRHS());
+  std::optional<uint64_t> numerator =
+      getIntegerLiteralValue(division->getLHS());
+  std::optional<uint64_t> fallback =
+      getIntegerLiteralValue(choice->getFalseExpr());
+  if (!threshold || !numerator || !fallback || *threshold == 0 ||
+      *threshold != *numerator || *fallback != 1)
+    return std::nullopt;
+  return threshold;
+}
+
+static bool isTemplateTypeParameter(const clang::NamedDecl *param) {
+  const auto *typeParam = dyn_cast<clang::TemplateTypeParmDecl>(param);
+  return typeParam && !typeParam->isParameterPack();
+}
+
+static bool isElementType(clang::QualType candidate, clang::QualType element,
+                          const clang::ASTContext &astContext) {
+  return !hasVolatileQualification(candidate) &&
+         astContext.hasSameType(
+             candidate.getCanonicalType().getUnqualifiedType(), element);
+}
+
+static bool isPointerToElement(clang::QualType type, clang::QualType element,
+                               const clang::ASTContext &astContext) {
+  // A volatile field would lose its access semantics under a consumer
+  // that replaces the loads, so the shape declines.
+  if (type.isVolatileQualified())
+    return false;
+  const auto *pointer = type->getAs<clang::PointerType>();
+  return pointer &&
+         isElementType(pointer->getPointeeType(), element, astContext);
+}
+
+static bool isMapPointerToElement(clang::QualType type, clang::QualType element,
+                                  const clang::ASTContext &astContext) {
+  const auto *mapPointer = type->getAs<clang::PointerType>();
+  if (!mapPointer || hasVolatileQualification(type))
+    return false;
+  const auto *blockPointer =
+      mapPointer->getPointeeType()->getAs<clang::PointerType>();
+  return blockPointer &&
+         isElementType(blockPointer->getPointeeType(), element, astContext);
+}
+
+// The attribute documentation carries the map walking trust argument.
+// Everything here exists to make that trust narrow, only the two exact
+// verified representations attach and every lookalike declines.
+void CIRGenTypes::attachStdDequeIteratorTypeInfo(
+    const clang::ClassTemplateSpecializationDecl *spec,
+    cir::StructType structTy) {
+  if (!spec->getIdentifier() ||
+      !CIRGenModule::isPrimaryTemplateInstantiation(spec) ||
+      spec->isPolymorphic() || spec->getNumBases() != 0)
+    return;
+
+  const clang::TemplateArgumentList &args = spec->getTemplateArgs();
+  const clang::TemplateParameterList *params =
+      spec->getSpecializedTemplate()->getTemplateParameters();
+  llvm::StringRef currentPointerName;
+  llvm::StringRef mapPointerName;
+  std::optional<int64_t> blockSize;
+  const bool isLibcxxShape = spec->getName() == "__deque_iterator";
+
+  if (isLibcxxShape) {
+    if (!spec->isInStdNamespace() || spec->getNumFields() != 2 ||
+        args.size() != 6 || params->size() != 6)
+      return;
+    for (unsigned index = 0; index != 5; ++index)
+      if (!isTemplateTypeParameter(params->getParam(index)) ||
+          args[index].getKind() != clang::TemplateArgument::Type)
+        return;
+    const auto *blockParam =
+        dyn_cast<clang::NonTypeTemplateParmDecl>(params->getParam(5));
+    if (!blockParam || blockParam->isParameterPack() ||
+        args[5].getKind() != clang::TemplateArgument::Integral)
+      return;
+
+    clang::QualType element =
+        args[0].getAsType().getCanonicalType().getUnqualifiedType();
+    std::optional<clang::CharUnits> elementSize =
+        astContext.getTypeSizeInCharsIfKnown(element);
+    llvm::APSInt value = args[5].getAsIntegral();
+    if (!elementSize || elementSize->isZero() || !value.isStrictlyPositive() ||
+        !value.isRepresentableByInt64())
+      return;
+    int64_t size = elementSize->getQuantity();
+    int64_t expected = size < 256 ? 4096 / size : 16;
+    if (value.getExtValue() != expected)
+      return;
+    blockSize = expected;
+    currentPointerName = "__ptr_";
+    mapPointerName = "__m_iter_";
+  } else if (spec->getName() == "_Deque_iterator") {
+    if (!isDirectlyInStdNamespace(spec) || spec->getNumFields() != 4 ||
+        args.size() != 3 || params->size() != 3)
+      return;
+    for (unsigned index = 0; index != 3; ++index)
+      if (!isTemplateTypeParameter(params->getParam(index)) ||
+          args[index].getKind() != clang::TemplateArgument::Type)
+        return;
+
+    clang::QualType element =
+        args[0].getAsType().getCanonicalType().getUnqualifiedType();
+    std::optional<clang::CharUnits> elementSize =
+        astContext.getTypeSizeInCharsIfKnown(element);
+    std::optional<uint64_t> bufferBytes = getLibstdcxxDequeBufferBytes(spec);
+    if (!elementSize || elementSize->isZero() || !bufferBytes ||
+        *bufferBytes > uint64_t(std::numeric_limits<int64_t>::max()))
+      return;
+    uint64_t size = elementSize->getQuantity();
+    blockSize = size < *bufferBytes ? *bufferBytes / size : 1;
+    currentPointerName = "_M_cur";
+    mapPointerName = "_M_node";
+  } else {
+    return;
+  }
+
+  clang::QualType element =
+      args[0].getAsType().getCanonicalType().getUnqualifiedType();
+  // Both surviving branches recorded a positive block size, so only the
+  // element facts remain to check here.
+  if (args[0].getAsType().getCanonicalType().hasQualifiers() ||
+      !element->isObjectType() || !blockSize)
+    return;
+
+  unsigned pointerArgIndex = isLibcxxShape ? 1 : 2;
+  unsigned referenceArgIndex = isLibcxxShape ? 2 : 1;
+  const auto *pointerArg =
+      args[pointerArgIndex].getAsType()->getAs<clang::PointerType>();
+  const auto *referenceArg =
+      args[referenceArgIndex].getAsType()->getAs<clang::LValueReferenceType>();
+  if (isLibcxxShape) {
+    if (!pointerArg || !referenceArg ||
+        !isElementType(pointerArg->getPointeeType(), element, astContext) ||
+        !isElementType(referenceArg->getPointeeType(), element, astContext) ||
+        !isMapPointerToElement(args[3].getAsType(), element, astContext) ||
+        !args[4].getAsType()->isSignedIntegerType())
+      return;
+  } else if (!referenceArg || !pointerArg ||
+             !isElementType(pointerArg->getPointeeType(), element,
+                            astContext) ||
+             !isElementType(referenceArg->getPointeeType(), element,
+                            astContext)) {
+    return;
+  }
+
+  const clang::FieldDecl *currentPointerField =
+      findDirectField(spec, currentPointerName);
+  const clang::FieldDecl *mapPointerField =
+      findDirectField(spec, mapPointerName);
+  if (!currentPointerField || !mapPointerField ||
+      !isPointerToElement(currentPointerField->getType(), element,
+                          astContext) ||
+      !isMapPointerToElement(mapPointerField->getType(), element, astContext))
+    return;
+
+  if (!isLibcxxShape) {
+    const clang::FieldDecl *first = findDirectField(spec, "_M_first");
+    const clang::FieldDecl *last = findDirectField(spec, "_M_last");
+    if (!first || !last ||
+        !isPointerToElement(first->getType(), element, astContext) ||
+        !isPointerToElement(last->getType(), element, astContext))
+      return;
+  }
+
+  llvm::SmallVector<int32_t, 4> currentPointerPath;
+  llvm::SmallVector<int32_t, 4> mapPointerPath;
+  llvm::SmallVector<int32_t, 4> blockFirstPointerPath;
+  llvm::SmallVector<int32_t, 4> blockLastPointerPath;
+  if (!findFieldPath(spec, currentPointerName, currentPointerPath) ||
+      !findFieldPath(spec, mapPointerName, mapPointerPath) ||
+      currentPointerPath.size() != 1 || mapPointerPath.size() != 1)
+    return;
+
+  if (!isLibcxxShape &&
+      (!findFieldPath(spec, "_M_first", blockFirstPointerPath) ||
+       !findFieldPath(spec, "_M_last", blockLastPointerPath) ||
+       blockFirstPointerPath.size() != 1 || blockLastPointerPath.size() != 1))
+    return;
+
+  mlir::Type elementType = convertType(element);
+  auto currentPointerType = mlir::dyn_cast<cir::PointerType>(
+      cir::StdTypeInfoAttr::resolvePath(structTy, currentPointerPath));
+  auto mapPointerType = mlir::dyn_cast<cir::PointerType>(
+      cir::StdTypeInfoAttr::resolvePath(structTy, mapPointerPath));
+  auto blockPointerType =
+      mapPointerType
+          ? mlir::dyn_cast<cir::PointerType>(mapPointerType.getPointee())
+          : cir::PointerType();
+  if (!currentPointerType || currentPointerType.getAddrSpace() ||
+      currentPointerType.getPointee() != elementType || !mapPointerType ||
+      mapPointerType.getAddrSpace() || !blockPointerType ||
+      blockPointerType.getAddrSpace() ||
+      blockPointerType.getPointee() != elementType)
+    return;
+
+  if (!isLibcxxShape &&
+      (cir::StdTypeInfoAttr::resolvePath(structTy, blockFirstPointerPath) !=
+           currentPointerType ||
+       cir::StdTypeInfoAttr::resolvePath(structTy, blockLastPointerPath) !=
+           currentPointerType))
+    return;
+
+  structTy.setStdTypeInfo(cir::StdTypeInfoAttr::get(
+      &getMLIRContext(), cir::StdTypeKind::StdDequeIterator, elementType,
+      cir::StdTypeInfoAttr::getDequeIteratorRoles(
+          &getMLIRContext(), currentPointerPath, mapPointerPath, *blockSize,
+          blockFirstPointerPath, blockLastPointerPath)));
+}
+
 void CIRGenTypes::attachStdTypeInfo(const clang::RecordDecl *rd,
                                     cir::RecordType entry) {
   auto structTy = mlir::dyn_cast<cir::StructType>(mlir::Type(entry));
@@ -569,6 +874,12 @@ void CIRGenTypes::attachStdTypeInfo(const clang::RecordDecl *rd,
   if (const auto *spec = dyn_cast<clang::ClassTemplateSpecializationDecl>(rd);
       spec && spec->getName() == "vector") {
     attachStdVectorTypeInfo(spec, structTy);
+    return;
+  }
+  if (const auto *spec = dyn_cast<clang::ClassTemplateSpecializationDecl>(rd);
+      spec && (spec->getName() == "__deque_iterator" ||
+               spec->getName() == "_Deque_iterator")) {
+    attachStdDequeIteratorTypeInfo(spec, structTy);
     return;
   }
   if (rd->getName() == "__bit_iterator" || rd->getName() == "_Bit_iterator" ||

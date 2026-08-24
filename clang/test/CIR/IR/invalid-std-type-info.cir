@@ -48,3 +48,50 @@
 
 // expected-error@below {{a bit iterator identity requires the word_pointer and bit_offset roles}}
 !bad = !cir.struct<"missing_bit_role" {data !cir.ptr<!u64i>, data !u32i}, std_type_info = #cir.std_type_info<"std::bit_iterator", !cir.bool, roles {word_pointer = array<i32: 0>}>>
+
+// -----
+
+!s8i = !cir.int<s, 8>
+
+// expected-error@below {{a deque iterator identity requires the current_pointer and map_pointer roles and the block_size entry}}
+!bad = !cir.struct<"missing_deque_role" {data !cir.ptr<!s8i>, data !cir.ptr<!cir.ptr<!s8i>>}, std_type_info = #cir.std_type_info<"std::deque_iterator", !s8i, roles {block_size = 512 : i64, current_pointer = array<i32: 0>}>>
+
+// -----
+
+// expected-error@+1 {{block_size must carry a positive i64 element count}}
+!bad_unsigned = !cir.struct<class "U" {data !cir.ptr<!cir.int<s, 32>>, data !cir.ptr<!cir.ptr<!cir.int<s, 32>>>}, std_type_info = #cir.std_type_info<"std::deque_iterator", !cir.int<s, 32>, roles {block_size = 512 : ui64, current_pointer = array<i32: 0>, map_pointer = array<i32: 1>}>>
+
+// -----
+
+// expected-error@+1 {{block_size must carry a positive i64 element count}}
+!bad_signed = !cir.struct<class "S" {data !cir.ptr<!cir.int<s, 32>>, data !cir.ptr<!cir.ptr<!cir.int<s, 32>>>}, std_type_info = #cir.std_type_info<"std::deque_iterator", !cir.int<s, 32>, roles {block_size = 512 : si64, current_pointer = array<i32: 0>, map_pointer = array<i32: 1>}>>
+
+// -----
+
+// expected-error@+1 {{block_size must carry a positive i64 element count}}
+!bad_zero = !cir.struct<class "Z" {data !cir.ptr<!cir.int<s, 32>>, data !cir.ptr<!cir.ptr<!cir.int<s, 32>>>}, std_type_info = #cir.std_type_info<"std::deque_iterator", !cir.int<s, 32>, roles {block_size = 0 : i64, current_pointer = array<i32: 0>, map_pointer = array<i32: 1>}>>
+
+// -----
+
+// expected-error@+1 {{block_size must carry a positive i64 element count}}
+!bad_width = !cir.struct<class "W" {data !cir.ptr<!cir.int<s, 32>>, data !cir.ptr<!cir.ptr<!cir.int<s, 32>>>}, std_type_info = #cir.std_type_info<"std::deque_iterator", !cir.int<s, 32>, roles {block_size = 512 : i32, current_pointer = array<i32: 0>, map_pointer = array<i32: 1>}>>
+
+// -----
+
+// expected-error@+1 {{block_size is meaningful only on a deque iterator}}
+!bad_kind = !cir.struct<class "K" {data !cir.ptr<!cir.int<s, 8>>, data !cir.ptr<!cir.int<s, 8>>}, std_type_info = #cir.std_type_info<"std::vector", !cir.int<s, 8>, roles {begin = array<i32: 0>, block_size = 7 : i64, end = array<i32: 1>}>>
+
+// -----
+
+// expected-error@+1 {{a deque iterator identity requires the current_pointer and map_pointer roles and the block_size entry}}
+!missing_block_size = !cir.struct<class "M" {data !cir.ptr<!cir.int<s, 8>>, data !cir.ptr<!cir.ptr<!cir.int<s, 8>>>}, std_type_info = #cir.std_type_info<"std::deque_iterator", !cir.int<s, 8>, roles {current_pointer = array<i32: 0>, map_pointer = array<i32: 1>}>>
+
+// -----
+
+// expected-error@+1 {{cached deque block pointer roles must occur together}}
+!missing_cached_last = !cir.struct<class "P" {data !cir.ptr<!cir.int<s, 8>>, data !cir.ptr<!cir.ptr<!cir.int<s, 8>>>}, std_type_info = #cir.std_type_info<"std::deque_iterator", !cir.int<s, 8>, roles {block_first_pointer = array<i32: 0>, block_size = 512 : i64, current_pointer = array<i32: 0>, map_pointer = array<i32: 1>}>>
+
+// -----
+
+// expected-error@+1 {{cached deque block pointer roles require a deque iterator}}
+!bad_cached_kind = !cir.struct<class "C" {data !cir.ptr<!cir.int<s, 8>>, data !cir.ptr<!cir.int<s, 8>>}, std_type_info = #cir.std_type_info<"std::vector", !cir.int<s, 8>, roles {begin = array<i32: 0>, block_first_pointer = array<i32: 0>, block_last_pointer = array<i32: 1>, end = array<i32: 1>}>>

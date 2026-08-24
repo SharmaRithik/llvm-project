@@ -14,6 +14,24 @@
 // RUN: FileCheck --input-file=%t.bit-extra-member.cir --check-prefix=BIT_NEGATIVE %s
 // RUN: %clang_cc1 -std=c++20 -triple x86_64-unknown-linux-gnu -DBIT_NEGATIVE_SHAPES -fclangir -clangir-disable-passes -emit-cir %s -o %t.bit-negative.cir
 // RUN: FileCheck --input-file=%t.bit-negative.cir --check-prefix=BIT_NEGATIVE %s
+// RUN: %clang_cc1 -std=c++20 -triple x86_64-unknown-linux-gnu -DLIBCXX_DEQUE_SHAPE -fclangir -clangir-disable-passes -emit-cir %s -o %t.libcpp-deque.cir
+// RUN: FileCheck --input-file=%t.libcpp-deque.cir --check-prefix=LIBCPP_DEQUE %s
+// RUN: %clang_cc1 -std=c++20 -triple x86_64-unknown-linux-gnu -DGNU_DEQUE_SHAPE -fclangir -clangir-disable-passes -emit-cir %s -o %t.gnu-deque.cir
+// RUN: FileCheck --input-file=%t.gnu-deque.cir --check-prefix=GNU_DEQUE %s
+// RUN: %clang_cc1 -std=c++20 -triple x86_64-unknown-linux-gnu -DDEQUE_WRONG_FIELD_COUNT -fclangir -clangir-disable-passes -emit-cir %s -o %t.deque-wrong-field-count.cir
+// RUN: FileCheck --input-file=%t.deque-wrong-field-count.cir --check-prefix=DEQUE_NEGATIVE %s
+// RUN: %clang_cc1 -std=c++20 -triple x86_64-unknown-linux-gnu -DDEQUE_WRONG_NAMESPACE -fclangir -clangir-disable-passes -emit-cir %s -o %t.deque-wrong-namespace.cir
+// RUN: FileCheck --input-file=%t.deque-wrong-namespace.cir --check-prefix=DEQUE_NEGATIVE %s
+// RUN: %clang_cc1 -std=c++20 -triple x86_64-unknown-linux-gnu -DDEQUE_VOLATILE_CURRENT -fclangir -clangir-disable-passes -emit-cir %s -o %t.deque-volatile.cir
+// RUN: FileCheck --input-file=%t.deque-volatile.cir --check-prefix=DEQUE_NEGATIVE %s
+// RUN: %clang_cc1 -std=c++20 -triple x86_64-unknown-linux-gnu -DDEQUE_WRONG_BLOCK_SIZE -fclangir -clangir-disable-passes -emit-cir %s -o %t.deque-wrong-block.cir
+// RUN: FileCheck --input-file=%t.deque-wrong-block.cir --check-prefix=DEQUE_NEGATIVE %s
+// RUN: %clang_cc1 -std=c++20 -triple x86_64-unknown-linux-gnu -DDEQUE_GNU_WRONG_FIELD_COUNT -fclangir -clangir-disable-passes -emit-cir %s -o %t.deque-gnu-fields.cir
+// RUN: FileCheck --input-file=%t.deque-gnu-fields.cir --check-prefix=DEQUE_NEGATIVE %s
+// RUN: %clang_cc1 -std=c++20 -triple x86_64-unknown-linux-gnu -DDEQUE_OUTSIDE_STD -fclangir -clangir-disable-passes -emit-cir %s -o %t.deque-outside-std.cir
+// RUN: FileCheck --input-file=%t.deque-outside-std.cir --check-prefix=DEQUE_NEGATIVE %s
+// RUN: %clang_cc1 -std=c++20 -triple x86_64-unknown-linux-gnu -DDEQUE_DECOY_FIELD_SHAPE -fclangir -clangir-disable-passes -emit-cir %s -o %t.deque-decoy-field-shape.cir
+// RUN: FileCheck --input-file=%t.deque-decoy-field-shape.cir --check-prefix=DEQUE_NEGATIVE %s
 
 // Each RUN mocks one real standard library layout of std::vector. The
 // default shape nests the bounds in a layout record like current libc++
@@ -28,8 +46,227 @@
 // LIBCPP_BIT-COUNT-2: std_type_info = #cir.std_type_info<"std::bit_iterator", !cir.bool, roles {bit_offset = array<i32: 1>, word_pointer = array<i32: 0>}>
 // GNU_BIT-COUNT-2: std_type_info = #cir.std_type_info<"std::bit_iterator", !cir.bool, roles {bit_offset = array<i32: 0, 1>, word_pointer = array<i32: 0, 0>}>
 // BIT_NEGATIVE-NOT: std_type_info
+// LIBCPP_DEQUE-DAG: std_type_info = #cir.std_type_info<"std::deque_iterator", !s8i, roles {block_size = 4096 : i64, current_pointer = array<i32: 1>, map_pointer = array<i32: 0>}>
+// LIBCPP_DEQUE-DAG: std_type_info = #cir.std_type_info<"std::deque_iterator", !s32i, roles {block_size = 1024 : i64, current_pointer = array<i32: 1>, map_pointer = array<i32: 0>}>
+// GNU_DEQUE-DAG: std_type_info = #cir.std_type_info<"std::deque_iterator", !s8i, roles {block_first_pointer = array<i32: 1>, block_last_pointer = array<i32: 2>, block_size = 512 : i64, current_pointer = array<i32: 0>, map_pointer = array<i32: 3>}>
+// GNU_DEQUE-DAG: std_type_info = #cir.std_type_info<"std::deque_iterator", !s32i, roles {block_first_pointer = array<i32: 1>, block_last_pointer = array<i32: 2>, block_size = 128 : i64, current_pointer = array<i32: 0>, map_pointer = array<i32: 3>}>
+// DEQUE_NEGATIVE-NOT: std_type_info
 
-#if defined(LIBCXX_BIT_SHAPE)
+#if defined(LIBCXX_DEQUE_SHAPE)
+
+namespace std {
+inline namespace __1 {
+
+template <class ValueType, class Pointer, class Reference, class MapPointer,
+          class DiffType, DiffType BlockSize>
+class __deque_iterator {
+  MapPointer __m_iter_;
+  Pointer __ptr_;
+};
+
+}
+}
+
+using libcxx_int_iterator =
+    std::__deque_iterator<int, int *, int &, int **, long, 1024>;
+using libcxx_char_iterator =
+    std::__deque_iterator<char, char *, char &, char **, long, 4096>;
+
+unsigned long deque_sizes(libcxx_int_iterator &int_iterator,
+                          libcxx_char_iterator &char_iterator) {
+  return sizeof(int_iterator) + sizeof(char_iterator);
+}
+
+#elif defined(GNU_DEQUE_SHAPE)
+
+namespace std {
+
+constexpr unsigned long __deque_buf_size(unsigned long size) {
+  return size < 512 ? 512 / size : 1;
+}
+
+template <class Type, class Reference, class Pointer>
+struct _Deque_iterator {
+  using element_pointer = Type *;
+  using map_pointer = Type **;
+
+  static unsigned long _S_buffer_size() {
+    return __deque_buf_size(sizeof(Type));
+  }
+
+  element_pointer _M_cur;
+  element_pointer _M_first;
+  element_pointer _M_last;
+  map_pointer _M_node;
+};
+
+}
+
+using gnu_int_iterator = std::_Deque_iterator<int, int &, int *>;
+using gnu_char_iterator = std::_Deque_iterator<char, char &, char *>;
+
+unsigned long deque_sizes(gnu_int_iterator &int_iterator,
+                          gnu_char_iterator &char_iterator) {
+  return sizeof(int_iterator) + sizeof(char_iterator);
+}
+
+#elif defined(DEQUE_WRONG_FIELD_COUNT)
+
+namespace std {
+inline namespace __1 {
+
+template <class ValueType, class Pointer, class Reference, class MapPointer,
+          class DiffType, DiffType BlockSize>
+class __deque_iterator {
+  MapPointer __m_iter_;
+  Pointer __ptr_;
+  Pointer __extra_;
+};
+
+}
+}
+
+using wrong_count_iterator =
+    std::__deque_iterator<int, int *, int &, int **, long, 1024>;
+
+unsigned long deque_size(wrong_count_iterator &iterator) {
+  return sizeof(iterator);
+}
+
+#elif defined(DEQUE_WRONG_NAMESPACE)
+
+namespace std {
+namespace detail {
+
+template <class ValueType, class Pointer, class Reference, class MapPointer,
+          class DiffType, DiffType BlockSize>
+class __deque_iterator {
+  MapPointer __m_iter_;
+  Pointer __ptr_;
+};
+
+}
+}
+
+using wrong_namespace_iterator =
+    std::detail::__deque_iterator<int, int *, int &, int **, long, 1024>;
+
+unsigned long deque_size(wrong_namespace_iterator &iterator) {
+  return sizeof(iterator);
+}
+
+#elif defined(DEQUE_VOLATILE_CURRENT)
+
+namespace std {
+inline namespace __1 {
+
+template <class ValueType, class Pointer, class Reference, class MapPointer,
+          class DiffType, DiffType BlockSize>
+class __deque_iterator {
+  MapPointer __m_iter_;
+  Pointer volatile __ptr_;
+};
+
+}
+}
+
+using volatile_current_iterator =
+    std::__deque_iterator<int, int *, int &, int **, long, 1024>;
+
+unsigned long deque_size(volatile_current_iterator &iterator) {
+  return sizeof(iterator);
+}
+
+#elif defined(DEQUE_WRONG_BLOCK_SIZE)
+
+namespace std {
+inline namespace __1 {
+
+template <class ValueType, class Pointer, class Reference, class MapPointer,
+          class DiffType, DiffType BlockSize>
+class __deque_iterator {
+  MapPointer __m_iter_;
+  Pointer __ptr_;
+};
+
+}
+}
+
+using wrong_block_iterator =
+    std::__deque_iterator<int, int *, int &, int **, long, 2048>;
+
+unsigned long deque_size(wrong_block_iterator &iterator) {
+  return sizeof(iterator);
+}
+
+#elif defined(DEQUE_GNU_WRONG_FIELD_COUNT)
+
+namespace std {
+
+template <class Type, class Reference, class Pointer>
+struct _Deque_iterator {
+  Type *_M_cur;
+  Type *_M_first;
+  Type **_M_node;
+};
+
+}
+
+using gnu_three_field_iterator = std::_Deque_iterator<int, int &, int *>;
+
+unsigned long deque_size(gnu_three_field_iterator &iterator) {
+  return sizeof(iterator);
+}
+
+#elif defined(DEQUE_OUTSIDE_STD)
+
+namespace user {
+
+template <class Type, class Reference, class Pointer>
+struct _Deque_iterator {
+  Type *_M_cur;
+  Type *_M_first;
+  Type *_M_last;
+  Type **_M_node;
+};
+
+}
+
+using outside_iterator = user::_Deque_iterator<int, int &, int *>;
+
+unsigned long deque_size(outside_iterator &iterator) {
+  return sizeof(iterator);
+}
+
+#elif defined(DEQUE_DECOY_FIELD_SHAPE)
+
+namespace std {
+
+constexpr unsigned long __deque_buf_size(unsigned long size) {
+  return size < 512 ? 512 / size : 1;
+}
+
+template <class Type, class Reference, class Pointer>
+struct _Deque_iterator {
+  static unsigned long _S_buffer_size() {
+    return __deque_buf_size(sizeof(Type));
+  }
+
+  Type *_M_cur;
+  Type *_M_first;
+  Type *_M_last;
+  Type *_M_node;
+};
+
+}
+
+using decoy_iterator = std::_Deque_iterator<int, int &, int *>;
+
+unsigned long deque_size(decoy_iterator &iterator) {
+  return sizeof(iterator);
+}
+
+#elif defined(LIBCXX_BIT_SHAPE)
 
 namespace std {
 inline namespace __1 {

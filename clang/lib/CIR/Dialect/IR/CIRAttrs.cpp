@@ -141,10 +141,46 @@ mlir::DictionaryAttr cir::StdTypeInfoAttr::getBitIteratorRoles(
                             builder.getDenseI32ArrayAttr(bitOffsetPath))});
 }
 
+mlir::DictionaryAttr cir::StdTypeInfoAttr::getDequeIteratorRoles(
+    mlir::MLIRContext *ctx, llvm::ArrayRef<int32_t> currentPointerPath,
+    llvm::ArrayRef<int32_t> mapPointerPath, int64_t blockSize,
+    llvm::ArrayRef<int32_t> blockFirstPointerPath,
+    llvm::ArrayRef<int32_t> blockLastPointerPath) {
+  mlir::Builder builder(ctx);
+  llvm::SmallVector<mlir::NamedAttribute, 5> roles{
+      builder.getNamedAttr(kRoleCurrentPointer,
+                           builder.getDenseI32ArrayAttr(currentPointerPath)),
+      builder.getNamedAttr(kRoleMapPointer,
+                           builder.getDenseI32ArrayAttr(mapPointerPath)),
+      builder.getNamedAttr(kBlockSize, builder.getI64IntegerAttr(blockSize))};
+  if (!blockFirstPointerPath.empty())
+    roles.push_back(builder.getNamedAttr(
+        kRoleBlockFirstPointer,
+        builder.getDenseI32ArrayAttr(blockFirstPointerPath)));
+  if (!blockLastPointerPath.empty())
+    roles.push_back(builder.getNamedAttr(
+        kRoleBlockLastPointer,
+        builder.getDenseI32ArrayAttr(blockLastPointerPath)));
+  return builder.getDictionaryAttr(roles);
+}
+
 mlir::LogicalResult cir::StdTypeInfoAttr::verify(
     llvm::function_ref<mlir::InFlightDiagnostic()> emitError,
     cir::StdTypeKind kind, mlir::Type element, mlir::DictionaryAttr roles) {
   for (mlir::NamedAttribute role : roles) {
+    if (role.getName() == kBlockSize) {
+      // getInt asserts on a signed or unsigned integer type, so the type
+      // check has to demand signless before the value is read.
+      auto blockSize = mlir::dyn_cast<mlir::IntegerAttr>(role.getValue());
+      if (!blockSize || !blockSize.getType().isSignlessInteger(64) ||
+          blockSize.getInt() <= 0)
+        return emitError() << "block_size must carry a positive i64 element "
+                              "count";
+      if (kind != cir::StdTypeKind::StdDequeIterator)
+        return emitError()
+               << "block_size is meaningful only on a deque iterator";
+      continue;
+    }
     auto path = mlir::dyn_cast<mlir::DenseI32ArrayAttr>(role.getValue());
     if (!path)
       return emitError() << "role " << role.getName()
@@ -164,6 +200,20 @@ mlir::LogicalResult cir::StdTypeInfoAttr::verify(
       (!roles.get(kRoleWordPointer) || !roles.get(kRoleBitOffset)))
     return emitError() << "a bit iterator identity requires the word_pointer "
                           "and bit_offset roles";
+  if (kind == cir::StdTypeKind::StdDequeIterator &&
+      (!roles.get(kRoleCurrentPointer) || !roles.get(kRoleMapPointer) ||
+       !roles.get(kBlockSize)))
+    return emitError()
+           << "a deque iterator identity requires the current_pointer and "
+              "map_pointer roles and the block_size entry";
+  bool hasBlockFirst = roles.get(kRoleBlockFirstPointer) != nullptr;
+  bool hasBlockLast = roles.get(kRoleBlockLastPointer) != nullptr;
+  if (hasBlockFirst != hasBlockLast)
+    return emitError()
+           << "cached deque block pointer roles must occur together";
+  if (hasBlockFirst && kind != cir::StdTypeKind::StdDequeIterator)
+    return emitError()
+           << "cached deque block pointer roles require a deque iterator";
   return mlir::success();
 }
 
