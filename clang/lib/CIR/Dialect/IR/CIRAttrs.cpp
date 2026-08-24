@@ -125,8 +125,9 @@ cir::StdTypeInfoAttr::getContiguousRoles(mlir::MLIRContext *ctx,
                                          llvm::ArrayRef<int32_t> endPath) {
   mlir::Builder builder(ctx);
   return builder.getDictionaryAttr(
-      {builder.getNamedAttr("begin", builder.getDenseI32ArrayAttr(beginPath)),
-       builder.getNamedAttr("end", builder.getDenseI32ArrayAttr(endPath))});
+      {builder.getNamedAttr(kRoleBegin,
+                            builder.getDenseI32ArrayAttr(beginPath)),
+       builder.getNamedAttr(kRoleEnd, builder.getDenseI32ArrayAttr(endPath))});
 }
 
 mlir::DictionaryAttr cir::StdTypeInfoAttr::getBitIteratorRoles(
@@ -134,9 +135,9 @@ mlir::DictionaryAttr cir::StdTypeInfoAttr::getBitIteratorRoles(
     llvm::ArrayRef<int32_t> bitOffsetPath) {
   mlir::Builder builder(ctx);
   return builder.getDictionaryAttr(
-      {builder.getNamedAttr("word_pointer",
+      {builder.getNamedAttr(kRoleWordPointer,
                             builder.getDenseI32ArrayAttr(wordPointerPath)),
-       builder.getNamedAttr("bit_offset",
+       builder.getNamedAttr(kRoleBitOffset,
                             builder.getDenseI32ArrayAttr(bitOffsetPath))});
 }
 
@@ -156,11 +157,11 @@ mlir::LogicalResult cir::StdTypeInfoAttr::verify(
   // Each kind names the roles its consumers rely on, so their absence is a
   // construction error rather than a consumer decline.
   if (kind == cir::StdTypeKind::StdVector &&
-      (!roles.get("begin") || !roles.get("end")))
+      (!roles.get(kRoleBegin) || !roles.get(kRoleEnd)))
     return emitError() << "a contiguous container identity requires the "
                           "begin and end roles";
   if (kind == cir::StdTypeKind::StdBitIterator &&
-      (!roles.get("word_pointer") || !roles.get("bit_offset")))
+      (!roles.get(kRoleWordPointer) || !roles.get(kRoleBitOffset)))
     return emitError() << "a bit iterator identity requires the word_pointer "
                           "and bit_offset roles";
   return mlir::success();

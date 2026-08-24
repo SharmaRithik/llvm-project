@@ -14,22 +14,16 @@
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/IR/BuiltinAttributes.h"
 #include "mlir/IR/Region.h"
-#include "clang/AST/ASTContext.h"
-#include "clang/AST/Mangle.h"
-#include "clang/Basic/Module.h"
 #include "clang/CIR/Dialect/Builder/CIRBaseBuilder.h"
 #include "clang/CIR/Dialect/IR/CIRDialect.h"
 #include "clang/CIR/Dialect/Passes.h"
 #include "llvm/ADT/APInt.h"
 #include "llvm/ADT/SmallVector.h"
-#include "llvm/ADT/StringMap.h"
 #include "llvm/ADT/StringRef.h"
-#include "llvm/ADT/StringSet.h"
 #include "llvm/ADT/Twine.h"
 #include "llvm/ADT/TypeSwitch.h"
 #include "llvm/Analysis/TargetLibraryInfo.h"
 #include "llvm/Support/ErrorHandling.h"
-#include "llvm/Support/Path.h"
 #include "llvm/TargetParser/Triple.h"
 #include <optional>
 
@@ -146,6 +140,17 @@ static cir::PointerType unwrapContiguousIterator(mlir::Type ty,
   return mlir::dyn_cast<cir::PointerType>(wrapperTy.getMembers()[0]);
 }
 
+static mlir::Value emitMemCmpIsEqual(CIRBaseBuilderTy &builder,
+                                     mlir::Location loc, mlir::Value lhs,
+                                     mlir::Value rhs, mlir::Value len,
+                                     cir::IntType intTy,
+                                     mlir::Value zero = {}) {
+  mlir::Value cmp = cir::MemCmpOp::create(builder, loc, intTy, lhs, rhs, len);
+  if (!zero)
+    zero = builder.getNullValue(intTy, loc);
+  return builder.createCompare(loc, cir::CmpOpKind::eq, cmp, zero).getResult();
+}
+
 // Rewrites cir.std.find, cir.std.ranges.find, cir.std.ranges.find_range,
 // and the byte equality predicate forms of cir.std.find_if,
 // cir.std.find_if_not, cir.std.ranges.find_if, and
@@ -240,8 +245,9 @@ rewriteFindLikeToMemchr(OpT findOp, mlir::SymbolTableCollection &symbolTables,
       return cir::StdTypeInfoAttr::resolvePath(rangeRecTy, path) ==
              mlir::Type(iterTy);
     };
-    if (!pathLandsOnIter(rangeInfo.getRolePath("begin")) ||
-        !pathLandsOnIter(rangeInfo.getRolePath("end")))
+    if (!pathLandsOnIter(
+            rangeInfo.getRolePath(cir::StdTypeInfoAttr::kRoleBegin)) ||
+        !pathLandsOnIter(rangeInfo.getRolePath(cir::StdTypeInfoAttr::kRoleEnd)))
       return;
   }
 
@@ -341,8 +347,8 @@ rewriteFindLikeToMemchr(OpT findOp, mlir::SymbolTableCollection &symbolTables,
                                         /*name=*/"", /*index=*/idx);
       return builder.createLoad(loc, addr);
     };
-    first = loadBound(rangeInfo.getRolePath("begin"));
-    last = loadBound(rangeInfo.getRolePath("end"));
+    first = loadBound(rangeInfo.getRolePath(cir::StdTypeInfoAttr::kRoleBegin));
+    last = loadBound(rangeInfo.getRolePath(cir::StdTypeInfoAttr::kRoleEnd));
   } else {
     first = findOp.getFirst();
     last = findOp.getLast();
@@ -553,13 +559,9 @@ rewriteSearchToMemmem(StdSearchOp searchOp,
                                     loc, first1, builder.getVoidPtrTy());
                                 mlir::Value rhs = builder.createBitcast(
                                     loc, first2, builder.getVoidPtrTy());
-                                mlir::Value cmp = cir::MemCmpOp::create(
-                                    builder, loc, builder.getSIntNTy(*intWidth),
-                                    lhs, rhs, needleLen);
-                                mlir::Value zero = builder.getNullValue(
-                                    builder.getSIntNTy(*intWidth), loc);
-                                mlir::Value equal = builder.createCompare(
-                                    loc, cir::CmpOpKind::eq, cmp, zero);
+                                mlir::Value equal = emitMemCmpIsEqual(
+                                    builder, loc, lhs, rhs, needleLen,
+                                    builder.getSIntNTy(*intWidth));
                                 builder.createYield(
                                     loc, builder.createSelect(loc, equal,
                                                               first1, last1));
@@ -677,13 +679,9 @@ static void rewriteEqualToMemcmp(OpT equalOp,
                 builder.createBitcast(loc, first2, builder.getVoidPtrTy());
             mlir::Value len = cir::PtrDiffOp::create(
                 builder, loc, builder.getUIntNTy(*sizeWidth), last1, first1);
-            mlir::Value cmp = cir::MemCmpOp::create(
-                builder, loc, builder.getSIntNTy(*intWidth), lhs, rhs, len);
-            mlir::Value zero =
-                builder.getNullValue(builder.getSIntNTy(*intWidth), loc);
             builder.createYield(
-                loc, builder.createCompare(loc, cir::CmpOpKind::eq, cmp, zero)
-                         .getResult());
+                loc, emitMemCmpIsEqual(builder, loc, lhs, rhs, len,
+                                       builder.getSIntNTy(*intWidth)));
           })
           .getResult();
   equalOp.getResult().replaceAllUsesWith(result);
@@ -859,12 +857,9 @@ rewriteMismatchToMemcmpLoop(OpT mismatchOp,
                       ll, advance(ll, first2, off), builder.getVoidPtrTy());
                   mlir::Value byteCount =
                       builder.createMul(ll, chunk, elementSize);
-                  mlir::Value cmp = cir::MemCmpOp::create(builder, ll, intTy,
-                                                          lhs, rhs, byteCount);
-                  builder.createYield(
-                      ll,
-                      builder.createCompare(ll, cir::CmpOpKind::eq, cmp, zero)
-                          .getResult());
+                  builder.createYield(ll, emitMemCmpIsEqual(builder, ll, lhs,
+                                                            rhs, byteCount,
+                                                            intTy, zero));
                 },
                 [&](mlir::OpBuilder &, mlir::Location ll) {
                   builder.createYield(ll,
@@ -1010,13 +1005,15 @@ rewriteFindBitToWordScan(OpT findOp,
       !mlir::isa<cir::BoolType>(iteratorInfo.getElement()))
     return false;
 
-  llvm::ArrayRef<int32_t> wordPath = iteratorInfo.getRolePath("word_pointer");
-  llvm::ArrayRef<int32_t> bitPath = iteratorInfo.getRolePath("bit_offset");
+  llvm::ArrayRef<int32_t> wordPath =
+      iteratorInfo.getRolePath(cir::StdTypeInfoAttr::kRoleWordPointer);
+  llvm::ArrayRef<int32_t> bitPath =
+      iteratorInfo.getRolePath(cir::StdTypeInfoAttr::kRoleBitOffset);
   if (wordPath.empty() || bitPath.empty())
     return false;
 
-  auto wordPtrTy = mlir::dyn_cast<cir::PointerType>(
-      iteratorInfo.resolveRole(iteratorTy, "word_pointer"));
+  auto wordPtrTy = mlir::dyn_cast<cir::PointerType>(iteratorInfo.resolveRole(
+      iteratorTy, cir::StdTypeInfoAttr::kRoleWordPointer));
   if (!wordPtrTy || wordPtrTy.getAddrSpace())
     return false;
 
@@ -1034,8 +1031,8 @@ rewriteFindBitToWordScan(OpT findOp,
     return false;
   }
 
-  auto bitOffsetTy = mlir::dyn_cast<cir::IntType>(
-      iteratorInfo.resolveRole(iteratorTy, "bit_offset"));
+  auto bitOffsetTy = mlir::dyn_cast<cir::IntType>(iteratorInfo.resolveRole(
+      iteratorTy, cir::StdTypeInfoAttr::kRoleBitOffset));
   if (!bitOffsetTy || !bitOffsetTy.isUnsigned() || !bitOffsetTy.isFundamental())
     return false;
 
