@@ -7,12 +7,23 @@
 !wrap = !cir.struct<class "wrap_iter" {data !cir.ptr<!u8i>}>
 !wpair = !cir.struct<class "WPair" {data !cir.struct<class "wrap_iter" {data !cir.ptr<!u8i>}>, data !cir.struct<class "wrap_iter" {data !cir.ptr<!u8i>}>}>
 !mpair = !cir.struct<class "MPair" {data !cir.struct<class "wrap_iter" {data !cir.ptr<!u8i>}>, data !cir.ptr<!u8i>}>
+!s16i = !cir.int<s, 16>
+!s32i = !cir.int<s, 32>
+!wide_pair = !cir.struct<class "WidePair" {data !cir.ptr<!s32i>, data !cir.ptr<!s32i>}>
+!short_pair = !cir.struct<class "ShortPair" {data !cir.ptr<!s16i>, data !cir.ptr<!s16i>}>
+!wide_pred_closure = !cir.struct<class "WidePredClosure" {}>
 
 module attributes {cir.triple = "x86_64-unknown-linux-gnu",
                    cir.int_type_width = 32 : i32,
-                   cir.size_type_width = 64 : i32} {
+                   cir.size_type_width = 64 : i32,
+                   cir.wchar_type_width = 32 : i32} {
   cir.func private @_ZSt8mismatch(!cir.ptr<!u8i>, !cir.ptr<!u8i>, !cir.ptr<!u8i>) -> !pair func_info<#cir.func_identity<"std::mismatch">>
   cir.func private @_ZSt8mismatchP(!cir.ptr<!u8i>, !cir.ptr<!u8i>, !cir.ptr<!u8i>, !pred_closure) -> !pair func_info<#cir.func_identity<"std::mismatch">>
+  cir.func private @_ZSt8mismatchWide(!cir.ptr<!s32i>, !cir.ptr<!s32i>, !cir.ptr<!s32i>) -> !wide_pair func_info<#cir.func_identity<"std::mismatch">>
+  cir.func private @_ZSt8mismatchWideP(!cir.ptr<!s32i>, !cir.ptr<!s32i>, !cir.ptr<!s32i>, !wide_pred_closure) -> !wide_pair func_info<#cir.func_identity<"std::mismatch">>
+  cir.func private @_ZSt8mismatchBW(!cir.ptr<!s32i>, !cir.ptr<!s32i>, !cir.ptr<!s32i>, !cir.ptr<!s32i>) -> !wide_pair func_info<#cir.func_identity<"std::mismatch">>
+  cir.func private @_ZSt8mismatchBWP(!cir.ptr<!s32i>, !cir.ptr<!s32i>, !cir.ptr<!s32i>, !cir.ptr<!s32i>, !wide_pred_closure) -> !wide_pair func_info<#cir.func_identity<"std::mismatch">>
+  cir.func private @_ZSt8mismatchShort(!cir.ptr<!s16i>, !cir.ptr<!s16i>, !cir.ptr<!s16i>) -> !short_pair func_info<#cir.func_identity<"std::mismatch">>
 
   cir.func @transforms(%first1: !cir.ptr<!u8i>, %last1: !cir.ptr<!u8i>, %first2: !cir.ptr<!u8i>) -> !pair {
     %0 = cir.std.mismatch(%first1 : !cir.ptr<!u8i>, %last1 : !cir.ptr<!u8i>, %first2 : !cir.ptr<!u8i>, @_ZSt8mismatch) -> !pair {cir.narrow_char_params}
@@ -42,6 +53,40 @@ module attributes {cir.triple = "x86_64-unknown-linux-gnu",
 // CHECK-LABEL: @transforms_pred
 // CHECK: cir.libc.memcmp
 // CHECK-NOT: cir.std.mismatch_pred
+
+  cir.func @transforms_wide(%first1: !cir.ptr<!s32i>, %last1: !cir.ptr<!s32i>, %first2: !cir.ptr<!s32i>) -> !wide_pair {
+    %0 = cir.std.mismatch(%first1 : !cir.ptr<!s32i>, %last1 : !cir.ptr<!s32i>, %first2 : !cir.ptr<!s32i>, @_ZSt8mismatchWide) -> !wide_pair {cir.wide_char_params}
+    cir.return %0 : !wide_pair
+  }
+// Wide memcmp lengths count bytes while offsets and typed loads count elements.
+// CHECK-LABEL: @transforms_wide
+// CHECK: %[[WSIZE:[0-9]+]] = cir.const #cir.int<4> : !u64i
+// CHECK: cir.ptr_stride %{{.*}}, %{{.*}} : (!cir.ptr<!s32i>, !u64i) -> !cir.ptr<!s32i>
+// CHECK: cir.mul %{{.*}}, %[[WSIZE]] : !u64i
+// CHECK: cir.libc.memcmp
+// CHECK: cir.load %{{.*}} : !cir.ptr<!s32i>, !s32i
+// CHECK: cir.insert_member %{{.*}}[1], %{{.*}} : !rec_WidePair, !cir.ptr<!s32i>
+// CHECK-NOT: cir.std.mismatch
+
+  cir.func @transforms_wide_pred(%first1: !cir.ptr<!s32i>, %last1: !cir.ptr<!s32i>, %first2: !cir.ptr<!s32i>, %pred: !wide_pred_closure) -> !wide_pair {
+    %0 = cir.std.mismatch_pred(%first1 : !cir.ptr<!s32i>, %last1 : !cir.ptr<!s32i>, %first2 : !cir.ptr<!s32i>, %pred : !wide_pred_closure, @_ZSt8mismatchWideP) -> !wide_pair {cir.elem_eq_binary_pred, cir.wide_char_params}
+    cir.return %0 : !wide_pair
+  }
+// CHECK-LABEL: @transforms_wide_pred
+// CHECK: %[[WPSIZE:[0-9]+]] = cir.const #cir.int<4> : !u64i
+// CHECK: cir.mul %{{.*}}, %[[WPSIZE]] : !u64i
+// CHECK: cir.libc.memcmp
+// CHECK: cir.load %{{.*}} : !cir.ptr<!s32i>, !s32i
+// CHECK-NOT: cir.std.mismatch_pred
+
+  cir.func @keeps_wide_marker_on_wrong_width(%first1: !cir.ptr<!s16i>, %last1: !cir.ptr<!s16i>, %first2: !cir.ptr<!s16i>) -> !short_pair {
+    %0 = cir.std.mismatch(%first1 : !cir.ptr<!s16i>, %last1 : !cir.ptr<!s16i>, %first2 : !cir.ptr<!s16i>, @_ZSt8mismatchShort) -> !short_pair {cir.wide_char_params}
+    cir.return %0 : !short_pair
+  }
+// The wide marker still has to agree with the recorded wchar width.
+// CHECK-LABEL: @keeps_wide_marker_on_wrong_width
+// CHECK: cir.std.mismatch
+// CHECK-NOT: cir.libc.memcmp
 
   cir.func @keeps_unmarked(%first1: !cir.ptr<!u8i>, %last1: !cir.ptr<!u8i>, %first2: !cir.ptr<!u8i>) -> !pair {
     %0 = cir.std.mismatch(%first1 : !cir.ptr<!u8i>, %last1 : !cir.ptr<!u8i>, %first2 : !cir.ptr<!u8i>, @_ZSt8mismatch) -> !pair
@@ -94,24 +139,66 @@ module attributes {cir.triple = "x86_64-unknown-linux-gnu",
 // CHECK: cir.insert_member %{{[0-9]+}}[1], %{{.*}} : !rec_MPair, !cir.ptr<!u8i>
 // CHECK-NOT: cir.std.mismatch
 
-  cir.func @keeps_four_iterator_shape(%first1: !wrap, %last1: !wrap, %first2: !wrap, %last2: !wrap) -> !wpair {
+  cir.func @transforms_bounded(%first1: !wrap, %last1: !wrap, %first2: !wrap, %last2: !wrap) -> !wpair {
     %0 = cir.std.mismatch_bounded(%first1 : !wrap, %last1 : !wrap, %first2 : !wrap, %last2 : !wrap, @_ZSt8mismatchW) -> !wpair {cir.narrow_char_params}
     cir.return %0 : !wpair
   }
-// LibOpt has no rewrite for the bounded operations yet, so both survive.
-// CHECK-LABEL: @keeps_four_iterator_shape
-// CHECK: cir.std.mismatch_bounded
-// CHECK-NOT: cir.libc.memcmp
+// Both iterators advance by the lesser remaining element count.
+// CHECK-LABEL: @transforms_bounded
+// CHECK: %[[B1:[0-9]+]] = cir.ptr_diff %{{.*}}, %{{.*}} : !cir.ptr<!u8i> -> !u64i
+// CHECK: %[[B2:[0-9]+]] = cir.ptr_diff %{{.*}}, %{{.*}} : !cir.ptr<!u8i> -> !u64i
+// CHECK: %[[BC:[0-9]+]] = cir.cmp lt %[[B1]], %[[B2]] : !u64i
+// CHECK: %{{[0-9]+}} = cir.select if %[[BC]] then %[[B1]] else %[[B2]]
+// CHECK: cir.libc.memcmp
+// CHECK: cir.insert_member %{{.*}}[1], %{{.*}} : !rec_WPair, !rec_wrap_iter
+// CHECK-NOT: cir.std.mismatch_bounded
 
   cir.func private @_ZSt8mismatchWP(!wrap, !wrap, !wrap, !wrap, !pred_closure) -> !wpair func_info<#cir.func_identity<"std::mismatch">>
 
-  cir.func @keeps_bounded_pred_shape(%first1: !wrap, %last1: !wrap, %first2: !wrap, %last2: !wrap, %pred: !pred_closure) -> !wpair {
+  cir.func @transforms_bounded_pred(%first1: !wrap, %last1: !wrap, %first2: !wrap, %last2: !wrap, %pred: !pred_closure) -> !wpair {
     %0 = cir.std.mismatch_bounded_pred(%first1 : !wrap, %last1 : !wrap, %first2 : !wrap, %last2 : !wrap, %pred : !pred_closure, @_ZSt8mismatchWP) -> !wpair {cir.elem_eq_binary_pred}
     cir.return %0 : !wpair
   }
-// CHECK-LABEL: @keeps_bounded_pred_shape
-// CHECK: cir.std.mismatch_bounded_pred
-// CHECK-NOT: cir.libc.memcmp
+// CHECK-LABEL: @transforms_bounded_pred
+// CHECK: %[[BP1:[0-9]+]] = cir.ptr_diff %{{.*}}, %{{.*}} : !cir.ptr<!u8i> -> !u64i
+// CHECK: %[[BP2:[0-9]+]] = cir.ptr_diff %{{.*}}, %{{.*}} : !cir.ptr<!u8i> -> !u64i
+// CHECK: %[[BPC:[0-9]+]] = cir.cmp lt %[[BP1]], %[[BP2]] : !u64i
+// CHECK: %{{[0-9]+}} = cir.select if %[[BPC]] then %[[BP1]] else %[[BP2]]
+// CHECK: cir.libc.memcmp
+// CHECK: cir.insert_member %{{.*}}[1], %{{.*}} : !rec_WPair, !rec_wrap_iter
+// CHECK-NOT: cir.std.mismatch_bounded_pred
+
+  cir.func @transforms_bounded_wide(%first1: !cir.ptr<!s32i>, %last1: !cir.ptr<!s32i>, %first2: !cir.ptr<!s32i>, %last2: !cir.ptr<!s32i>) -> !wide_pair {
+    %0 = cir.std.mismatch_bounded(%first1 : !cir.ptr<!s32i>, %last1 : !cir.ptr<!s32i>, %first2 : !cir.ptr<!s32i>, %last2 : !cir.ptr<!s32i>, @_ZSt8mismatchBW) -> !wide_pair {cir.wide_char_params}
+    cir.return %0 : !wide_pair
+  }
+// CHECK-LABEL: @transforms_bounded_wide
+// CHECK: %[[BW1:[0-9]+]] = cir.ptr_diff %{{.*}}, %{{.*}} : !cir.ptr<!s32i> -> !u64i
+// CHECK: %[[BW2:[0-9]+]] = cir.ptr_diff %{{.*}}, %{{.*}} : !cir.ptr<!s32i> -> !u64i
+// CHECK: %[[BWC:[0-9]+]] = cir.cmp lt %[[BW1]], %[[BW2]] : !u64i
+// CHECK: %{{[0-9]+}} = cir.select if %[[BWC]] then %[[BW1]] else %[[BW2]]
+// CHECK: %[[BWSIZE:[0-9]+]] = cir.const #cir.int<4> : !u64i
+// CHECK: cir.mul %{{.*}}, %[[BWSIZE]] : !u64i
+// CHECK: cir.libc.memcmp
+// CHECK: cir.load %{{.*}} : !cir.ptr<!s32i>, !s32i
+// CHECK: cir.insert_member %{{.*}}[1], %{{.*}} : !rec_WidePair, !cir.ptr<!s32i>
+// CHECK-NOT: cir.std.mismatch_bounded
+
+  cir.func @transforms_bounded_wide_pred(%first1: !cir.ptr<!s32i>, %last1: !cir.ptr<!s32i>, %first2: !cir.ptr<!s32i>, %last2: !cir.ptr<!s32i>, %pred: !wide_pred_closure) -> !wide_pair {
+    %0 = cir.std.mismatch_bounded_pred(%first1 : !cir.ptr<!s32i>, %last1 : !cir.ptr<!s32i>, %first2 : !cir.ptr<!s32i>, %last2 : !cir.ptr<!s32i>, %pred : !wide_pred_closure, @_ZSt8mismatchBWP) -> !wide_pair {cir.elem_eq_binary_pred, cir.wide_char_params}
+    cir.return %0 : !wide_pair
+  }
+// CHECK-LABEL: @transforms_bounded_wide_pred
+// CHECK: %[[BWP1:[0-9]+]] = cir.ptr_diff %{{.*}}, %{{.*}} : !cir.ptr<!s32i> -> !u64i
+// CHECK: %[[BWP2:[0-9]+]] = cir.ptr_diff %{{.*}}, %{{.*}} : !cir.ptr<!s32i> -> !u64i
+// CHECK: %[[BWPC:[0-9]+]] = cir.cmp lt %[[BWP1]], %[[BWP2]] : !u64i
+// CHECK: %{{[0-9]+}} = cir.select if %[[BWPC]] then %[[BWP1]] else %[[BWP2]]
+// CHECK: %[[BWPSIZE:[0-9]+]] = cir.const #cir.int<4> : !u64i
+// CHECK: cir.mul %{{.*}}, %[[BWPSIZE]] : !u64i
+// CHECK: cir.libc.memcmp
+// CHECK: cir.load %{{.*}} : !cir.ptr<!s32i>, !s32i
+// CHECK: cir.insert_member %{{.*}}[1], %{{.*}} : !rec_WidePair, !cir.ptr<!s32i>
+// CHECK-NOT: cir.std.mismatch_bounded_pred
 }
 
 // -----
@@ -124,6 +211,7 @@ module attributes {cir.triple = "x86_64-unknown-linux-gnu",
                    cir.int_type_width = 32 : i32,
                    cir.size_type_width = 64 : i32} {
   cir.func private @_ZSt8mismatchB(!cir.ptr<!u8i>, !cir.ptr<!u8i>, !cir.ptr<!u8i>) -> !badpair func_info<#cir.func_identity<"std::mismatch">>
+  cir.func private @_ZSt8mismatchBB(!cir.ptr<!u8i>, !cir.ptr<!u8i>, !cir.ptr<!u8i>, !cir.ptr<!u8i>) -> !badpair func_info<#cir.func_identity<"std::mismatch">>
 
   cir.func @keeps_wrong_pair_member(%first1: !cir.ptr<!u8i>, %last1: !cir.ptr<!u8i>, %first2: !cir.ptr<!u8i>) -> !badpair {
     %0 = cir.std.mismatch(%first1 : !cir.ptr<!u8i>, %last1 : !cir.ptr<!u8i>, %first2 : !cir.ptr<!u8i>, @_ZSt8mismatchB) -> !badpair {cir.narrow_char_params}
@@ -133,6 +221,15 @@ module attributes {cir.triple = "x86_64-unknown-linux-gnu",
 // so the rebuild cannot trust it.
 // CHECK-LABEL: @keeps_wrong_pair_member
 // CHECK: cir.std.mismatch
+// CHECK-NOT: cir.libc.memcmp
+
+  cir.func @keeps_bounded_wrong_pair_member(%first1: !cir.ptr<!u8i>, %last1: !cir.ptr<!u8i>, %first2: !cir.ptr<!u8i>, %last2: !cir.ptr<!u8i>) -> !badpair {
+    %0 = cir.std.mismatch_bounded(%first1 : !cir.ptr<!u8i>, %last1 : !cir.ptr<!u8i>, %first2 : !cir.ptr<!u8i>, %last2 : !cir.ptr<!u8i>, @_ZSt8mismatchBB) -> !badpair {cir.narrow_char_params}
+    cir.return %0 : !badpair
+  }
+// The bounded pair rebuild uses the same structural proof.
+// CHECK-LABEL: @keeps_bounded_wrong_pair_member
+// CHECK: cir.std.mismatch_bounded
 // CHECK-NOT: cir.libc.memcmp
 }
 
@@ -199,6 +296,101 @@ module attributes {cir.triple = "x86_64-unknown-linux-gnu",
     cir.return %0 : !pair
   }
 // CHECK-LABEL: @keeps_without_int_width
+// CHECK: cir.std.mismatch
+// CHECK-NOT: cir.libc.memcmp
+}
+
+// -----
+
+!s32i = !cir.int<s, 32>
+!wide_pair = !cir.struct<class "WideDeclinePair" {data !cir.ptr<!s32i>, data !cir.ptr<!s32i>}>
+!wide_closure = !cir.struct<class "WideDeclineClosure" {}>
+
+module attributes {cir.triple = "x86_64-unknown-linux-gnu",
+                   cir.int_type_width = 32 : i32,
+                   cir.size_type_width = 64 : i32,
+                   cir.wchar_type_width = 32 : i32} {
+  cir.func private @_ZSt8mismatchNW(!cir.ptr<!s32i>, !cir.ptr<!s32i>, !cir.ptr<!s32i>) -> !wide_pair func_info<#cir.func_identity<"std::mismatch">>
+  cir.func private @_ZSt8mismatchWU(!cir.ptr<!s32i>, !cir.ptr<!s32i>, !cir.ptr<!s32i>, !wide_closure) -> !wide_pair func_info<#cir.func_identity<"std::mismatch">>
+
+  cir.func @keeps_narrow_marker_on_wide_element(%first1: !cir.ptr<!s32i>, %last1: !cir.ptr<!s32i>, %first2: !cir.ptr<!s32i>) -> !wide_pair {
+    %0 = cir.std.mismatch(%first1 : !cir.ptr<!s32i>, %last1 : !cir.ptr<!s32i>, %first2 : !cir.ptr<!s32i>, @_ZSt8mismatchNW) -> !wide_pair {cir.narrow_char_params}
+    cir.return %0 : !wide_pair
+  }
+// The narrow marker says nothing about a wide element.
+// CHECK-LABEL: @keeps_narrow_marker_on_wide_element
+// CHECK: cir.std.mismatch
+// CHECK-NOT: cir.libc.memcmp
+
+  cir.func @keeps_wide_pred_without_eq_marker(%first1: !cir.ptr<!s32i>, %last1: !cir.ptr<!s32i>, %first2: !cir.ptr<!s32i>, %pred: !wide_closure) -> !wide_pair {
+    %0 = cir.std.mismatch_pred(%first1 : !cir.ptr<!s32i>, %last1 : !cir.ptr<!s32i>, %first2 : !cir.ptr<!s32i>, %pred : !wide_closure, @_ZSt8mismatchWU) -> !wide_pair {cir.wide_char_params}
+    cir.return %0 : !wide_pair
+  }
+// The element fact alone does not prove the predicate body.
+// CHECK-LABEL: @keeps_wide_pred_without_eq_marker
+// CHECK: cir.std.mismatch_pred
+// CHECK-NOT: cir.libc.memcmp
+}
+
+// -----
+
+!u8i = !cir.int<u, 8>
+!byte_pair = !cir.struct<class "ByteDeclinePair" {data !cir.ptr<!u8i>, data !cir.ptr<!u8i>}>
+
+module attributes {cir.triple = "x86_64-unknown-linux-gnu",
+                   cir.int_type_width = 32 : i32,
+                   cir.size_type_width = 64 : i32,
+                   cir.wchar_type_width = 32 : i32} {
+  cir.func private @_ZSt8mismatchWB(!cir.ptr<!u8i>, !cir.ptr<!u8i>, !cir.ptr<!u8i>) -> !byte_pair func_info<#cir.func_identity<"std::mismatch">>
+
+  cir.func @keeps_wide_marker_on_byte_element(%first1: !cir.ptr<!u8i>, %last1: !cir.ptr<!u8i>, %first2: !cir.ptr<!u8i>) -> !byte_pair {
+    %0 = cir.std.mismatch(%first1 : !cir.ptr<!u8i>, %last1 : !cir.ptr<!u8i>, %first2 : !cir.ptr<!u8i>, @_ZSt8mismatchWB) -> !byte_pair {cir.wide_char_params}
+    cir.return %0 : !byte_pair
+  }
+// A byte element takes the narrow rules, the wide marker proves nothing
+// for it.
+// CHECK-LABEL: @keeps_wide_marker_on_byte_element
+// CHECK: cir.std.mismatch
+// CHECK-NOT: cir.libc.memcmp
+}
+
+// -----
+
+!s32i = !cir.int<s, 32>
+!nowchar_pair = !cir.struct<class "NoWcharPair" {data !cir.ptr<!s32i>, data !cir.ptr<!s32i>}>
+
+module attributes {cir.triple = "x86_64-unknown-linux-gnu",
+                   cir.int_type_width = 32 : i32,
+                   cir.size_type_width = 64 : i32} {
+  cir.func private @_ZSt8mismatchND(!cir.ptr<!s32i>, !cir.ptr<!s32i>, !cir.ptr<!s32i>) -> !nowchar_pair func_info<#cir.func_identity<"std::mismatch">>
+
+  cir.func @keeps_wide_without_recorded_wchar_width(%first1: !cir.ptr<!s32i>, %last1: !cir.ptr<!s32i>, %first2: !cir.ptr<!s32i>) -> !nowchar_pair {
+    %0 = cir.std.mismatch(%first1 : !cir.ptr<!s32i>, %last1 : !cir.ptr<!s32i>, %first2 : !cir.ptr<!s32i>, @_ZSt8mismatchND) -> !nowchar_pair {cir.wide_char_params}
+    cir.return %0 : !nowchar_pair
+  }
+// Without a recorded wchar_t width nothing checks the element width.
+// CHECK-LABEL: @keeps_wide_without_recorded_wchar_width
+// CHECK: cir.std.mismatch
+// CHECK-NOT: cir.libc.memcmp
+}
+
+// -----
+
+!bitint32 = !cir.int<s, 32, bitint>
+!bitint_pair = !cir.struct<class "BitIntPair" {data !cir.ptr<!bitint32>, data !cir.ptr<!bitint32>}>
+
+module attributes {cir.triple = "x86_64-unknown-linux-gnu",
+                   cir.int_type_width = 32 : i32,
+                   cir.size_type_width = 64 : i32,
+                   cir.wchar_type_width = 32 : i32} {
+  cir.func private @_ZSt8mismatchBI(!cir.ptr<!bitint32>, !cir.ptr<!bitint32>, !cir.ptr<!bitint32>) -> !bitint_pair func_info<#cir.func_identity<"std::mismatch">>
+
+  cir.func @keeps_wide_bitint(%first1: !cir.ptr<!bitint32>, %last1: !cir.ptr<!bitint32>, %first2: !cir.ptr<!bitint32>) -> !bitint_pair {
+    %0 = cir.std.mismatch(%first1 : !cir.ptr<!bitint32>, %last1 : !cir.ptr<!bitint32>, %first2 : !cir.ptr<!bitint32>, @_ZSt8mismatchBI) -> !bitint_pair {cir.wide_char_params}
+    cir.return %0 : !bitint_pair
+  }
+// BitInt stays out of the rewrite at every width.
+// CHECK-LABEL: @keeps_wide_bitint
 // CHECK: cir.std.mismatch
 // CHECK-NOT: cir.libc.memcmp
 }

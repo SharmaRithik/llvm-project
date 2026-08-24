@@ -32,18 +32,79 @@
 // CIR-NOT: cir.std.mismatch
 
 // CIR-LABEL: cir.func dso_local @_Z12int_mismatchPiS_S_
-// CIR: cir.call @_ZSt8mismatchIPiS0_ESt4pairIT_T0_ES2_S2_S3_
-// CIR-NOT: cir.libc.memcmp
+// CIR: %[[ISIZE:[0-9]+]] = cir.const #cir.int<4> : !u64i
+// CIR: cir.mul %{{.*}}, %[[ISIZE]] : !u64i
+// CIR: cir.libc.memcmp
+// CIR: cir.load %{{.*}} : !cir.ptr<!s32i>, !s32i
+// CIR: cir.insert_member %{{.*}}[1], %{{.*}} : !rec_std3A3Apair3Cint_2A2C_int_2A3E, !cir.ptr<!s32i>
+// CIR-NOT: cir.std.mismatch
 
-// The bounded operation has no LibOpt rewrite and lowers back to the call
+// CIR-LABEL: cir.func dso_local @_Z17int_mismatch_predPiS_S_
+// CIR: %[[IPSIZE:[0-9]+]] = cir.const #cir.int<4> : !u64i
+// CIR: cir.mul %{{.*}}, %[[IPSIZE]] : !u64i
+// CIR: cir.libc.memcmp
+// CIR: cir.load %{{.*}} : !cir.ptr<!s32i>, !s32i
+// CIR-NOT: cir.std.mismatch
+
 // CIR-LABEL: cir.func dso_local @_Z13four_iteratorSt11__wrap_iterIcES0_S0_S0_
-// CIR: cir.call @_ZSt8mismatchISt11__wrap_iterIcES1_ESt4pairIT_T0_ES3_S3_S4_S4_({{.*}}) {cir.narrow_char_params}
-// CIR-NOT: cir.libc.memcmp
+// CIR: %[[FB1:[0-9]+]] = cir.ptr_diff %{{.*}}, %{{.*}} : !cir.ptr<!s8i> -> !u64i
+// CIR: %[[FB2:[0-9]+]] = cir.ptr_diff %{{.*}}, %{{.*}} : !cir.ptr<!s8i> -> !u64i
+// CIR: %[[FBC:[0-9]+]] = cir.cmp lt %[[FB1]], %[[FB2]] : !u64i
+// CIR: cir.select if %[[FBC]] then %[[FB1]] else %[[FB2]]
+// CIR: cir.libc.memcmp
+// CIR: cir.insert_member %{{.*}}[1]
+// CIR-NOT: cir.std.mismatch_bounded
+
+// CIR-LABEL: cir.func dso_local @_Z18four_iterator_predSt11__wrap_iterIcES0_S0_S0_
+// CIR: %[[FPB1:[0-9]+]] = cir.ptr_diff %{{.*}}, %{{.*}} : !cir.ptr<!s8i> -> !u64i
+// CIR: %[[FPB2:[0-9]+]] = cir.ptr_diff %{{.*}}, %{{.*}} : !cir.ptr<!s8i> -> !u64i
+// CIR: %[[FPBC:[0-9]+]] = cir.cmp lt %[[FPB1]], %[[FPB2]] : !u64i
+// CIR: cir.select if %[[FPBC]] then %[[FPB1]] else %[[FPB2]]
+// CIR: cir.libc.memcmp
+// CIR-NOT: cir.std.mismatch_bounded_pred
+
+// Unequal bounds, so the run pins which length wins the select.
+// CIR-LABEL: cir.func dso_local @_Z19bounded_int_unequalPiS_
+// CIR: cir.const #cir.int<3> : !s32i
+// CIR: cir.const #cir.int<5> : !s32i
+// CIR: %[[BI1:[0-9]+]] = cir.ptr_diff %{{.*}}, %{{.*}} : !cir.ptr<!s32i> -> !u64i
+// CIR: %[[BI2:[0-9]+]] = cir.ptr_diff %{{.*}}, %{{.*}} : !cir.ptr<!s32i> -> !u64i
+// CIR: %[[BIC:[0-9]+]] = cir.cmp lt %[[BI1]], %[[BI2]] : !u64i
+// CIR: cir.select if %[[BIC]] then %[[BI1]] else %[[BI2]]
+// CIR: %[[BISIZE:[0-9]+]] = cir.const #cir.int<4> : !u64i
+// CIR: cir.mul %{{.*}}, %[[BISIZE]] : !u64i
+// CIR: cir.libc.memcmp
+// CIR: cir.insert_member %{{.*}}[1], %{{.*}} : !rec_std3A3Apair3Cint_2A2C_int_2A3E, !cir.ptr<!s32i>
+// CIR-NOT: cir.std.mismatch_bounded
+
+// CIR-LABEL: cir.func dso_local @_Z24bounded_int_unequal_predPiS_
+// CIR: cir.const #cir.int<5> : !s32i
+// CIR: cir.const #cir.int<3> : !s32i
+// CIR: %[[BPI1:[0-9]+]] = cir.ptr_diff %{{.*}}, %{{.*}} : !cir.ptr<!s32i> -> !u64i
+// CIR: %[[BPI2:[0-9]+]] = cir.ptr_diff %{{.*}}, %{{.*}} : !cir.ptr<!s32i> -> !u64i
+// CIR: %[[BPIC:[0-9]+]] = cir.cmp lt %[[BPI1]], %[[BPI2]] : !u64i
+// CIR: cir.select if %[[BPIC]] then %[[BPI1]] else %[[BPI2]]
+// CIR: %[[BPISIZE:[0-9]+]] = cir.const #cir.int<4> : !u64i
+// CIR: cir.mul %{{.*}}, %[[BPISIZE]] : !u64i
+// CIR: cir.libc.memcmp
+// CIR-NOT: cir.std.mismatch_bounded_pred
 
 // LLVM: declare i32 @memcmp(ptr noundef, ptr noundef, i64 noundef)
 // LLVM-LABEL: define dso_local {{.*}}ptr @_Z13byte_mismatchPhS_S_
 // LLVM: call i32 @memcmp(ptr noundef %{{[0-9]+}}, ptr noundef %{{[0-9]+}}, i64 noundef %{{[0-9]+}})
 // LLVM-LABEL: define dso_local {{.*}}ptr @_Z18byte_mismatch_predPhS_S_
+// LLVM: call i32 @memcmp(ptr noundef %{{[0-9]+}}, ptr noundef %{{[0-9]+}}, i64 noundef %{{[0-9]+}})
+// LLVM-LABEL: define dso_local {{.*}}ptr @_Z12int_mismatchPiS_S_
+// LLVM: call i32 @memcmp(ptr noundef %{{[0-9]+}}, ptr noundef %{{[0-9]+}}, i64 noundef %{{[0-9]+}})
+// LLVM-LABEL: define dso_local {{.*}}ptr @_Z17int_mismatch_predPiS_S_
+// LLVM: call i32 @memcmp(ptr noundef %{{[0-9]+}}, ptr noundef %{{[0-9]+}}, i64 noundef %{{[0-9]+}})
+// LLVM-LABEL: define dso_local {{.*}}i1 @_Z13four_iteratorSt11__wrap_iterIcES0_S0_S0_
+// LLVM: call i32 @memcmp(ptr noundef %{{[0-9]+}}, ptr noundef %{{[0-9]+}}, i64 noundef %{{[0-9]+}})
+// LLVM-LABEL: define dso_local {{.*}}i1 @_Z18four_iterator_predSt11__wrap_iterIcES0_S0_S0_
+// LLVM: call i32 @memcmp(ptr noundef %{{[0-9]+}}, ptr noundef %{{[0-9]+}}, i64 noundef %{{[0-9]+}})
+// LLVM-LABEL: define dso_local { ptr, ptr } @_Z19bounded_int_unequalPiS_
+// LLVM: call i32 @memcmp(ptr noundef %{{[0-9]+}}, ptr noundef %{{[0-9]+}}, i64 noundef %{{[0-9]+}})
+// LLVM-LABEL: define dso_local { ptr, ptr } @_Z24bounded_int_unequal_predPiS_
 // LLVM: call i32 @memcmp(ptr noundef %{{[0-9]+}}, ptr noundef %{{[0-9]+}}, i64 noundef %{{[0-9]+}})
 
 // NOXFORM-LABEL: cir.func dso_local @_Z13byte_mismatchPhS_S_
@@ -97,6 +158,12 @@ int *int_mismatch(int *first1, int *last1, int *first2) {
   return std::mismatch(first1, last1, first2).first;
 }
 
+int *int_mismatch_pred(int *first1, int *last1, int *first2) {
+  return std::mismatch(first1, last1, first2,
+                       [](int lhs, int rhs) { return lhs == rhs; })
+      .first;
+}
+
 namespace std {
 template <class Iter1, class Iter2>
 pair<Iter1, Iter2> mismatch(Iter1 first1, Iter1 last1, Iter2 first2,
@@ -106,12 +173,38 @@ pair<Iter1, Iter2> mismatch(Iter1 first1, Iter1 last1, Iter2 first2,
       break;
   return {first1, first2};
 }
+template <class Iter1, class Iter2, class Pred>
+pair<Iter1, Iter2> mismatch(Iter1 first1, Iter1 last1, Iter2 first2,
+                            Iter2 last2, Pred pred) {
+  for (; first1 != last1 && first2 != last2; ++first1, ++first2)
+    if (!pred(*first1, *first2))
+      break;
+  return {first1, first2};
+}
 }
 
 bool four_iterator(std::__wrap_iter<char> f1, std::__wrap_iter<char> l1,
                    std::__wrap_iter<char> f2, std::__wrap_iter<char> l2) {
   auto r = std::mismatch(f1, l1, f2, l2);
   return r.first == l1;
+}
+
+bool four_iterator_pred(std::__wrap_iter<char> f1,
+                        std::__wrap_iter<char> l1,
+                        std::__wrap_iter<char> f2,
+                        std::__wrap_iter<char> l2) {
+  auto r = std::mismatch(f1, l1, f2, l2,
+                         [](char lhs, char rhs) { return lhs == rhs; });
+  return r.second == l2;
+}
+
+std::pair<int *, int *> bounded_int_unequal(int *first1, int *first2) {
+  return std::mismatch(first1, first1 + 3, first2, first2 + 5);
+}
+
+std::pair<int *, int *> bounded_int_unequal_pred(int *first1, int *first2) {
+  return std::mismatch(first1, first1 + 5, first2, first2 + 3,
+                       [](int lhs, int rhs) { return lhs == rhs; });
 }
 
 extern unsigned char storage_a[4];
