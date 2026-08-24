@@ -677,6 +677,18 @@ module attributes {cir.triple = "x86_64-unknown-linux-gnu",
 // CHECK: cir.std.ranges.find_range
 // CHECK-NOT: cir.libc.memchr
 
+  cir.func private @wide_elem_range_find(!cir.ptr<!cpo>, !cir.ptr<!vec_wide>, !cir.ptr<!cir.int<s, 32>>, !identity) -> !cir.ptr<!cir.int<s, 32>>
+
+  cir.func @keeps_wide_element_range_find(%this: !cir.ptr<!cpo>, %range: !cir.ptr<!vec_wide>, %value: !cir.ptr<!cir.int<s, 32>>, %proj: !identity) -> !cir.ptr<!cir.int<s, 32>> {
+    %0 = cir.std.ranges.find_range(%this : !cir.ptr<!cpo>, %range : !cir.ptr<!vec_wide>, %value : !cir.ptr<!cir.int<s, 32>>, %proj : !identity, @wide_elem_range_find) -> !cir.ptr<!cir.int<s, 32>> {cir.wide_char_params}
+    cir.return %0 : !cir.ptr<!cir.int<s, 32>>
+  }
+// The whole range form declines wide elements outright, since its
+// container identity proof remains byte scoped.
+// CHECK-LABEL: @keeps_wide_element_range_find
+// CHECK: cir.std.ranges.find_range
+// CHECK-NOT: cir.libc.wmemchr
+
   cir.func private @gnu_range_find(!cir.ptr<!cpo>, !cir.ptr<!gvec>, !cir.ptr<!s8i>, !identity) -> !cir.ptr<!s8i>
   cir.func private @union_range_find(!cir.ptr<!cpo>, !cir.ptr<!uvec>, !cir.ptr<!s8i>, !identity) -> !cir.ptr<!s8i>
   cir.func private @plain_range_find(!cir.ptr<!cpo>, !cir.ptr<!plainvec>, !cir.ptr<!s8i>, !identity) -> !cir.ptr<!s8i>
@@ -727,10 +739,172 @@ module attributes {cir.triple = "x86_64-unknown-linux-gnu",
     %0 = cir.std.find_if(%first : !cir.ptr<!s32i>, %last : !cir.ptr<!s32i>, %pred : !wide_closure, @_ZSt7find_ifIPw1AET_S1_S1_T0_) -> !cir.ptr<!s32i> {cir.byte_eq_pred, cir.wide_char_params}
     cir.return %0 : !cir.ptr<!s32i>
   }
-// The wide license covers plain find only, so a predicate form that claims
-// it stays a call.
+// A wide element predicate needs the wide predicate marker, so the byte
+// marker over a wide element stays a call.
 // CHECK-LABEL: @keeps_wide_marked_find_if
 // CHECK: cir.std.find_if
 // CHECK-NOT: cir.libc.wmemchr
 // CHECK-NOT: cir.libc.memchr
+}
+
+
+// -----
+
+!s32i = !cir.int<s, 32>
+!wcap_closure = !cir.struct<class "WideCapClosure" {data !cir.int<s, 32>}>
+!wref_closure = !cir.struct<class "WideRefClosure" {data !cir.ptr<!cir.int<s, 32>>}>
+!wempty_closure = !cir.struct<class "WideEmptyClosure" {}>
+
+module attributes {cir.triple = "x86_64-unknown-linux-gnu",
+                   cir.int_type_width = 32 : i32,
+                   cir.size_type_width = 64 : i32,
+                   cir.wchar_type_width = 32 : i32} {
+  cir.func private @wide_find_if(!cir.ptr<!s32i>, !cir.ptr<!s32i>, !wcap_closure) -> !cir.ptr<!s32i> func_info<#cir.func_identity<"std::find_if">>
+  cir.func private @wide_find_if_not(!cir.ptr<!s32i>, !cir.ptr<!s32i>, !wref_closure) -> !cir.ptr<!s32i> func_info<#cir.func_identity<"std::find_if_not">>
+  cir.func private @wide_find_if_empty(!cir.ptr<!s32i>, !cir.ptr<!s32i>, !wempty_closure) -> !cir.ptr<!s32i> func_info<#cir.func_identity<"std::find_if">>
+
+  cir.func @transforms_wide_find_if(%first: !cir.ptr<!s32i>, %last: !cir.ptr<!s32i>, %pred: !wcap_closure) -> !cir.ptr<!s32i> {
+    %0 = cir.std.find_if(%first : !cir.ptr<!s32i>, %last : !cir.ptr<!s32i>, %pred : !wcap_closure, @wide_find_if) -> !cir.ptr<!s32i> {cir.wide_eq_pred}
+    cir.return %0 : !cir.ptr<!s32i>
+  }
+
+  cir.func @transforms_wide_find_if_not_byref(%first: !cir.ptr<!s32i>, %last: !cir.ptr<!s32i>, %pred: !wref_closure) -> !cir.ptr<!s32i> {
+    %0 = cir.std.find_if_not(%first : !cir.ptr<!s32i>, %last : !cir.ptr<!s32i>, %pred : !wref_closure, @wide_find_if_not) -> !cir.ptr<!s32i> {cir.wide_eq_pred}
+    cir.return %0 : !cir.ptr<!s32i>
+  }
+
+  cir.func @transforms_wide_find_if_value(%first: !cir.ptr<!s32i>, %last: !cir.ptr<!s32i>, %pred: !wempty_closure) -> !cir.ptr<!s32i> {
+    %0 = cir.std.find_if(%first : !cir.ptr<!s32i>, %last : !cir.ptr<!s32i>, %pred : !wempty_closure, @wide_find_if_empty) -> !cir.ptr<!s32i> {cir.wide_eq_pred_value = #cir.int<70000> : !s32i}
+    cir.return %0 : !cir.ptr<!s32i>
+  }
+
+  cir.func @keeps_wide_value_width_mismatch(%first: !cir.ptr<!s32i>, %last: !cir.ptr<!s32i>, %pred: !wempty_closure) -> !cir.ptr<!s32i> {
+    %0 = cir.std.find_if(%first : !cir.ptr<!s32i>, %last : !cir.ptr<!s32i>, %pred : !wempty_closure, @wide_find_if_empty) -> !cir.ptr<!s32i> {cir.wide_eq_pred_value = #cir.int<7> : !cir.int<s, 8>}
+    cir.return %0 : !cir.ptr<!s32i>
+  }
+// CHECK-LABEL: @transforms_wide_find_if
+// CHECK: %[[PSOUGHT:.*]] = cir.extract_member %{{.*}}[0] : !rec_WideCapClosure -> !s32i
+// CHECK: %[[PLEN:.*]] = cir.ptr_diff %{{.*}}, %{{.*}} : !cir.ptr<!s32i> -> !u64i
+// CHECK: cir.libc.wmemchr(%{{.*}}, %[[PSOUGHT]], %[[PLEN]]) : !cir.ptr<!s32i>, !s32i, !u64i
+// CHECK-NOT: cir.std.find_if
+
+// CHECK-LABEL: @transforms_wide_find_if_not_byref
+// CHECK: %[[RADDR:.*]] = cir.extract_member %{{.*}}[0] : !rec_WideRefClosure -> !cir.ptr<!s32i>
+// CHECK: %[[RSOUGHT:.*]] = cir.load %[[RADDR]] : !cir.ptr<!s32i>, !s32i
+// CHECK: cir.libc.wmemchr(%{{.*}}, %[[RSOUGHT]], %{{.*}}) : !cir.ptr<!s32i>, !s32i, !u64i
+// CHECK-NOT: cir.std.find_if_not
+
+// CHECK-LABEL: @transforms_wide_find_if_value
+// CHECK: %[[VSOUGHT:.*]] = cir.const #cir.int<70000> : !s32i
+// CHECK: cir.libc.wmemchr(%{{.*}}, %[[VSOUGHT]], %{{.*}}) : !cir.ptr<!s32i>, !s32i, !u64i
+
+// The recorded constant's type has to be the element type.
+// CHECK-LABEL: @keeps_wide_value_width_mismatch
+// CHECK: cir.std.find_if
+// CHECK-NOT: cir.libc.wmemchr
+}
+
+// -----
+
+!s8i = !cir.int<s, 8>
+!bcap_closure = !cir.struct<class "ByteCapClosure" {data !cir.int<s, 8>}>
+
+module attributes {cir.triple = "x86_64-unknown-linux-gnu",
+                   cir.int_type_width = 32 : i32,
+                   cir.size_type_width = 64 : i32,
+                   cir.wchar_type_width = 32 : i32} {
+  cir.func private @byte_find_if(!cir.ptr<!s8i>, !cir.ptr<!s8i>, !bcap_closure) -> !cir.ptr<!s8i> func_info<#cir.func_identity<"std::find_if">>
+
+  cir.func @keeps_byte_claiming_wide_pred(%first: !cir.ptr<!s8i>, %last: !cir.ptr<!s8i>, %pred: !bcap_closure) -> !cir.ptr<!s8i> {
+    %0 = cir.std.find_if(%first : !cir.ptr<!s8i>, %last : !cir.ptr<!s8i>, %pred : !bcap_closure, @byte_find_if) -> !cir.ptr<!s8i> {cir.wide_eq_pred}
+    cir.return %0 : !cir.ptr<!s8i>
+  }
+// A byte element predicate needs the byte marker, so the wide marker over
+// a byte element stays a call.
+// CHECK-LABEL: @keeps_byte_claiming_wide_pred
+// CHECK: cir.std.find_if
+// CHECK-NOT: cir.libc.memchr
+// CHECK-NOT: cir.libc.wmemchr
+}
+
+// -----
+
+!s32i = !cir.int<s, 32>
+!u32i = !cir.int<u, 32>
+!u64i = !cir.int<u, 64>
+!wcap2_closure = !cir.struct<class "WideCapClosure2" {data !cir.int<s, 32>}>
+
+module attributes {cir.triple = "x86_64-unknown-linux-gnu",
+                   cir.int_type_width = 32 : i32,
+                   cir.size_type_width = 64 : i32,
+                   cir.wchar_type_width = 32 : i32} {
+  cir.func private @wmemchr(!cir.ptr<!u32i>, !u32i, !u64i) -> !cir.ptr<!u32i>
+  cir.func private @wide_find_if2(!cir.ptr<!s32i>, !cir.ptr<!s32i>, !wcap2_closure) -> !cir.ptr<!s32i> func_info<#cir.func_identity<"std::find_if">>
+
+  cir.func @transforms_under_flipped_wmemchr_symbol(%first: !cir.ptr<!s32i>, %last: !cir.ptr<!s32i>, %pred: !wcap2_closure) -> !cir.ptr<!s32i> {
+    %0 = cir.std.find_if(%first : !cir.ptr<!s32i>, %last : !cir.ptr<!s32i>, %pred : !wcap2_closure, @wide_find_if2) -> !cir.ptr<!s32i> {cir.wide_eq_pred}
+    cir.return %0 : !cir.ptr<!s32i>
+  }
+// The module already declares wmemchr at the other signedness of the same
+// width. Wide equality is bit equality, so the call adopts the declared
+// signedness and casts at the boundary.
+// CHECK-LABEL: @transforms_under_flipped_wmemchr_symbol
+// CHECK: %[[CSRC:.*]] = cir.cast bitcast %{{.*}} : !cir.ptr<!s32i> -> !cir.ptr<!u32i>
+// CHECK: %[[CPAT:.*]] = cir.cast integral %{{.*}} : !s32i -> !u32i
+// CHECK: %[[CRES:.*]] = cir.libc.wmemchr(%[[CSRC]], %[[CPAT]], %{{.*}}) : !cir.ptr<!u32i>, !u32i, !u64i
+// CHECK: cir.cast bitcast %[[CRES]] : !cir.ptr<!u32i> -> !cir.ptr<!s32i>
+// CHECK-NOT: cir.std.find_if
+}
+
+// -----
+
+!s32i = !cir.int<s, 32>
+!u32i = !cir.int<u, 32>
+!u64i = !cir.int<u, 64>
+!ucap_closure = !cir.struct<class "UnsignedCapClosure" {data !cir.int<u, 32>}>
+
+module attributes {cir.triple = "x86_64-unknown-linux-gnu",
+                   cir.int_type_width = 32 : i32,
+                   cir.size_type_width = 64 : i32,
+                   cir.wchar_type_width = 32 : i32} {
+  cir.func private @wmemchr(!cir.ptr<!s32i>, !s32i, !u64i) -> !cir.ptr<!s32i>
+  cir.func private @unsigned_find_if(!cir.ptr<!u32i>, !cir.ptr<!u32i>, !ucap_closure) -> !cir.ptr<!u32i> func_info<#cir.func_identity<"std::find_if">>
+
+  cir.func @transforms_unsigned_under_signed_wmemchr(%first: !cir.ptr<!u32i>, %last: !cir.ptr<!u32i>, %pred: !ucap_closure) -> !cir.ptr<!u32i> {
+    %0 = cir.std.find_if(%first : !cir.ptr<!u32i>, %last : !cir.ptr<!u32i>, %pred : !ucap_closure, @unsigned_find_if) -> !cir.ptr<!u32i> {cir.wide_eq_pred}
+    cir.return %0 : !cir.ptr<!u32i>
+  }
+// The direction a real standard library produces, its own plain find
+// dispatch declares wmemchr at the target signedness before this rewrite
+// runs over the other one.
+// CHECK-LABEL: @transforms_unsigned_under_signed_wmemchr
+// CHECK: %[[USRC:.*]] = cir.cast bitcast %{{.*}} : !cir.ptr<!u32i> -> !cir.ptr<!s32i>
+// CHECK: %[[UPAT:.*]] = cir.cast integral %{{.*}} : !u32i -> !s32i
+// CHECK: %[[URES:.*]] = cir.libc.wmemchr(%[[USRC]], %[[UPAT]], %{{.*}}) : !cir.ptr<!s32i>, !s32i, !u64i
+// CHECK: cir.cast bitcast %[[URES]] : !cir.ptr<!s32i> -> !cir.ptr<!u32i>
+// CHECK-NOT: cir.std.find_if
+}
+
+// -----
+
+!s32i = !cir.int<s, 32>
+!u64i = !cir.int<u, 64>
+!fcap_closure = !cir.struct<class "FloatConflictClosure" {data !cir.int<s, 32>}>
+
+module attributes {cir.triple = "x86_64-unknown-linux-gnu",
+                   cir.int_type_width = 32 : i32,
+                   cir.size_type_width = 64 : i32,
+                   cir.wchar_type_width = 32 : i32} {
+  cir.func private @wmemchr(!cir.ptr<!s32i>, !s32i, !s32i) -> !cir.ptr<!s32i>
+  cir.func private @float_conflict_find_if(!cir.ptr<!s32i>, !cir.ptr<!s32i>, !fcap_closure) -> !cir.ptr<!s32i> func_info<#cir.func_identity<"std::find_if">>
+
+  cir.func @keeps_foreign_wmemchr_symbol(%first: !cir.ptr<!s32i>, %last: !cir.ptr<!s32i>, %pred: !fcap_closure) -> !cir.ptr<!s32i> {
+    %0 = cir.std.find_if(%first : !cir.ptr<!s32i>, %last : !cir.ptr<!s32i>, %pred : !fcap_closure, @float_conflict_find_if) -> !cir.ptr<!s32i> {cir.wide_eq_pred}
+    cir.return %0 : !cir.ptr<!s32i>
+  }
+// A declaration that matches neither signedness of the expected prototype
+// still declines.
+// CHECK-LABEL: @keeps_foreign_wmemchr_symbol
+// CHECK: cir.std.find_if
+// CHECK-NOT: cir.libc.wmemchr
 }
