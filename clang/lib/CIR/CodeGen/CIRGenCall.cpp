@@ -392,12 +392,20 @@ void CIRGenModule::constructAttributeList(
         } else if ((kind == cir::KnownFuncKind::StdFind &&
                     hasWideCharParams(func)) ||
                    (kind == cir::KnownFuncKind::StdRangesFind &&
-                    hasWideCharRangesFindParams(func))) {
+                    hasWideCharRangesFindParams(func)) ||
+                   (kind == cir::KnownFuncKind::StdMismatch &&
+                    hasWideCharMismatchParams(func))) {
+          // memcmp equality needs only a padding free element, so the
+          // wchar_t width restriction is stronger than mismatch requires.
+          // Reusing the one reviewed wide classifier keeps a single trust
+          // surface, and other widths stay future work.
           addUnitAttr(cir::CIRDialect::getWideCharParamsAttrName());
-        } else if (kind == cir::KnownFuncKind::StdFindIf ||
-                   kind == cir::KnownFuncKind::StdFindIfNot ||
-                   kind == cir::KnownFuncKind::StdRangesFindIf ||
-                   kind == cir::KnownFuncKind::StdRangesFindIfNot) {
+        }
+
+        if (kind == cir::KnownFuncKind::StdFindIf ||
+            kind == cir::KnownFuncKind::StdFindIfNot ||
+            kind == cir::KnownFuncKind::StdRangesFindIf ||
+            kind == cir::KnownFuncKind::StdRangesFindIfNot) {
           if (hasByteEqPredicate(func, *kind))
             addUnitAttr(cir::CIRDialect::getByteEqPredAttrName());
           else if (cir::IntAttr value = getByteEqPredicateValue(func, *kind))

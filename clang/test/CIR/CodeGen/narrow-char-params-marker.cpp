@@ -30,6 +30,36 @@ template <class T1, class T2> struct pair {
   T1 first;
   T2 second;
 };
+struct __equal_to {
+  template <class T1, class T2>
+  bool operator()(const T1 &lhs, const T2 &rhs) const {
+    return lhs == rhs;
+  }
+};
+template <class T> struct equal_to {
+  bool operator()(const T &lhs, const T &rhs) const { return lhs == rhs; }
+};
+struct __stateful_equal_to {
+  int state;
+  bool operator()(int lhs, int rhs) const { return lhs == rhs; }
+};
+struct __stateful_base {
+  int state;
+};
+struct __base_equal_to : __stateful_base {
+  bool operator()(int lhs, int rhs) const { return lhs == rhs; }
+};
+struct __unavailable_equal_to {
+  bool operator()(int lhs, int rhs) const;
+};
+struct __not_equal {
+  bool operator()(int lhs, int rhs) const { return lhs != rhs; }
+};
+struct __converted_equal_to {
+  bool operator()(int lhs, int rhs) const {
+    return static_cast<unsigned>(lhs) == static_cast<unsigned>(rhs);
+  }
+};
 template <class Iter1, class Iter2>
 pair<Iter1, Iter2> mismatch(Iter1 first1, Iter1 last1, Iter2 first2);
 template <class Iter1, class Iter2, class Pred>
@@ -56,7 +86,6 @@ pair<Iter1, Iter2> mismatch(Iter1 first1, Iter1 last1, Iter2 first2,
       break;
   return {first1, first2};
 }
-
 }
 }
 
@@ -895,9 +924,234 @@ bool equal_pred_int(int *first1, int *last1, int *first2) {
   return std::equal(first1, last1, first2,
                     [](int a, int b) { return a == b; });
 }
+// The lambda proof covers wide elements too.
 // CHECK-LABEL: cir.func{{.*}} @_Z14equal_pred_int
-// CHECK: cir.call @_ZNSt3__15equalIPiS1_Z14equal_pred_intS1_S1_S1_E3$_0EEbT_S3_T0_T1_
+// CHECK: cir.call @_ZNSt3__15equalIPiS1_Z14equal_pred_intS1_S1_S1_E3$_0EEbT_S3_T0_T1_({{.*}}) {cir.elem_eq_binary_pred}
+
+struct UserEqual {
+  bool operator()(int lhs, int rhs) const { return lhs == rhs; }
+};
+
+namespace wrong {
+struct equal_to {
+  bool operator()(int lhs, int rhs) const { return lhs == rhs; }
+};
+}
+
+bool mismatch_byte_functor(char *first1, char *last1, char *first2) {
+  return std::mismatch(first1, last1, first2, std::__equal_to{}).first ==
+         last1;
+}
+// CHECK-LABEL: cir.func{{.*}} @_Z21mismatch_byte_functor
+// CHECK: cir.call @_ZNSt3__18mismatchIPcS1_NS_10__equal_toEEE{{.*}} {cir.elem_eq_binary_pred}
+
+bool mismatch_wchar_default(wchar_t *first1, wchar_t *last1,
+                            wchar_t *first2) {
+  return std::mismatch(first1, last1, first2).first == last1;
+}
+// CHECK-LABEL: cir.func{{.*}} @_Z22mismatch_wchar_default
+// CHECK: cir.call @_ZNSt3__18mismatchIPwS1_EE{{.*}} {cir.wide_char_params}
+
+bool mismatch_wchar_pred(wchar_t *first1, wchar_t *last1, wchar_t *first2) {
+  return std::mismatch(first1, last1, first2, std::__equal_to{}).first ==
+         last1;
+}
+// CHECK-LABEL: cir.func{{.*}} @_Z19mismatch_wchar_pred
+// CHECK: cir.call @_ZNSt3__18mismatchIPwS1_NS_10__equal_toEEE{{.*}} {cir.elem_eq_binary_pred, cir.wide_char_params}
+
+bool mismatch_wchar_bounded(wchar_t *first1, wchar_t *last1, wchar_t *first2,
+                            wchar_t *last2) {
+  return std::mismatch(first1, last1, first2, last2).first == last1;
+}
+// CHECK-LABEL: cir.func{{.*}} @_Z22mismatch_wchar_bounded
+// CHECK: cir.call @_ZNSt3__18mismatchIPwS1_EE{{.*}} {cir.wide_char_params}
+
+bool mismatch_wchar_bounded_pred(wchar_t *first1, wchar_t *last1,
+                                 wchar_t *first2, wchar_t *last2) {
+  return std::mismatch(first1, last1, first2, last2, std::__equal_to{})
+             .first == last1;
+}
+// CHECK-LABEL: cir.func{{.*}} @_Z27mismatch_wchar_bounded_pred
+// CHECK: cir.call @_ZNSt3__18mismatchIPwS1_NS_10__equal_toEEE{{.*}} {cir.elem_eq_binary_pred, cir.wide_char_params}
+
+bool mismatch_int_default(int *first1, int *last1, int *first2) {
+  return std::mismatch(first1, last1, first2).first == last1;
+}
+// CHECK-LABEL: cir.func{{.*}} @_Z20mismatch_int_default
+// CHECK: cir.call @_ZNSt3__18mismatchIPiS1_EE{{.*}} {cir.wide_char_params}
+
+bool mismatch_int_functor(int *first1, int *last1, int *first2) {
+  return std::mismatch(first1, last1, first2, std::__equal_to{}).first ==
+         last1;
+}
+// CHECK-LABEL: cir.func{{.*}} @_Z20mismatch_int_functor
+// CHECK: cir.call @_ZNSt3__18mismatchIPiS1_NS_10__equal_toEEE{{.*}} {cir.elem_eq_binary_pred, cir.wide_char_params}
+
+bool mismatch_int_bounded(int *first1, int *last1, int *first2, int *last2) {
+  return std::mismatch(first1, last1, first2, last2).first == last1;
+}
+// CHECK-LABEL: cir.func{{.*}} @_Z20mismatch_int_bounded
+// CHECK: cir.call @_ZNSt3__18mismatchIPiS1_EE{{.*}} {cir.wide_char_params}
+
+bool mismatch_int_bounded_functor(int *first1, int *last1, int *first2,
+                                  int *last2) {
+  return std::mismatch(first1, last1, first2, last2, std::__equal_to{})
+             .first == last1;
+}
+// CHECK-LABEL: cir.func{{.*}} @_Z28mismatch_int_bounded_functor
+// CHECK: cir.call @_ZNSt3__18mismatchIPiS1_NS_10__equal_toEEE{{.*}} {cir.elem_eq_binary_pred, cir.wide_char_params}
+
+bool mismatch_uint_default(unsigned *first1, unsigned *last1,
+                           unsigned *first2) {
+  return std::mismatch(first1, last1, first2).first == last1;
+}
+// CHECK-LABEL: cir.func{{.*}} @_Z21mismatch_uint_default
+// CHECK: cir.call @_ZNSt3__18mismatchIPjS1_EE{{.*}} {cir.wide_char_params}
+
+bool mismatch_uint_pred(unsigned *first1, unsigned *last1, unsigned *first2) {
+  return std::mismatch(first1, last1, first2, std::__equal_to{}).first ==
+         last1;
+}
+// CHECK-LABEL: cir.func{{.*}} @_Z18mismatch_uint_pred
+// CHECK: cir.call @_ZNSt3__18mismatchIPjS1_NS_10__equal_toEEE{{.*}} {cir.elem_eq_binary_pred, cir.wide_char_params}
+
+bool mismatch_uint_bounded(unsigned *first1, unsigned *last1,
+                           unsigned *first2, unsigned *last2) {
+  return std::mismatch(first1, last1, first2, last2).first == last1;
+}
+// CHECK-LABEL: cir.func{{.*}} @_Z21mismatch_uint_bounded
+// CHECK: cir.call @_ZNSt3__18mismatchIPjS1_EE{{.*}} {cir.wide_char_params}
+
+bool mismatch_uint_bounded_pred(unsigned *first1, unsigned *last1,
+                                unsigned *first2, unsigned *last2) {
+  return std::mismatch(first1, last1, first2, last2, std::__equal_to{})
+             .first == last1;
+}
+// CHECK-LABEL: cir.func{{.*}} @_Z26mismatch_uint_bounded_pred
+// CHECK: cir.call @_ZNSt3__18mismatchIPjS1_NS_10__equal_toEEE{{.*}} {cir.elem_eq_binary_pred, cir.wide_char_params}
+
+bool mismatch_std_equal_to(int *first1, int *last1, int *first2) {
+  return std::mismatch(first1, last1, first2, std::equal_to<int>{}).first ==
+         last1;
+}
+// Only the reserved __equal_to name is licensed, since its body is a
+// pending instantiation here and cannot be proven.
+// CHECK-LABEL: cir.func{{.*}} @_Z21mismatch_std_equal_to
+// CHECK: cir.call @_ZNSt3__18mismatchIPiS1_NS_8equal_toIiEEE{{.*}} {cir.wide_char_params}
 // CHECK-NOT: cir.elem_eq_binary_pred
+
+bool mismatch_stateful_functor(int *first1, int *last1, int *first2) {
+  return std::mismatch(first1, last1, first2,
+                       std::__stateful_equal_to{0})
+             .first == last1;
+}
+// A field carries state the equality meaning cannot account for.
+// CHECK-LABEL: cir.func{{.*}} @_Z25mismatch_stateful_functor
+// CHECK: cir.call @_ZNSt3__18mismatchIPiS1_NS_19__stateful_equal_toEE{{.*}} {cir.wide_char_params}
+// CHECK-NOT: cir.elem_eq_binary_pred
+
+bool mismatch_stateful_base(int *first1, int *last1, int *first2) {
+  return std::mismatch(first1, last1, first2,
+                       std::__base_equal_to{{0}})
+             .first == last1;
+}
+// A base class carries the state instead.
+// CHECK-LABEL: cir.func{{.*}} @_Z22mismatch_stateful_base
+// CHECK: cir.call @_ZNSt3__18mismatchIPiS1_NS_15__base_equal_toEE{{.*}} {cir.wide_char_params}
+// CHECK-NOT: cir.elem_eq_binary_pred
+
+bool mismatch_unavailable_functor(int *first1, int *last1, int *first2) {
+  return std::mismatch(first1, last1, first2,
+                       std::__unavailable_equal_to{})
+             .first == last1;
+}
+// Not the reserved name, so no license applies.
+// CHECK-LABEL: cir.func{{.*}} @_Z28mismatch_unavailable_functor
+// CHECK: cir.call @_ZNSt3__18mismatchIPiS1_NS_22__unavailable_equal_toEE{{.*}} {cir.wide_char_params}
+// CHECK-NOT: cir.elem_eq_binary_pred
+
+bool mismatch_inequality_functor(int *first1, int *last1, int *first2) {
+  return std::mismatch(first1, last1, first2, std::__not_equal{}).first ==
+         last1;
+}
+// Not the reserved name either, its body never enters the decision.
+// CHECK-LABEL: cir.func{{.*}} @_Z27mismatch_inequality_functor
+// CHECK: cir.call @_ZNSt3__18mismatchIPiS1_NS_11__not_equalEE{{.*}} {cir.wide_char_params}
+// CHECK-NOT: cir.elem_eq_binary_pred
+
+bool mismatch_converted_functor(int *first1, int *last1, int *first2) {
+  return std::mismatch(first1, last1, first2,
+                       std::__converted_equal_to{})
+             .first == last1;
+}
+// CHECK-LABEL: cir.func{{.*}} @_Z26mismatch_converted_functor
+// CHECK: cir.call @_ZNSt3__18mismatchIPiS1_NS_20__converted_equal_toEE{{.*}} {cir.wide_char_params}
+// CHECK-NOT: cir.elem_eq_binary_pred
+
+bool mismatch_user_functor(int *first1, int *last1, int *first2) {
+  return std::mismatch(first1, last1, first2, UserEqual{}).first == last1;
+}
+// CHECK-LABEL: cir.func{{.*}} @_Z21mismatch_user_functor
+// CHECK: cir.call @_ZNSt3__18mismatchIPiS1_9UserEqualE{{.*}} {cir.wide_char_params}
+// CHECK-NOT: cir.elem_eq_binary_pred
+
+bool mismatch_wrong_namespace(int *first1, int *last1, int *first2) {
+  return std::mismatch(first1, last1, first2, wrong::equal_to{}).first ==
+         last1;
+}
+// CHECK-LABEL: cir.func{{.*}} @_Z24mismatch_wrong_namespace
+// CHECK: cir.call @_ZNSt3__18mismatchIPiS1_N5wrong8equal_toEEE{{.*}} {cir.wide_char_params}
+// CHECK-NOT: cir.elem_eq_binary_pred
+
+bool mismatch_bool(bool *first1, bool *last1, bool *first2) {
+  return std::mismatch(first1, last1, first2).first == last1;
+}
+// CHECK-LABEL: cir.func{{.*}} @_Z13mismatch_bool
+// CHECK: cir.call @_ZNSt3__18mismatchIPbS1_EE
+// CHECK-NOT: cir.wide_char_params
+
+// The classifier whitelists the plain int types, so every _BitInt
+// declines regardless of width.
+using PaddedBitInt = _BitInt(31);
+bool mismatch_padded_bitint(PaddedBitInt *first1, PaddedBitInt *last1,
+                            PaddedBitInt *first2) {
+  return std::mismatch(first1, last1, first2).first == last1;
+}
+// CHECK-LABEL: cir.func{{.*}} @_Z22mismatch_padded_bitint
+// CHECK: cir.call @_ZNSt3__18mismatchIPDB31_S2_EE
+// CHECK-NOT: cir.wide_char_params
+
+enum MismatchEnum : int { mismatch_zero };
+bool mismatch_enum(MismatchEnum *first1, MismatchEnum *last1,
+                   MismatchEnum *first2) {
+  return std::mismatch(first1, last1, first2).first == last1;
+}
+// CHECK-LABEL: cir.func{{.*}} @_Z13mismatch_enum
+// CHECK: cir.call @_ZNSt3__18mismatchIP12MismatchEnumS2_EE
+// CHECK-NOT: cir.wide_char_params
+
+bool mismatch_volatile(volatile int *first1, volatile int *last1,
+                       volatile int *first2) {
+  return std::mismatch(first1, last1, first2).first == last1;
+}
+// CHECK-LABEL: cir.func{{.*}} @_Z17mismatch_volatile
+// CHECK: cir.call @_ZNSt3__18mismatchIPViS2_EE
+// CHECK-NOT: cir.wide_char_params
+
+bool mismatch_short(short *first1, short *last1, short *first2) {
+  return std::mismatch(first1, last1, first2).first == last1;
+}
+// CHECK-LABEL: cir.func{{.*}} @_Z14mismatch_short
+// CHECK: cir.call @_ZNSt3__18mismatchIPsS1_EE
+// CHECK-NOT: cir.wide_char_params
+
+bool mismatch_long_long(long long *first1, long long *last1,
+                        long long *first2) {
+  return std::mismatch(first1, last1, first2).first == last1;
+}
+// CHECK-LABEL: cir.func{{.*}} @_Z18mismatch_long_long
+// CHECK: cir.call @_ZNSt3__18mismatchIPxS1_EE
+// CHECK-NOT: cir.wide_char_params
 
 bool mismatch_char(char *first1, char *last1, char *first2) {
   auto r = std::mismatch(first1, last1, first2);
@@ -919,9 +1173,9 @@ bool mismatch_pred_int(int *first1, int *last1, int *first2) {
                          [](int a, int b) { return a == b; });
   return r.first == last1;
 }
+// The generalized element proof marks the typed int lambda too.
 // CHECK-LABEL: cir.func{{.*}} @_Z17mismatch_pred_int
-// CHECK: cir.call @_ZNSt3__18mismatchIPiS1_Z17mismatch_pred_intS1_S1_S1_E3$_0EENS_4pairIT_T0_EES4_S4_S5_T1_
-// CHECK-NOT: cir.elem_eq_binary_pred
+// CHECK: cir.call @_ZNSt3__18mismatchIPiS1_Z17mismatch_pred_intS1_S1_S1_E3$_0EENS_4pairIT_T0_EES4_S4_S5_T1_({{.*}}) {cir.elem_eq_binary_pred, cir.wide_char_params}
 
 bool mismatch_bounded_char(char *first1, char *last1, char *first2,
                            char *last2) {
@@ -956,8 +1210,7 @@ bool mismatch_bounded_pred_int(int *first1, int *last1, int *first2,
   return r.first == last1;
 }
 // CHECK-LABEL: cir.func{{.*}} @_Z25mismatch_bounded_pred_int
-// CHECK: cir.call @_ZNSt3__18mismatchIPiS1_Z25mismatch_bounded_pred_intS1_S1_S1_S1_E3$_0EENS_4pairIT_T0_EES4_S4_S5_S5_T1_
-// CHECK-NOT: cir.elem_eq_binary_pred
+// CHECK: cir.call @_ZNSt3__18mismatchIPiS1_Z25mismatch_bounded_pred_intS1_S1_S1_S1_E3$_0EENS_4pairIT_T0_EES4_S4_S5_S5_T1_({{.*}}) {cir.elem_eq_binary_pred, cir.wide_char_params}
 
 bool ranges_byte_wrong_not(char *first, char *last, char value) {
   auto it = std::ranges::find_if_not(
@@ -1099,4 +1352,34 @@ bool equal_bounded_pred(char *first1, char *last1, char *first2,
 // the five parameter overload, so it stays unmarked.
 // CHECK-LABEL: cir.func{{.*}} @_Z18equal_bounded_pred
 // CHECK: cir.call @_ZNSt3__15equalIPcS1_Z18equal_bounded_predS1_S1_S1_S1_E3$_0EEbT_S3_T0_S4_T1_
+// CHECK-NOT: cir.elem_eq_binary_pred
+
+bool mismatch_int_lambda_pred(int *first1, int *last1, int *first2) {
+  auto r = std::mismatch(first1, last1, first2,
+                         [](int x, int y) { return x == y; });
+  return r.first == last1;
+}
+// The typed int lambda takes the same generalized element proof the
+// functor path uses.
+// CHECK-LABEL: cir.func{{.*}} @_Z24mismatch_int_lambda_predPiS_S_
+// CHECK: cir.call @_ZNSt3__18mismatchIPiS1_Z24mismatch_int_lambda_predS1_S1_S1_E3$_0{{.*}} {cir.elem_eq_binary_pred, cir.wide_char_params}
+
+bool mismatch_int_lambda_bounded_pred(int *first1, int *last1, int *first2,
+                                      int *last2) {
+  auto r = std::mismatch(first1, last1, first2, last2,
+                         [](int x, int y) { return x == y; });
+  return r.first == last1;
+}
+// CHECK-LABEL: cir.func{{.*}} @_Z32mismatch_int_lambda_bounded_predPiS_S_S_
+// CHECK: cir.call @_ZNSt3__18mismatchIPiS1_Z32mismatch_int_lambda_bounded_predS1_S1_S1_S1_E3$_0{{.*}} {cir.elem_eq_binary_pred, cir.wide_char_params}
+
+bool mismatch_int_lambda_wrong_polarity(int *first1, int *last1,
+                                        int *first2) {
+  auto r = std::mismatch(first1, last1, first2,
+                         [](int x, int y) { return x != y; });
+  return r.first == last1;
+}
+// The inequality body proves nothing for memcmp equality.
+// CHECK-LABEL: cir.func{{.*}} @_Z34mismatch_int_lambda_wrong_polarityPiS_S_
+// CHECK: cir.call @_ZNSt3__18mismatchIPiS1_Z34mismatch_int_lambda_wrong_polarity
 // CHECK-NOT: cir.elem_eq_binary_pred

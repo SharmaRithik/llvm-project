@@ -36,6 +36,12 @@ template <class T1, class T2> struct pair {
   T1 first;
   T2 second;
 };
+struct __equal_to {
+  template <class T1, class T2>
+  bool operator()(const T1 &lhs, const T2 &rhs) const {
+    return lhs == rhs;
+  }
+};
 template <class Iter1, class Iter2>
 __attribute__((pure)) pair<Iter1, Iter2> mismatch(Iter1, Iter1,
                                                   Iter2) noexcept;
@@ -203,6 +209,27 @@ bool test_mismatch(char *first1, char *last1, char *first2) {
 // FINAL-LABEL: @_Z13test_mismatchPcS_S_
 // FINAL: cir.call @_ZSt8mismatchIPcS0_ESt4pairIT_T0_ES2_S2_S3_(%{{.*}}, %{{.*}}, %{{.*}})
 
+bool test_mismatch_int(int *first1, int *last1, int *first2) {
+  auto r = std::mismatch(first1, last1, first2);
+  return r.first == last1;
+}
+// RAISED-LABEL: @_Z17test_mismatch_intPiS_S_
+// RAISED: cir.std.mismatch(%{{.*}} : !cir.ptr<!s32i>, %{{.*}} : !cir.ptr<!s32i>, %{{.*}} : !cir.ptr<!s32i>, @_ZSt8mismatchIPiS0_ESt4pairIT_T0_ES2_S2_S3_) -> !rec_std3A3Apair3Cint_2A2C_int_2A3E
+// RAISED-SAME: cir.wide_char_params
+// FINAL-LABEL: @_Z17test_mismatch_intPiS_S_
+// FINAL: cir.call @_ZSt8mismatchIPiS0_ESt4pairIT_T0_ES2_S2_S3_(%{{.*}}, %{{.*}}, %{{.*}}) nothrow {cir.wide_char_params}
+
+bool test_mismatch_int_functor(int *first1, int *last1, int *first2) {
+  auto r = std::mismatch(first1, last1, first2, std::__equal_to{});
+  return r.first == last1;
+}
+// RAISED-LABEL: @_Z25test_mismatch_int_functorPiS_S_
+// RAISED: cir.std.mismatch_pred(%{{.*}} : !cir.ptr<!s32i>, %{{.*}} : !cir.ptr<!s32i>, %{{.*}} : !cir.ptr<!s32i>, %{{.*}} : !rec_std3A3A__equal_to, @_ZSt8mismatchIPiS0_St10__equal_toESt4pairIT_T0_ES3_S3_S4_T1_) -> !rec_std3A3Apair3Cint_2A2C_int_2A3E
+// RAISED-SAME: cir.elem_eq_binary_pred
+// RAISED-SAME: cir.wide_char_params
+// FINAL-LABEL: @_Z25test_mismatch_int_functorPiS_S_
+// FINAL: cir.call @_ZSt8mismatchIPiS0_St10__equal_toESt4pairIT_T0_ES3_S3_S4_T1_(%{{.*}}, %{{.*}}, %{{.*}}) nothrow {cir.elem_eq_binary_pred, cir.wide_char_params}
+
 bool test_mismatch_predicate(char *first1, char *last1, char *first2,
                              EqualPredicate pred) {
   auto r = std::mismatch(first1, last1, first2, pred);
@@ -235,9 +262,23 @@ bool test_mismatch_bounded_int(int *first1, int *last1, int *first2,
 }
 // RAISED-LABEL: @_Z25test_mismatch_bounded_intPiS_S_S_
 // RAISED: cir.std.mismatch_bounded(%{{.*}} : !cir.ptr<!s32i>, %{{.*}} : !cir.ptr<!s32i>, %{{.*}} : !cir.ptr<!s32i>, %{{.*}} : !cir.ptr<!s32i>, @_ZSt8mismatchIPiS0_ESt4pairIT_T0_ES2_S2_S3_S3_) -> !rec_std3A3Apair3Cint_2A2C_int_2A3E
-// RAISED-NOT: cir.narrow_char_params
+// RAISED-SAME: cir.wide_char_params
 // FINAL-LABEL: @_Z25test_mismatch_bounded_intPiS_S_S_
 // FINAL: cir.call @_ZSt8mismatchIPiS0_ESt4pairIT_T0_ES2_S2_S3_S3_(%{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}) nothrow
+// FINAL-SAME: cir.wide_char_params
+
+bool test_mismatch_bounded_int_functor(int *first1, int *last1, int *first2,
+                                       int *last2) {
+  auto r =
+      std::mismatch(first1, last1, first2, last2, std::__equal_to{});
+  return r.first == last1;
+}
+// RAISED-LABEL: @_Z33test_mismatch_bounded_int_functorPiS_S_S_
+// RAISED: cir.std.mismatch_bounded_pred(%{{.*}} : !cir.ptr<!s32i>, %{{.*}} : !cir.ptr<!s32i>, %{{.*}} : !cir.ptr<!s32i>, %{{.*}} : !cir.ptr<!s32i>, %{{.*}} : !rec_std3A3A__equal_to, @_ZSt8mismatchIPiS0_St10__equal_toESt4pairIT_T0_ES3_S3_S4_S4_T1_) -> !rec_std3A3Apair3Cint_2A2C_int_2A3E
+// RAISED-SAME: cir.elem_eq_binary_pred
+// RAISED-SAME: cir.wide_char_params
+// FINAL-LABEL: @_Z33test_mismatch_bounded_int_functorPiS_S_S_
+// FINAL: cir.call @_ZSt8mismatchIPiS0_St10__equal_toESt4pairIT_T0_ES3_S3_S4_S4_T1_(%{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}) nothrow {cir.elem_eq_binary_pred, cir.wide_char_params}
 
 bool test_mismatch_bounded_predicate(char *first1, char *last1, char *first2,
                                      char *last2, EqualPredicate pred) {
@@ -257,9 +298,11 @@ bool test_mismatch_bounded_predicate_int(int *first1, int *last1, int *first2,
 }
 // RAISED-LABEL: @_Z35test_mismatch_bounded_predicate_intPiS_S_S_14EqualPredicate
 // RAISED: cir.std.mismatch_bounded_pred(%{{.*}} : !cir.ptr<!s32i>, %{{.*}} : !cir.ptr<!s32i>, %{{.*}} : !cir.ptr<!s32i>, %{{.*}} : !cir.ptr<!s32i>, %{{.*}} : !rec_EqualPredicate, @_ZSt8mismatchIPiS0_14EqualPredicateESt4pairIT_T0_ES3_S3_S4_S4_T1_) -> !rec_std3A3Apair3Cint_2A2C_int_2A3E
+// RAISED-SAME: cir.wide_char_params
 // RAISED-NOT: cir.elem_eq_binary_pred
 // FINAL-LABEL: @_Z35test_mismatch_bounded_predicate_intPiS_S_S_14EqualPredicate
 // FINAL: cir.call @_ZSt8mismatchIPiS0_14EqualPredicateESt4pairIT_T0_ES3_S3_S4_S4_T1_(%{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}) nothrow
+// FINAL-SAME: cir.wide_char_params
 
 bool test_mismatch_bounded_literal_pred(char *first1, char *last1,
                                         char *first2, char *last2) {
