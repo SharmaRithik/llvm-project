@@ -175,13 +175,12 @@ static void rewriteFindLikeToMemchr(OpT findOp,
   auto elemTy = mlir::dyn_cast<cir::IntType>(iterTy.getPointee());
   if (!elemTy)
     return;
-  // A wider element rewrites to wmemchr, which only the plain find form
-  // licenses since the predicate and ranges proofs are byte facts. The
-  // recorded wchar_t width check below rejects every width that is not
-  // the target's wide character.
-  constexpr bool plainFind = std::is_same_v<OpT, StdFindOp>;
+  // A wider element rewrites to wmemchr under the wide markers, except
+  // through the whole range form, whose container identity proof remains
+  // byte scoped. The recorded wchar_t width check below rejects every
+  // width that is not the target's wide character.
   const bool wide = elemTy.getWidth() != 8;
-  if (wide && !plainFind)
+  if (wide && rangeOp)
     return;
   const llvm::StringRef libcallName = wide ? "wmemchr" : "memchr";
   // The sought element arrives behind the pattern reference for find. A
@@ -191,7 +190,8 @@ static void rewriteFindLikeToMemchr(OpT findOp,
   cir::IntAttr predicateValue;
   if constexpr (predOp) {
     predicateValue = findOp->template getAttrOfType<cir::IntAttr>(
-        cir::CIRDialect::getByteEqPredValueAttrName());
+        wide ? cir::CIRDialect::getWideEqPredValueAttrName()
+             : cir::CIRDialect::getByteEqPredValueAttrName());
     if (predicateValue) {
       if (predicateValue.getType() != elemTy)
         return;
@@ -253,7 +253,8 @@ static void rewriteFindLikeToMemchr(OpT findOp,
   // compute anything.
   if constexpr (predOp) {
     if (!predicateValue && !findOp->template getAttrOfType<mlir::UnitAttr>(
-                               cir::CIRDialect::getByteEqPredAttrName()))
+                               wide ? cir::CIRDialect::getWideEqPredAttrName()
+                                    : cir::CIRDialect::getByteEqPredAttrName()))
       return;
   } else if (!findOp->template getAttrOfType<mlir::UnitAttr>(
                  wide ? cir::CIRDialect::getWideCharParamsAttrName()
@@ -276,7 +277,9 @@ static void rewriteFindLikeToMemchr(OpT findOp,
     return;
   // A program built with a nonstandard wchar_t width still links the C
   // library selected by the triple, and that library's wmemchr walks the
-  // default width.
+  // triple's default width. The recorded module attribute answers the
+  // program side question instead, so comparing both is deliberate rather
+  // than a substitute for recording the width.
   if (wide && *patternWidth != env->triple.getDefaultWCharSize() * 8)
     return;
   // Hand written IR can claim the wide character marker while using an
@@ -286,16 +289,39 @@ static void rewriteFindLikeToMemchr(OpT findOp,
 
   CIRBaseBuilderTy builder(*findOp.getContext());
 
+  // The element the call is typed at. For wide it starts as the searched
+  // element, but a module may already declare wmemchr at the same width
+  // with the other signedness, as a real standard library header does
+  // whenever a plain wide find instantiates its own dispatch. Equality of
+  // wide elements is bit equality, which is what licensed the rewrite, so
+  // the call adopts the declared signedness and casts at the boundary
+  // rather than decline.
+  cir::IntType callElemTy = elemTy;
+  cir::PointerType callIterTy = iterTy;
+  auto makeWideTy = [&](cir::IntType eTy, cir::PointerType pTy) {
+    return cir::FuncType::get(
+        {mlir::Type(pTy), mlir::Type(eTy), builder.getUIntNTy(*sizeWidth)},
+        pTy);
+  };
   cir::FuncType libcallTy =
-      wide ? cir::FuncType::get({mlir::Type(iterTy), mlir::Type(elemTy),
-                                 builder.getUIntNTy(*sizeWidth)},
-                                iterTy)
+      wide ? makeWideTy(callElemTy, callIterTy)
            : cir::FuncType::get({builder.getVoidPtrTy(),
                                  builder.getSIntNTy(*patternWidth),
                                  builder.getUIntNTy(*sizeWidth)},
                                 builder.getVoidPtrTy());
-  if (!sharesLibCallSymbol(moduleOp, symbolTables, libcallName, libcallTy))
-    return;
+  if (!sharesLibCallSymbol(moduleOp, symbolTables, libcallName, libcallTy)) {
+    if (!wide)
+      return;
+    cir::IntType flippedTy = elemTy.isSigned()
+                                 ? builder.getUIntNTy(elemTy.getWidth())
+                                 : builder.getSIntNTy(elemTy.getWidth());
+    auto flippedPtrTy = cir::PointerType::get(flippedTy);
+    if (!sharesLibCallSymbol(moduleOp, symbolTables, libcallName,
+                             makeWideTy(flippedTy, flippedPtrTy)))
+      return;
+    callElemTy = flippedTy;
+    callIterTy = flippedPtrTy;
+  }
 
   mlir::Location loc = findOp.getLoc();
   builder.setInsertionPointAfter(findOp);
@@ -352,10 +378,18 @@ static void rewriteFindLikeToMemchr(OpT findOp,
                 builder, loc, builder.getUIntNTy(*sizeWidth), last, first);
             mlir::Value res;
             if (wide) {
-              // wmemchr takes and returns the wide type itself, so nothing
-              // is widened or cast at the boundary and len counts wide
-              // characters, which is what ptr_diff yields.
-              res = cir::WMemChrOp::create(builder, loc, first, sought, len);
+              // wmemchr takes and returns the wide type itself and len
+              // counts wide characters, which is what ptr_diff yields. The
+              // casts appear only when the call adopted a declared
+              // signedness that differs from the element.
+              mlir::Value src = first;
+              if (callElemTy != elemTy) {
+                src = builder.createBitcast(loc, first, callIterTy);
+                sought = builder.createIntCast(sought, callElemTy);
+              }
+              res = cir::WMemChrOp::create(builder, loc, src, sought, len);
+              if (callElemTy != elemTy)
+                res = builder.createBitcast(loc, res, iterTy);
             } else {
               mlir::Value src =
                   builder.createBitcast(loc, first, builder.getVoidPtrTy());

@@ -60,7 +60,7 @@
 // LLVMEXT: declare ptr @memchr(ptr noundef, i32 noundef signext, i64 noundef)
 // LLVMEXT: call ptr @memchr(ptr noundef {{.*}}, i32 noundef signext {{.*}}, i64 noundef {{.*}})
 // NOXFORM: cir.call @_ZNKSt6ranges6__findclIPhS2_hSt8identityEET_S4_T0_RKT1_T2_
-// NOXFORM: cir.call @_ZNKSt6ranges6__findclIPiS2_iSt8identityEET_S4_T0_RKT1_T2_
+// NOXFORMW: cir.call @_ZNKSt6ranges6__findclIPiS2_iSt8identityEET_S4_T0_RKT1_T2_
 // NOXFORM: cir.call @_ZSt4findIPhhET_S1_S1_RKT0_
 // NOXFORM: cir.call @_ZSt4findIPccET_S1_S1_RKT0_
 // NOXFORM: cir.call @_ZSt4findIPaaET_S1_S1_RKT0_
@@ -193,9 +193,11 @@ bit_iterator test_ranges_bool_find_if(bit_iterator first,
 int *test_wide_ranges_find(int *first, int *last, const int &value) {
   return std::ranges::find(first, last, value);
 }
+// An int of the target wchar_t width rewrites through wmemchr here too.
 // CHECK-LABEL: @_Z21test_wide_ranges_findPiS_RKi
 // CHECK-NOT: cir.libc.memchr
-// CHECK: cir.call @_ZNKSt6ranges6__findclIPiS2_iSt8identityEET_S4_T0_RKT1_T2_(
+// CHECK: cir.libc.wmemchr({{.*}}) : !cir.ptr<!s32i>, !s32i, !u64i
+// CHECK-NOT: cir.call @_ZNKSt6ranges6__find
 // CHECK-NOT: cir.libc.memchr
 
 unsigned char *test_byte_find(unsigned char *first, unsigned char *last,
@@ -418,9 +420,11 @@ wchar_t *test_wide_find_if(wchar_t *first, wchar_t *last,
   return std::find_if(first, last,
                       [&](wchar_t element) { return element == value; });
 }
+// The wide predicate marker now licenses this form like the byte one. The
+// element type is the triple's wchar_t, signed or unsigned by target.
 // CHECK-LABEL: @_Z17test_wide_find_ifPwS_RKw
-// CHECK: cir.call @_ZSt7find_ifIPwZ17test_wide_find_if{{.*}}
-// CHECK-NOT: cir.libc.wmemchr
+// CHECK: cir.libc.wmemchr(
+// CHECK-NOT: cir.call @_ZSt7find_ifIPw
 
 volatile wchar_t *test_volatile_wide_find(volatile wchar_t *first,
                                           volatile wchar_t *last,
@@ -440,3 +444,32 @@ wchar_t *test_wide_no_builtin(wchar_t *first, wchar_t *last,
 // CHECK: cir.call @_ZSt4find{{.*}}(
 // CHECK-NOT: cir.libc.wmemchr
 // CHECK-NOT: cir.std.find
+
+int *test_int_find_if(int *first, int *last, const int &value) {
+  return std::find_if(first, last, [&](int e) { return e == value; });
+}
+// CHECK-LABEL: @_Z16test_int_find_ifPiS_RKi
+// CHECK: cir.libc.wmemchr({{.*}}) : !cir.ptr<!s32i>, !s32i, !u64i
+// CHECK-NOT: cir.call @_ZSt7find_ifIPi
+
+int *test_int_find_if_not(int *first, int *last, const int &value) {
+  return std::find_if_not(first, last, [&](int e) { return e != value; });
+}
+// CHECK-LABEL: @_Z20test_int_find_if_notPiS_RKi
+// CHECK: cir.libc.wmemchr({{.*}}) : !cir.ptr<!s32i>, !s32i, !u64i
+// CHECK-NOT: cir.call @_ZSt11find_if_notIPi
+
+int *test_int_find_if_literal(int *first, int *last) {
+  return std::find_if(first, last, [](int e) { return e == 70000; });
+}
+// CHECK-LABEL: @_Z24test_int_find_if_literalPiS_
+// CHECK: %[[WLIT:.*]] = cir.const #cir.int<70000> : !s32i
+// CHECK: cir.libc.wmemchr({{.*}}, %[[WLIT]], %{{.*}}) : !cir.ptr<!s32i>, !s32i, !u64i
+// CHECK-NOT: cir.call @_ZSt7find_ifIPi
+
+int *test_int_ranges_find_if(int *first, int *last, const int &value) {
+  return std::ranges::find_if(first, last, [&](int e) { return e == value; });
+}
+// CHECK-LABEL: @_Z23test_int_ranges_find_ifPiS_RKi
+// CHECK: cir.libc.wmemchr({{.*}}) : !cir.ptr<!s32i>, !s32i, !u64i
+// CHECK-NOT: cir.call @_ZNKSt6ranges9__find_if
