@@ -1676,6 +1676,11 @@ def CIR_StdTypeInfoAttr : CIR_Attr<"StdTypeInfo", "std_type_info"> {
   let genVerifyDecl = 1;
 
   let extraClassDeclaration = [{
+    static constexpr llvm::StringLiteral kRoleBegin = "begin";
+    static constexpr llvm::StringLiteral kRoleEnd = "end";
+    static constexpr llvm::StringLiteral kRoleWordPointer = "word_pointer";
+    static constexpr llvm::StringLiteral kRoleBitOffset = "bit_offset";
+
     /// The member type a path resolves to through `root`, walking complete
     /// non-union records only, or null when the path leaves that shape.
     /// `steps` receives the member type of every path step when supplied,
