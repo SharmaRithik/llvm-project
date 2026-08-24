@@ -389,8 +389,10 @@ void CIRGenModule::constructAttributeList(
              (hasNarrowCharRangesFindParams(func) ||
               hasNarrowCharRangesFindRangeParams(func)))) {
           addUnitAttr(cir::CIRDialect::getNarrowCharParamsAttrName());
-        } else if (kind == cir::KnownFuncKind::StdFind &&
-                   hasWideCharParams(func)) {
+        } else if ((kind == cir::KnownFuncKind::StdFind &&
+                    hasWideCharParams(func)) ||
+                   (kind == cir::KnownFuncKind::StdRangesFind &&
+                    hasWideCharRangesFindParams(func))) {
           addUnitAttr(cir::CIRDialect::getWideCharParamsAttrName());
         } else if (kind == cir::KnownFuncKind::StdFindIf ||
                    kind == cir::KnownFuncKind::StdFindIfNot ||
@@ -400,6 +402,10 @@ void CIRGenModule::constructAttributeList(
             addUnitAttr(cir::CIRDialect::getByteEqPredAttrName());
           else if (cir::IntAttr value = getByteEqPredicateValue(func, *kind))
             attrs.set(cir::CIRDialect::getByteEqPredValueAttrName(), value);
+          else if (hasWideEqPredicate(func, *kind))
+            addUnitAttr(cir::CIRDialect::getWideEqPredAttrName());
+          else if (cir::IntAttr value = getWideEqPredicateValue(func, *kind))
+            attrs.set(cir::CIRDialect::getWideEqPredValueAttrName(), value);
           else if (hasBoolEqPredicate(func, *kind))
             addUnitAttr(cir::CIRDialect::getBoolEqPredAttrName());
           else if (mlir::BoolAttr value = getBoolEqPredicateValue(func, *kind))

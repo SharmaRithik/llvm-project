@@ -76,9 +76,20 @@ def CIR_Dialect : Dialect {
       return "cir.elem_eq_binary_pred";
     }
     // The wide sibling of cir.narrow_char_params, set when the same rules
-    // hold over the target's wchar_t instead of a narrow character.
+    // hold over a wide element instead of a narrow character, meaning the
+    // target's wchar_t or a plain int or unsigned int of its width, whose
+    // builtin equality is the bit equality wmemchr computes.
     static llvm::StringRef getWideCharParamsAttrName() {
       return "cir.wide_char_params";
+    }
+    // The wide siblings of the two byte predicate markers, set when the
+    // proven equality predicate runs over a wide element as defined for
+    // cir.wide_char_params.
+    static llvm::StringRef getWideEqPredAttrName() {
+      return "cir.wide_eq_pred";
+    }
+    static llvm::StringRef getWideEqPredValueAttrName() {
+      return "cir.wide_eq_pred_value";
     }
     static llvm::StringRef getWCharTypeWidthAttrName() {
       return "cir.wchar_type_width";
