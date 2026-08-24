@@ -303,3 +303,191 @@ cir.func @complex_parts_distinct_allocas() {
               {test.ptr = "imag2"}
   cir.return
 }
+
+// -----
+
+// CHECK-LABEL: Testing : "direct_noalias_arguments"
+// CHECK-DAG: func.region0#0 <-> func.region0#1: NoAlias
+// CHECK-DAG: func.region0#0 <-> func.region0#2: NoAlias
+// CHECK-DAG: func.region0#1 <-> func.region0#2: NoAlias
+
+!s32i = !cir.int<s, 32>
+cir.func @direct_noalias_arguments(
+    %p: !cir.ptr<!s32i> {llvm.noalias},
+    %q: !cir.ptr<!s32i>,
+    %r: !cir.ptr<!s32i> {llvm.noalias})
+    attributes {test.ptr = "func"} {
+  cir.return
+}
+
+// -----
+
+// CHECK-LABEL: Testing : "canonical_argument_slots"
+// CHECK-DAG: p_a#0 <-> p_b#0: MustAlias
+// CHECK-DAG: p_a#0 <-> q#0: NoAlias
+// CHECK-DAG: p_a#0 <-> r_a#0: NoAlias
+// CHECK-DAG: p_a#0 <-> global#0: NoAlias
+// CHECK-DAG: r_a#0 <-> r_b#0: MustAlias
+// CHECK-DAG: r_a#0 <-> s#0: MayAlias
+
+!s32i = !cir.int<s, 32>
+cir.global internal @canonical_global = #cir.int<0> : !s32i
+cir.func @canonical_argument_slots(
+    %p: !cir.ptr<!s32i> {llvm.noalias},
+    %q: !cir.ptr<!s32i> {llvm.noalias},
+    %r: !cir.ptr<!s32i>,
+    %s: !cir.ptr<!s32i>) {
+  %p_addr = cir.alloca "p.addr" align(8) : !cir.ptr<!cir.ptr<!s32i>>
+  %q_addr = cir.alloca "q.addr" align(8) : !cir.ptr<!cir.ptr<!s32i>>
+  %r_addr = cir.alloca "r.addr" align(8) : !cir.ptr<!cir.ptr<!s32i>>
+  %s_addr = cir.alloca "s.addr" align(8) : !cir.ptr<!cir.ptr<!s32i>>
+  cir.store %p, %p_addr : !cir.ptr<!s32i>, !cir.ptr<!cir.ptr<!s32i>>
+  cir.store %q, %q_addr : !cir.ptr<!s32i>, !cir.ptr<!cir.ptr<!s32i>>
+  cir.store %r, %r_addr : !cir.ptr<!s32i>, !cir.ptr<!cir.ptr<!s32i>>
+  cir.store %s, %s_addr : !cir.ptr<!s32i>, !cir.ptr<!cir.ptr<!s32i>>
+  %p_a = cir.load %p_addr : !cir.ptr<!cir.ptr<!s32i>>, !cir.ptr<!s32i>
+      {test.ptr = "p_a"}
+  %p_b = cir.load %p_addr : !cir.ptr<!cir.ptr<!s32i>>, !cir.ptr<!s32i>
+      {test.ptr = "p_b"}
+  %q_load = cir.load %q_addr : !cir.ptr<!cir.ptr<!s32i>>, !cir.ptr<!s32i>
+      {test.ptr = "q"}
+  %r_a = cir.load %r_addr : !cir.ptr<!cir.ptr<!s32i>>, !cir.ptr<!s32i>
+      {test.ptr = "r_a"}
+  %r_b = cir.load %r_addr : !cir.ptr<!cir.ptr<!s32i>>, !cir.ptr<!s32i>
+      {test.ptr = "r_b"}
+  %s_load = cir.load %s_addr : !cir.ptr<!cir.ptr<!s32i>>, !cir.ptr<!s32i>
+      {test.ptr = "s"}
+  %global = cir.get_global @canonical_global : !cir.ptr<!s32i>
+      {test.ptr = "global"}
+  cir.return
+}
+
+// -----
+
+// CHECK-LABEL: Testing : "reassigned_argument_slot"
+// CHECK-DAG: loaded#0 <-> global#0: MayAlias
+
+!s32i = !cir.int<s, 32>
+cir.global internal @reassigned_global = #cir.int<0> : !s32i
+cir.func @reassigned_argument_slot(
+    %p: !cir.ptr<!s32i> {llvm.noalias},
+    %q: !cir.ptr<!s32i>) {
+  %slot = cir.alloca "p.addr" align(8) : !cir.ptr<!cir.ptr<!s32i>>
+  cir.store %p, %slot : !cir.ptr<!s32i>, !cir.ptr<!cir.ptr<!s32i>>
+  cir.store %q, %slot : !cir.ptr<!s32i>, !cir.ptr<!cir.ptr<!s32i>>
+  %loaded = cir.load %slot : !cir.ptr<!cir.ptr<!s32i>>, !cir.ptr<!s32i>
+      {test.ptr = "loaded"}
+  %global = cir.get_global @reassigned_global : !cir.ptr<!s32i>
+      {test.ptr = "global"}
+  cir.return
+}
+
+// -----
+
+// CHECK-LABEL: Testing : "escaping_argument_slot"
+// CHECK-DAG: loaded#0 <-> global#0: MayAlias
+
+!s32i = !cir.int<s, 32>
+cir.global internal @escaping_global = #cir.int<0> : !s32i
+cir.func private @capture_slot(!cir.ptr<!cir.ptr<!s32i>>)
+cir.func @escaping_argument_slot(%p: !cir.ptr<!s32i> {llvm.noalias}) {
+  %slot = cir.alloca "p.addr" align(8) : !cir.ptr<!cir.ptr<!s32i>>
+  cir.store %p, %slot : !cir.ptr<!s32i>, !cir.ptr<!cir.ptr<!s32i>>
+  cir.call @capture_slot(%slot) : (!cir.ptr<!cir.ptr<!s32i>>) -> ()
+  %loaded = cir.load %slot : !cir.ptr<!cir.ptr<!s32i>>, !cir.ptr<!s32i>
+      {test.ptr = "loaded"}
+  %global = cir.get_global @escaping_global : !cir.ptr<!s32i>
+      {test.ptr = "global"}
+  cir.return
+}
+
+// -----
+
+// CHECK-LABEL: Testing : "volatile_argument_slot_use"
+// CHECK-DAG: loaded#0 <-> global#0: MayAlias
+
+!s32i = !cir.int<s, 32>
+cir.global internal @volatile_global = #cir.int<0> : !s32i
+cir.func @volatile_argument_slot_use(%p: !cir.ptr<!s32i> {llvm.noalias}) {
+  %slot = cir.alloca "p.addr" align(8) : !cir.ptr<!cir.ptr<!s32i>>
+  cir.store %p, %slot : !cir.ptr<!s32i>, !cir.ptr<!cir.ptr<!s32i>>
+  %loaded = cir.load %slot : !cir.ptr<!cir.ptr<!s32i>>, !cir.ptr<!s32i>
+      {test.ptr = "loaded"}
+  %unused = cir.load volatile %slot
+      : !cir.ptr<!cir.ptr<!s32i>>, !cir.ptr<!s32i>
+  %global = cir.get_global @volatile_global : !cir.ptr<!s32i>
+      {test.ptr = "global"}
+  cir.return
+}
+
+// -----
+
+// CHECK-LABEL: Testing : "undominated_argument_store"
+// CHECK-DAG: loaded#0 <-> global#0: MayAlias
+
+!s32i = !cir.int<s, 32>
+cir.global internal @undominated_global = #cir.int<0> : !s32i
+cir.func @undominated_argument_store(%p: !cir.ptr<!s32i> {llvm.noalias}) {
+  %slot = cir.alloca "p.addr" align(8) : !cir.ptr<!cir.ptr<!s32i>>
+  %loaded = cir.load %slot : !cir.ptr<!cir.ptr<!s32i>>, !cir.ptr<!s32i>
+      {test.ptr = "loaded"}
+  cir.store %p, %slot : !cir.ptr<!s32i>, !cir.ptr<!cir.ptr<!s32i>>
+  %global = cir.get_global @undominated_global : !cir.ptr<!s32i>
+      {test.ptr = "global"}
+  cir.return
+}
+
+// -----
+
+// CHECK-LABEL: Testing : "nested_argument_slot_load"
+// CHECK-DAG: loaded#0 <-> global#0: NoAlias
+
+!s32i = !cir.int<s, 32>
+cir.global internal @nested_global = #cir.int<0> : !s32i
+cir.func @nested_argument_slot_load(
+    %p: !cir.ptr<!s32i> {llvm.noalias}) {
+  %slot = cir.alloca "p.addr" align(8) : !cir.ptr<!cir.ptr<!s32i>>
+  cir.store %p, %slot : !cir.ptr<!s32i>, !cir.ptr<!cir.ptr<!s32i>>
+  cir.scope {
+    %loaded = cir.load %slot
+        : !cir.ptr<!cir.ptr<!s32i>>, !cir.ptr<!s32i>
+        {test.ptr = "loaded"}
+    %global = cir.get_global @nested_global : !cir.ptr<!s32i>
+        {test.ptr = "global"}
+  }
+  cir.return
+}
+
+// -----
+
+// CHECK-LABEL: Testing : "bounded_argument_provenance"
+// CHECK-DAG: boundary#0 <-> global#0: NoAlias
+// CHECK-DAG: too_deep#0 <-> global#0: MayAlias
+
+!s32i = !cir.int<s, 32>
+cir.global internal @bounded_global = #cir.int<0> : !s32i
+cir.func @bounded_argument_provenance(
+    %p: !cir.ptr<!s32i> {llvm.noalias}) {
+  %slot = cir.alloca "p.addr" align(8) : !cir.ptr<!cir.ptr<!s32i>>
+  cir.store %p, %slot : !cir.ptr<!s32i>, !cir.ptr<!cir.ptr<!s32i>>
+  %loaded = cir.load %slot
+      : !cir.ptr<!cir.ptr<!s32i>>, !cir.ptr<!s32i>
+  %zero = cir.const #cir.int<0> : !s32i
+  %one = cir.ptr_stride %loaded, %zero
+      : (!cir.ptr<!s32i>, !s32i) -> !cir.ptr<!s32i>
+  %two = cir.ptr_stride %one, %zero
+      : (!cir.ptr<!s32i>, !s32i) -> !cir.ptr<!s32i>
+  %three = cir.ptr_stride %two, %zero
+      : (!cir.ptr<!s32i>, !s32i) -> !cir.ptr<!s32i>
+  %four = cir.ptr_stride %three, %zero
+      : (!cir.ptr<!s32i>, !s32i) -> !cir.ptr<!s32i>
+  %five = cir.ptr_stride %four, %zero
+      : (!cir.ptr<!s32i>, !s32i) -> !cir.ptr<!s32i>
+      {test.ptr = "boundary"}
+  %six = cir.ptr_stride %five, %zero
+      : (!cir.ptr<!s32i>, !s32i) -> !cir.ptr<!s32i>
+      {test.ptr = "too_deep"}
+  %global = cir.get_global @bounded_global : !cir.ptr<!s32i>
+      {test.ptr = "global"}
+  cir.return
+}

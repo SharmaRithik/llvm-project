@@ -24,6 +24,76 @@ using namespace cir;
 
 static constexpr unsigned MaxLookupDepth = 6;
 
+static cir::FuncOp getArgumentFunction(mlir::BlockArgument argument) {
+  auto function =
+      mlir::dyn_cast_or_null<cir::FuncOp>(argument.getOwner()->getParentOp());
+  if (!function || argument.getOwner() != &function.getBody().front())
+    return {};
+  return function;
+}
+
+static bool isNoAliasFunctionArgument(mlir::Value value) {
+  auto argument = mlir::dyn_cast<mlir::BlockArgument>(value);
+  if (!argument)
+    return false;
+  cir::FuncOp function = getArgumentFunction(argument);
+  return function &&
+         function.getArgAttr(argument.getArgNumber(), "llvm.noalias");
+}
+
+static mlir::BlockArgument resolveArgumentSlot(cir::LoadOp load) {
+  if (load.getIsVolatile() || load.getMemOrder())
+    return {};
+
+  auto slot = load.getAddr().getDefiningOp<cir::AllocaOp>();
+  if (!slot)
+    return {};
+
+  auto function = slot->getParentOfType<cir::FuncOp>();
+  if (!function || slot->getBlock() != &function.getBody().front())
+    return {};
+
+  cir::StoreOp definingStore;
+  llvm::SmallVector<cir::LoadOp, 4> loads;
+  for (mlir::OpOperand &use : slot.getAddr().getUses()) {
+    mlir::Operation *user = use.getOwner();
+    if (auto candidate = mlir::dyn_cast<cir::LoadOp>(user)) {
+      if (use.getOperandNumber() != cir::LoadOp::odsIndex_addr ||
+          candidate.getIsVolatile() || candidate.getMemOrder())
+        return {};
+      loads.push_back(candidate);
+      continue;
+    }
+    if (auto candidate = mlir::dyn_cast<cir::StoreOp>(user)) {
+      if (use.getOperandNumber() != cir::StoreOp::odsIndex_addr ||
+          candidate.getIsVolatile() || candidate.getMemOrder() || definingStore)
+        return {};
+      definingStore = candidate;
+      continue;
+    }
+    return {};
+  }
+
+  if (!definingStore)
+    return {};
+  auto argument = mlir::dyn_cast<mlir::BlockArgument>(definingStore.getValue());
+  if (!argument || getArgumentFunction(argument) != function)
+    return {};
+
+  mlir::Block *entry = slot->getBlock();
+  if (definingStore->getBlock() != entry)
+    return {};
+  for (cir::LoadOp candidate : loads) {
+    mlir::Operation *entryAncestor = candidate;
+    while (entryAncestor && entryAncestor->getBlock() != entry)
+      entryAncestor = entryAncestor->getParentOp();
+    if (candidate.getType() != argument.getType() || !entryAncestor ||
+        !definingStore->isBeforeInBlock(entryAncestor))
+      return {};
+  }
+  return argument;
+}
+
 static mlir::Operation *getIdentifiedObject(mlir::Value value,
                                             bool &mayAliasOtherGlobal) {
   mayAliasOtherGlobal = false;
@@ -67,6 +137,17 @@ mlir::Value CIRBasicAliasAnalysis::getUnderlyingObject(mlir::Value val) {
       }
       LDBG() << "Opaque cast operation, stopping";
       break;
+    }
+
+    if (auto load = mlir::dyn_cast<cir::LoadOp>(defOp)) {
+      mlir::BlockArgument argument = resolveArgumentSlot(load);
+      if (!argument) {
+        LDBG() << "Noncanonical pointer slot load";
+        break;
+      }
+      LDBG() << "Walking through canonical argument slot";
+      val = argument;
+      continue;
     }
 
     // Pointer stride: only strip through when we can prove the access stays
@@ -178,7 +259,9 @@ CIRBasicAliasAnalysis::classifyObjects(mlir::Value lhs, mlir::Value rhs) {
       getIdentifiedObject(lhsObj, lhsMayAliasOtherGlobal);
   mlir::Operation *rhsObject =
       getIdentifiedObject(rhsObj, rhsMayAliasOtherGlobal);
-  if (lhsObject && rhsObject) {
+  bool lhsNoAliasArgument = isNoAliasFunctionArgument(lhsObj);
+  bool rhsNoAliasArgument = isNoAliasFunctionArgument(rhsObj);
+  if ((lhsObject || lhsNoAliasArgument) && (rhsObject || rhsNoAliasArgument)) {
     if (lhsGlobal && rhsGlobal &&
         (lhsMayAliasOtherGlobal || rhsMayAliasOtherGlobal)) {
       LDBG() << "Global object may resolve to another global";
@@ -186,6 +269,19 @@ CIRBasicAliasAnalysis::classifyObjects(mlir::Value lhs, mlir::Value rhs) {
     }
 
     LDBG() << "Different identified objects";
+    return ObjectRelation::Distinct;
+  }
+
+  bool lhsArgument = mlir::isa<mlir::BlockArgument>(lhsObj);
+  bool rhsArgument = mlir::isa<mlir::BlockArgument>(rhsObj);
+  bool lhsFunctionLocal =
+      lhsNoAliasArgument ||
+      mlir::isa_and_nonnull<cir::AllocaOp>(lhsObj.getDefiningOp());
+  bool rhsFunctionLocal =
+      rhsNoAliasArgument ||
+      mlir::isa_and_nonnull<cir::AllocaOp>(rhsObj.getDefiningOp());
+  if ((lhsArgument && rhsFunctionLocal) || (rhsArgument && lhsFunctionLocal)) {
+    LDBG() << "Function argument and identified local object are distinct";
     return ObjectRelation::Distinct;
   }
 
