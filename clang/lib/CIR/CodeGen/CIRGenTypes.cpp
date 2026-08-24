@@ -368,13 +368,6 @@ static bool isDirectlyInStdNamespace(const clang::Decl *decl) {
          ns->getParent()->isTranslationUnit();
 }
 
-static bool isPrimaryTemplateInstantiation(
-    const clang::ClassTemplateSpecializationDecl *spec) {
-  return clang::isTemplateInstantiation(spec->getSpecializationKind()) &&
-         isa<clang::ClassTemplateDecl *>(
-             spec->getSpecializedTemplateOrPartial());
-}
-
 static bool isVectorBoolPartial(
     const clang::ClassTemplatePartialSpecializationDecl *partial,
     const clang::ASTContext &astContext) {
@@ -467,7 +460,8 @@ void CIRGenTypes::attachStdBitIteratorTypeInfo(const clang::RecordDecl *rd,
   if (const auto *spec =
           dyn_cast<clang::ClassTemplateSpecializationDecl>(cxxrd);
       spec && spec->getIdentifier() && spec->getName() == "__bit_iterator") {
-    if (!spec->isInStdNamespace() || !isPrimaryTemplateInstantiation(spec) ||
+    if (!spec->isInStdNamespace() ||
+        !CIRGenModule::isPrimaryTemplateInstantiation(spec) ||
         spec->getNumBases() != 0 || spec->getNumFields() != 2)
       return;
     const clang::TemplateArgumentList &args = spec->getTemplateArgs();

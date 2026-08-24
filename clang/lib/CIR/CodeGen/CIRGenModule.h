@@ -41,6 +41,7 @@
 
 namespace clang {
 class ASTContext;
+class ClassTemplateSpecializationDecl;
 class CodeGenOptions;
 class Decl;
 class GlobalDecl;
@@ -848,6 +849,11 @@ public:
   /// Whether a bit iterator predicate seeks its single boolean capture
   bool hasBoolEqPredicate(const clang::FunctionDecl *funcDecl,
                           cir::KnownFuncKind kind);
+
+  /// Whether the record is an instantiation of its primary class
+  /// template rather than of a partial or explicit specialization.
+  static bool isPrimaryTemplateInstantiation(
+      const clang::ClassTemplateSpecializationDecl *spec);
 
   /// Whether every parameter designates the same non-volatile wchar_t
   /// through a pointer, a reference, or a standard library contiguous
