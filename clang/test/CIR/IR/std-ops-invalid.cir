@@ -14,6 +14,21 @@ module {
 // -----
 
 !s8i = !cir.int<s, 8>
+!first_iter = !cir.struct<class "first_deque_iterator" {data !cir.ptr<!s8i>, data !cir.ptr<!cir.ptr<!s8i>>}, std_type_info = #cir.std_type_info<"std::deque_iterator", !s8i, roles {block_size = 512 : i64, current_pointer = array<i32: 0>, map_pointer = array<i32: 1>}>>
+!last_iter = !cir.struct<class "last_deque_iterator" {data !cir.ptr<!s8i>, data !cir.ptr<!cir.ptr<!s8i>>}, std_type_info = #cir.std_type_info<"std::deque_iterator", !s8i, roles {block_size = 256 : i64, current_pointer = array<i32: 0>, map_pointer = array<i32: 1>}>>
+
+module {
+  cir.func @bad_find_deque_identity(%f: !first_iter, %l: !last_iter,
+                                    %v: !cir.ptr<!s8i>) -> !first_iter {
+    // expected-error@below {{'cir.std.find' op failed to verify that all of {first, last, result} have same type}}
+    %0 = cir.std.find(%f : !first_iter, %l : !last_iter, %v : !cir.ptr<!s8i>, @x) -> !first_iter
+    cir.return %0 : !first_iter
+  }
+}
+
+// -----
+
+!s8i = !cir.int<s, 8>
 !s32i = !cir.int<s, 32>
 !closure = !cir.struct<class "Closure" {data !s8i}>
 

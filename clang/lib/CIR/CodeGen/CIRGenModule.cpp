@@ -4029,6 +4029,61 @@ static clang::QualType wideCharPointee(const ParmVarDecl *param) {
   }
   return pointee.getCanonicalType().getUnqualifiedType();
 }
+static clang::QualType stdDequeIteratorElement(CIRGenModule &cgm,
+                                               const ParmVarDecl *param) {
+  clang::QualType iterator = param->getType();
+  if (iterator.isVolatileQualified())
+    return {};
+  iterator = iterator.getCanonicalType().getUnqualifiedType();
+  const auto *spec = dyn_cast_or_null<ClassTemplateSpecializationDecl>(
+      iterator->getAsCXXRecordDecl());
+  if (!spec)
+    return {};
+  auto iteratorTy = mlir::dyn_cast<cir::StructType>(cgm.convertType(iterator));
+  cir::StdTypeInfoAttr info =
+      iteratorTy ? iteratorTy.getStdTypeInfo() : cir::StdTypeInfoAttr();
+  if (!info || info.getKind() != cir::StdTypeKind::StdDequeIterator)
+    return {};
+  const clang::TemplateArgumentList &args = spec->getTemplateArgs();
+  if (args.size() == 0 || args[0].getKind() != clang::TemplateArgument::Type)
+    return {};
+  clang::QualType element =
+      args[0].getAsType().getCanonicalType().getUnqualifiedType();
+  if (info.getElement() != cgm.convertType(element))
+    return {};
+  return element;
+}
+
+static clang::QualType narrowCharOrDequeElement(CIRGenModule &cgm,
+                                                const ParmVarDecl *param) {
+  clang::QualType element = narrowCharPointee(param);
+  if (!element.isNull())
+    return element;
+  element = stdDequeIteratorElement(cgm, param);
+  if (element.isNull() || (!element->isCharType() && !element->isChar8Type()))
+    return {};
+  return element;
+}
+
+static clang::QualType wideCharOrDequeElement(CIRGenModule &cgm,
+                                              const ParmVarDecl *param) {
+  clang::QualType element = wideCharPointee(param);
+  if (!element.isNull())
+    return element;
+  element = stdDequeIteratorElement(cgm, param);
+  if (element.isNull())
+    return {};
+  if (!element->isWideCharType()) {
+    const auto *builtin = element->getAs<clang::BuiltinType>();
+    if (!builtin ||
+        (builtin->getKind() != clang::BuiltinType::Int &&
+         builtin->getKind() != clang::BuiltinType::UInt) ||
+        param->getASTContext().getIntWidth(element) !=
+            param->getASTContext().getTargetInfo().getWCharWidth())
+      return {};
+  }
+  return element;
+}
 
 static bool hasCharacterParams(
     const FunctionDecl *funcDecl,
@@ -4050,10 +4105,18 @@ static bool hasCharacterParams(
 }
 
 bool CIRGenModule::hasWideCharParams(const FunctionDecl *funcDecl) {
+  if (getKnownFuncKind(funcDecl) == cir::KnownFuncKind::StdFind)
+    return hasCharacterParams(funcDecl, [&](const ParmVarDecl *param) {
+      return wideCharOrDequeElement(*this, param);
+    });
   return hasCharacterParams(funcDecl, wideCharPointee);
 }
 
 bool CIRGenModule::hasNarrowCharParams(const FunctionDecl *funcDecl) {
+  if (getKnownFuncKind(funcDecl) == cir::KnownFuncKind::StdFind)
+    return hasCharacterParams(funcDecl, [&](const ParmVarDecl *param) {
+      return narrowCharOrDequeElement(*this, param);
+    });
   return hasCharacterParams(funcDecl, narrowCharPointee);
 }
 
@@ -4342,11 +4405,21 @@ static bool hasElemEqPredicateImpl(
 
 bool CIRGenModule::hasByteEqPredicate(const FunctionDecl *funcDecl,
                                       cir::KnownFuncKind kind) {
+  if (kind == cir::KnownFuncKind::StdFindIf)
+    return hasElemEqPredicateImpl(
+        funcDecl, kind, [&](const ParmVarDecl *param) {
+          return narrowCharOrDequeElement(*this, param);
+        });
   return hasElemEqPredicateImpl(funcDecl, kind, narrowCharPointee);
 }
 
 bool CIRGenModule::hasWideEqPredicate(const FunctionDecl *funcDecl,
                                       cir::KnownFuncKind kind) {
+  if (kind == cir::KnownFuncKind::StdFindIf)
+    return hasElemEqPredicateImpl(funcDecl, kind,
+                                  [&](const ParmVarDecl *param) {
+                                    return wideCharOrDequeElement(*this, param);
+                                  });
   return hasElemEqPredicateImpl(funcDecl, kind, wideCharPointee);
 }
 
@@ -4390,12 +4463,22 @@ static cir::IntAttr getElemEqPredicateValueImpl(
 
 cir::IntAttr CIRGenModule::getByteEqPredicateValue(const FunctionDecl *funcDecl,
                                                    cir::KnownFuncKind kind) {
+  if (kind == cir::KnownFuncKind::StdFindIf)
+    return getElemEqPredicateValueImpl(
+        builder, funcDecl, kind, [&](const ParmVarDecl *param) {
+          return narrowCharOrDequeElement(*this, param);
+        });
   return getElemEqPredicateValueImpl(builder, funcDecl, kind,
                                      narrowCharPointee);
 }
 
 cir::IntAttr CIRGenModule::getWideEqPredicateValue(const FunctionDecl *funcDecl,
                                                    cir::KnownFuncKind kind) {
+  if (kind == cir::KnownFuncKind::StdFindIf)
+    return getElemEqPredicateValueImpl(
+        builder, funcDecl, kind, [&](const ParmVarDecl *param) {
+          return wideCharOrDequeElement(*this, param);
+        });
   return getElemEqPredicateValueImpl(builder, funcDecl, kind, wideCharPointee);
 }
 

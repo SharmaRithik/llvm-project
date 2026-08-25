@@ -18,6 +18,7 @@
 #include "clang/CIR/Dialect/IR/CIRDialect.h"
 #include "clang/CIR/Dialect/Passes.h"
 #include "llvm/ADT/APInt.h"
+#include "llvm/ADT/SmallSet.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/StringRef.h"
 #include "llvm/ADT/Twine.h"
@@ -283,6 +284,378 @@ static bool resolveMemchrCallTypes(CIRBaseBuilderTy &builder,
     return false;
   callElemTy = flippedTy;
   callIterTy = flippedPtrTy;
+  return true;
+}
+
+// Rewrites cir.std.find and the equality predicate form of cir.std.find_if
+// over standard deque iterators into a block walk that calls memchr or
+// wmemchr once per block. The identity carries the member paths to the
+// current element pointer and the map slot pointer plus the block element
+// count, so the walk reaches each block through the same map load iterator
+// increment performs. A hit rebuilds the result iterator from the finish
+// iterator, a miss returns the finish iterator whole.
+template <typename OpT>
+static bool
+rewriteFindDequeToBlockWalk(OpT findOp,
+                            mlir::SymbolTableCollection &symbolTables,
+                            mlir::Pass::Statistic &numFindDequeToMemchr,
+                            mlir::Pass::Statistic &numFindDequeToWmemchr) {
+  static_assert(std::is_same_v<OpT, StdFindOp> ||
+                std::is_same_v<OpT, StdFindIfOp>);
+  constexpr bool predOp = std::is_same_v<OpT, StdFindIfOp>;
+
+  // The operation verifier makes first, last, and result one type, so this
+  // type speaks for all three.
+  auto iteratorTy =
+      mlir::dyn_cast<cir::StructType>(findOp.getFirst().getType());
+  if (!iteratorTy)
+    return false;
+
+  cir::StdTypeInfoAttr iteratorInfo = iteratorTy.getStdTypeInfo();
+  if (!iteratorInfo ||
+      iteratorInfo.getKind() != cir::StdTypeKind::StdDequeIterator)
+    return false;
+
+  auto elemTy = mlir::dyn_cast<cir::IntType>(iteratorInfo.getElement());
+  if (!elemTy)
+    return false;
+  auto elemPtrTy = cir::PointerType::get(elemTy);
+  auto currentPointerTy =
+      mlir::dyn_cast<cir::PointerType>(iteratorInfo.resolveRole(
+          iteratorTy, cir::StdTypeInfoAttr::kRoleCurrentPointer));
+  auto mapPointerTy = mlir::dyn_cast<cir::PointerType>(iteratorInfo.resolveRole(
+      iteratorTy, cir::StdTypeInfoAttr::kRoleMapPointer));
+  auto blockPointerTy =
+      mapPointerTy ? mlir::dyn_cast<cir::PointerType>(mapPointerTy.getPointee())
+                   : cir::PointerType();
+  if (currentPointerTy != elemPtrTy || !mapPointerTy ||
+      mapPointerTy.getAddrSpace() || blockPointerTy != elemPtrTy)
+    return false;
+
+  llvm::ArrayRef<int32_t> currentPointerPath =
+      iteratorInfo.getRolePath(cir::StdTypeInfoAttr::kRoleCurrentPointer);
+  llvm::ArrayRef<int32_t> mapPointerPath =
+      iteratorInfo.getRolePath(cir::StdTypeInfoAttr::kRoleMapPointer);
+  llvm::ArrayRef<int32_t> blockFirstPointerPath =
+      iteratorInfo.getRolePath(cir::StdTypeInfoAttr::kRoleBlockFirstPointer);
+  llvm::ArrayRef<int32_t> blockLastPointerPath =
+      iteratorInfo.getRolePath(cir::StdTypeInfoAttr::kRoleBlockLastPointer);
+  if (currentPointerPath.empty() || mapPointerPath.empty())
+    return false;
+  // The hit result copies the finish iterator and replaces the role
+  // members, so an identity whose roles name fewer members than the record
+  // holds would leave stale per position state in the rebuilt result. Hand
+  // written IR can carry such an identity, so the roles must land on
+  // distinct members and cover the whole record before any rewrite.
+  llvm::SmallVector<llvm::ArrayRef<int32_t>, 4> rolePaths{currentPointerPath,
+                                                          mapPointerPath};
+  if (!blockFirstPointerPath.empty())
+    rolePaths.push_back(blockFirstPointerPath);
+  if (!blockLastPointerPath.empty())
+    rolePaths.push_back(blockLastPointerPath);
+  llvm::SmallSet<int32_t, 4> coveredMembers;
+  for (llvm::ArrayRef<int32_t> path : rolePaths)
+    if (path.size() != 1 || !coveredMembers.insert(path[0]).second)
+      return false;
+  if (coveredMembers.size() != iteratorTy.getMembers().size())
+    return false;
+  if (!blockFirstPointerPath.empty() &&
+      (iteratorInfo.resolveRole(iteratorTy,
+                                cir::StdTypeInfoAttr::kRoleBlockFirstPointer) !=
+           elemPtrTy ||
+       iteratorInfo.resolveRole(iteratorTy,
+                                cir::StdTypeInfoAttr::kRoleBlockLastPointer) !=
+           elemPtrTy))
+    return false;
+
+  // The attribute verifier admits only a positive signless 64 bit block
+  // size on a deque identity, so the entry reads unchecked here.
+  uint64_t blockSize = static_cast<uint64_t>(
+      mlir::cast<mlir::IntegerAttr>(
+          iteratorInfo.getRoles().get(cir::StdTypeInfoAttr::kBlockSize))
+          .getInt());
+
+  const bool wide = elemTy.getWidth() != 8;
+  llvm::StringRef libcallName = wide ? "wmemchr" : "memchr";
+  bool captureByRef = false;
+  cir::IntAttr predicateValue;
+  if (!matchEqSoughtShape(findOp, elemTy, wide, predicateValue, captureByRef))
+    return false;
+
+  std::optional<LibCallEnv> env = checkLibCallEnv(
+      findOp, libcallName, wide ? llvm::LibFunc_wmemchr : llvm::LibFunc_memchr);
+  if (!env)
+    return false;
+  // The walk carries its state in allocas, which have no home in a global
+  // initializer region, so only function bodies rewrite.
+  if (!env->enclosing)
+    return false;
+
+  if (!hasEqSearchMarker(findOp, wide, predicateValue))
+    return false;
+
+  unsigned patternWidth, sizeWidth;
+  if (!resolveMemchrWidths(env->moduleOp, env->triple, wide, elemTy,
+                           patternWidth, sizeWidth))
+    return false;
+  // The span lengths the calls receive are element counts within one
+  // block, so the block count itself must be representable in size_t.
+  if (sizeWidth < 64 && blockSize >= (uint64_t{1} << sizeWidth))
+    return false;
+
+  CIRBaseBuilderTy builder(*findOp.getContext());
+  cir::IntType callElemTy;
+  cir::PointerType callIterTy;
+  if (!resolveMemchrCallTypes(builder, env->moduleOp, symbolTables, wide,
+                              libcallName, patternWidth, sizeWidth, elemTy,
+                              elemPtrTy, callElemTy, callIterTy))
+    return false;
+
+  mlir::Location loc = findOp.getLoc();
+  builder.setInsertionPointAfter(findOp);
+  auto extractPath = [&](mlir::Location pathLoc, mlir::Value record,
+                         llvm::ArrayRef<int32_t> path) {
+    mlir::Value value = record;
+    for (int32_t index : path)
+      value = cir::ExtractMemberOp::create(builder, pathLoc, value,
+                                           static_cast<uint64_t>(index));
+    return value;
+  };
+  auto insertPath = [&](mlir::Location pathLoc, mlir::Value record,
+                        llvm::ArrayRef<int32_t> path, mlir::Value replacement) {
+    llvm::SmallVector<mlir::Value, 4> parents;
+    mlir::Value nested = record;
+    for (size_t depth = 0; depth + 1 < path.size(); ++depth) {
+      parents.push_back(nested);
+      nested = cir::ExtractMemberOp::create(builder, pathLoc, nested,
+                                            static_cast<uint64_t>(path[depth]));
+    }
+    nested = cir::InsertMemberOp::create(builder, pathLoc, nested,
+                                         static_cast<uint64_t>(path.back()),
+                                         replacement);
+    for (size_t depth = path.size() - 1; depth > 0; --depth)
+      nested = cir::InsertMemberOp::create(
+          builder, pathLoc, parents[depth - 1],
+          static_cast<uint64_t>(path[depth - 1]), nested);
+    return nested;
+  };
+
+  mlir::Value firstCurrent =
+      extractPath(loc, findOp.getFirst(), currentPointerPath);
+  mlir::Value lastCurrent =
+      extractPath(loc, findOp.getLast(), currentPointerPath);
+  mlir::Value firstMap = extractPath(loc, findOp.getFirst(), mapPointerPath);
+  mlir::Value lastMap = extractPath(loc, findOp.getLast(), mapPointerPath);
+  mlir::Value sameMap =
+      builder.createCompare(loc, cir::CmpOpKind::eq, firstMap, lastMap);
+  mlir::Value sameCurrent =
+      builder.createCompare(loc, cir::CmpOpKind::eq, firstCurrent, lastCurrent);
+  mlir::Value empty = builder.createLogicalAnd(loc, sameMap, sameCurrent);
+
+  mlir::Value result =
+      cir::TernaryOp::create(
+          builder, loc, empty,
+          [&](mlir::OpBuilder &, mlir::Location emptyLoc) {
+            builder.createYield(emptyLoc, findOp.getLast());
+          },
+          [&](mlir::OpBuilder &, mlir::Location walkLoc) {
+            mlir::Value sought;
+            if constexpr (predOp) {
+              if (predicateValue) {
+                sought = builder.getConstant(walkLoc, predicateValue);
+              } else {
+                sought = cir::ExtractMemberOp::create(builder, walkLoc,
+                                                      findOp.getPred(), 0);
+                if (captureByRef)
+                  sought = builder.createLoad(walkLoc, sought);
+              }
+            } else {
+              sought = builder.createLoad(walkLoc, findOp.getPattern());
+            }
+
+            mlir::IntegerAttr pointerAlign = builder.getAlignmentAttr(8);
+            mlir::Value foundPointerAddr =
+                builder.createAlloca(walkLoc, builder.getPointerTo(elemPtrTy),
+                                     "find_deque_pointer", pointerAlign);
+            mlir::Value foundMapAddr = builder.createAlloca(
+                walkLoc, builder.getPointerTo(mapPointerTy), "find_deque_map",
+                pointerAlign);
+            mlir::Value currentMapAddr = builder.createAlloca(
+                walkLoc, builder.getPointerTo(mapPointerTy),
+                "find_deque_current_map", pointerAlign);
+            mlir::Value foundAddr = builder.createAlloca(
+                walkLoc, builder.getPointerTo(builder.getBoolTy()),
+                "find_deque_found", builder.getAlignmentAttr(1));
+            builder.createStore(walkLoc, builder.getFalse(walkLoc), foundAddr);
+
+            mlir::Type sizeTy = builder.getUIntNTy(sizeWidth);
+            mlir::Value blockCount =
+                builder.getUnsignedInt(walkLoc, blockSize, sizeWidth);
+            mlir::Value one = builder.getUnsignedInt(walkLoc, 1, sizeWidth);
+            auto advance = [&](mlir::Location advanceLoc, mlir::Value base,
+                               mlir::Value offset) {
+              return cir::PtrStrideOp::create(builder, advanceLoc,
+                                              base.getType(), base, offset)
+                  .getResult();
+            };
+            auto loadBlock = [&](mlir::Location loadLoc, mlir::Value mapSlot) {
+              // The identity licenses this load because iterator increment
+              // performs the same load whenever it enters a block
+              return builder.createLoad(loadLoc, mapSlot);
+            };
+            auto scanSpan = [&](mlir::Location scanLoc, mlir::Value begin,
+                                mlir::Value end, mlir::Value mapSlot) {
+              mlir::Value hasElements = builder.createCompare(
+                  scanLoc, cir::CmpOpKind::ne, begin, end);
+              cir::TernaryOp::create(
+                  builder, scanLoc, hasElements,
+                  [&](mlir::OpBuilder &, mlir::Location callLoc) {
+                    mlir::Value len = cir::PtrDiffOp::create(
+                        builder, callLoc, sizeTy, end, begin);
+                    mlir::Value hit;
+                    if (wide) {
+                      mlir::Value src = begin;
+                      mlir::Value pattern = sought;
+                      if (callElemTy != elemTy) {
+                        src = builder.createBitcast(callLoc, begin, callIterTy);
+                        pattern = builder.createIntCast(sought, callElemTy);
+                      }
+                      hit = cir::WMemChrOp::create(builder, callLoc, src,
+                                                   pattern, len);
+                      if (callElemTy != elemTy)
+                        hit = builder.createBitcast(callLoc, hit, elemPtrTy);
+                    } else {
+                      mlir::Value src = builder.createBitcast(
+                          callLoc, begin, builder.getVoidPtrTy());
+                      mlir::Value pattern = builder.createIntCast(
+                          sought, builder.getSIntNTy(patternWidth));
+                      hit = cir::MemChrOp::create(builder, callLoc, src,
+                                                  pattern, len);
+                      hit = builder.createBitcast(callLoc, hit, elemPtrTy);
+                    }
+                    mlir::Value hasHit = builder.createNot(
+                        callLoc, builder.createPtrIsNull(hit));
+                    cir::TernaryOp::create(
+                        builder, callLoc, hasHit,
+                        [&](mlir::OpBuilder &, mlir::Location hitLoc) {
+                          builder.createStore(hitLoc, hit, foundPointerAddr);
+                          builder.createStore(hitLoc, mapSlot, foundMapAddr);
+                          builder.createStore(hitLoc, builder.getTrue(hitLoc),
+                                              foundAddr);
+                          builder.createYield(hitLoc);
+                        },
+                        [&](mlir::OpBuilder &, mlir::Location missLoc) {
+                          builder.createYield(missLoc);
+                        });
+                    builder.createYield(callLoc);
+                  },
+                  [&](mlir::OpBuilder &, mlir::Location skipLoc) {
+                    builder.createYield(skipLoc);
+                  });
+            };
+
+            cir::TernaryOp::create(
+                builder, walkLoc, sameMap,
+                [&](mlir::OpBuilder &, mlir::Location sameLoc) {
+                  scanSpan(sameLoc, firstCurrent, lastCurrent, firstMap);
+                  builder.createYield(sameLoc);
+                },
+                [&](mlir::OpBuilder &, mlir::Location differentLoc) {
+                  mlir::Value firstBlock = loadBlock(differentLoc, firstMap);
+                  mlir::Value firstBlockEnd =
+                      advance(differentLoc, firstBlock, blockCount);
+                  scanSpan(differentLoc, firstCurrent, firstBlockEnd, firstMap);
+
+                  mlir::Value foundFirst =
+                      builder.createLoad(differentLoc, foundAddr);
+                  mlir::Value nextMap = advance(differentLoc, firstMap, one);
+                  builder.createStore(differentLoc,
+                                      builder.createSelect(differentLoc,
+                                                           foundFirst, lastMap,
+                                                           nextMap),
+                                      currentMapAddr);
+                  builder.createWhile(
+                      differentLoc,
+                      [&](mlir::OpBuilder &, mlir::Location conditionLoc) {
+                        mlir::Value currentMap =
+                            builder.createLoad(conditionLoc, currentMapAddr);
+                        builder.createCondition(builder.createCompare(
+                            conditionLoc, cir::CmpOpKind::ne, currentMap,
+                            lastMap));
+                      },
+                      [&](mlir::OpBuilder &, mlir::Location bodyLoc) {
+                        mlir::Value currentMap =
+                            builder.createLoad(bodyLoc, currentMapAddr);
+                        mlir::Value block = loadBlock(bodyLoc, currentMap);
+                        scanSpan(bodyLoc, block,
+                                 advance(bodyLoc, block, blockCount),
+                                 currentMap);
+                        mlir::Value found =
+                            builder.createLoad(bodyLoc, foundAddr);
+                        mlir::Value followingMap =
+                            advance(bodyLoc, currentMap, one);
+                        builder.createStore(bodyLoc,
+                                            builder.createSelect(bodyLoc, found,
+                                                                 lastMap,
+                                                                 followingMap),
+                                            currentMapAddr);
+                        builder.createYield(bodyLoc);
+                      });
+
+                  mlir::Value foundBeforeLast =
+                      builder.createLoad(differentLoc, foundAddr);
+                  cir::TernaryOp::create(
+                      builder, differentLoc,
+                      builder.createNot(differentLoc, foundBeforeLast),
+                      [&](mlir::OpBuilder &, mlir::Location lastLoc) {
+                        mlir::Value lastBlock = loadBlock(lastLoc, lastMap);
+                        scanSpan(lastLoc, lastBlock, lastCurrent, lastMap);
+                        builder.createYield(lastLoc);
+                      },
+                      [&](mlir::OpBuilder &, mlir::Location skipLoc) {
+                        builder.createYield(skipLoc);
+                      });
+                  builder.createYield(differentLoc);
+                });
+
+            mlir::Value found = builder.createLoad(walkLoc, foundAddr);
+            mlir::Value walkResult =
+                cir::TernaryOp::create(
+                    builder, walkLoc, found,
+                    [&](mlir::OpBuilder &, mlir::Location hitLoc) {
+                      mlir::Value hitPointer =
+                          builder.createLoad(hitLoc, foundPointerAddr);
+                      mlir::Value hitMap =
+                          builder.createLoad(hitLoc, foundMapAddr);
+                      mlir::Value rebuilt = findOp.getLast();
+                      rebuilt = insertPath(hitLoc, rebuilt, currentPointerPath,
+                                           hitPointer);
+                      rebuilt =
+                          insertPath(hitLoc, rebuilt, mapPointerPath, hitMap);
+                      if (!blockFirstPointerPath.empty()) {
+                        mlir::Value block = loadBlock(hitLoc, hitMap);
+                        rebuilt = insertPath(hitLoc, rebuilt,
+                                             blockFirstPointerPath, block);
+                        rebuilt =
+                            insertPath(hitLoc, rebuilt, blockLastPointerPath,
+                                       advance(hitLoc, block, blockCount));
+                      }
+                      builder.createYield(hitLoc, rebuilt);
+                    },
+                    [&](mlir::OpBuilder &, mlir::Location missLoc) {
+                      builder.createYield(missLoc, findOp.getLast());
+                    })
+                    .getResult();
+            builder.createYield(walkLoc, walkResult);
+          })
+          .getResult();
+
+  findOp.getResult().replaceAllUsesWith(result);
+  findOp.erase();
+  if (wide)
+    ++numFindDequeToWmemchr;
+  else
+    ++numFindDequeToMemchr;
   return true;
 }
 
@@ -1339,16 +1712,29 @@ void LibOptPass::runOnOperation() {
   getOperation()->walk([&](mlir::Operation *op) {
     llvm::TypeSwitch<mlir::Operation *>(op)
         .Case<StdFindOp, StdRangesFindOp, StdRangesFindRangeOp>([&](auto find) {
+          if constexpr (std::is_same_v<decltype(find), StdFindOp>) {
+            if (rewriteFindDequeToBlockWalk(find, symbolTables,
+                                            numFindDequeToMemchr,
+                                            numFindDequeToWmemchr))
+              return;
+          }
           rewriteFindLikeToMemchr(find, symbolTables, numFindLikeToMemchr,
                                   numFindLikeToWmemchr);
         })
         .Case<StdFindIfOp, StdFindIfNotOp, StdRangesFindIfOp,
               StdRangesFindIfNotOp>([&](auto find) {
-          // The bit and byte rewrites accept disjoint iterator shapes, so
-          // whichever declines leaves the operation for the other.
-          if (!rewriteFindBitToWordScan(find, numFindBitToWordScan))
+          // The bit, deque, and byte rewrites accept disjoint iterator
+          // shapes, so whichever declines leaves the operation for the next.
+          if (!rewriteFindBitToWordScan(find, numFindBitToWordScan)) {
+            if constexpr (std::is_same_v<decltype(find), StdFindIfOp>) {
+              if (rewriteFindDequeToBlockWalk(find, symbolTables,
+                                              numFindDequeToMemchr,
+                                              numFindDequeToWmemchr))
+                return;
+            }
             rewriteFindLikeToMemchr(find, symbolTables, numFindLikeToMemchr,
                                     numFindLikeToWmemchr);
+          }
         })
         .Case<StdSearchOp>([&](auto search) {
           rewriteSearchToMemmem(search, symbolTables, numSearchToMemmem,

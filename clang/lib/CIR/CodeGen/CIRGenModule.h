@@ -827,8 +827,9 @@ public:
   /// Whether each parameter of `funcDecl` is a pointer, reference or
   /// standard library contiguous iterator designating the same non-volatile
   /// narrow character type, meaning char, signed char, unsigned char or
-  /// char8_t.
-  static bool hasNarrowCharParams(const clang::FunctionDecl *funcDecl);
+  /// char8_t. The iterator parameters of a standard find may instead be
+  /// deque iterators carrying the verified identity for the same element.
+  bool hasNarrowCharParams(const clang::FunctionDecl *funcDecl);
 
   /// Whether `funcDecl` is a call operator taking a narrow character
   /// iterator pair and value like std::find, plus an optional projection
@@ -836,21 +837,24 @@ public:
   static bool
   hasNarrowCharRangesFindParams(const clang::FunctionDecl *funcDecl);
 
-  /// The wide sibling of hasNarrowCharRangesFindParams, over the elements
-  /// hasWideCharParams accepts.
+  /// The wide sibling of hasNarrowCharRangesFindParams, over pointees that
+  /// are wchar_t or the plain signed or unsigned integer type of its width.
   static bool hasWideCharRangesFindParams(const clang::FunctionDecl *funcDecl);
 
   /// Whether `funcDecl` takes two narrow character iterators and a lambda
   /// proven to be a single equality comparison of the element against its
   /// only capture, with the polarity that makes a search of `kind` stop at
-  /// the first equal byte.
-  static bool hasByteEqPredicate(const clang::FunctionDecl *funcDecl,
-                                 cir::KnownFuncKind kind);
+  /// the first equal byte. For a standard find_if the iterators may instead
+  /// be deque iterators carrying the verified identity for the same
+  /// element.
+  bool hasByteEqPredicate(const clang::FunctionDecl *funcDecl,
+                          cir::KnownFuncKind kind);
 
-  /// The wide sibling of hasByteEqPredicate, over the elements
-  /// hasWideCharParams accepts.
-  static bool hasWideEqPredicate(const clang::FunctionDecl *funcDecl,
-                                 cir::KnownFuncKind kind);
+  /// The wide sibling of hasByteEqPredicate, over elements that are wchar_t
+  /// or the plain signed or unsigned integer type of its width, with the
+  /// same deque iterator allowance for a standard find_if.
+  bool hasWideEqPredicate(const clang::FunctionDecl *funcDecl,
+                          cir::KnownFuncKind kind);
 
   /// Whether a bit iterator predicate seeks its single boolean capture
   bool hasBoolEqPredicate(const clang::FunctionDecl *funcDecl,
@@ -863,8 +867,9 @@ public:
 
   /// Whether every parameter designates the same non-volatile wchar_t
   /// through a pointer, a reference, or a standard library contiguous
-  /// iterator.
-  static bool hasWideCharParams(const clang::FunctionDecl *funcDecl);
+  /// iterator. A standard find may instead use a deque iterator carrying the
+  /// verified identity for wchar_t or an integer of the target wchar width.
+  bool hasWideCharParams(const clang::FunctionDecl *funcDecl);
 
   /// Whether every iterator parameter of a mismatch overload designates
   /// the same wide element wideCharPointee accepts.
