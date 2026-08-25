@@ -1,0 +1,29 @@
+// RUN: cir-opt %s -cir-call-conv-lowering=target=x86_64 | FileCheck %s
+
+!s32i = !cir.int<s, 32>
+!s64i = !cir.int<s, 64>
+
+// A vtable pointer is one INTEGER class eightbyte to the classifier, so a
+// polymorphic record classifies the way classic CodeGen classifies it.
+// Whether the C++ level passes such a record by value at all is CIRGen's
+// decision, this pass only has to lower the types it receives.
+!rec_PackedPoly = !cir.struct<"PackedPoly" packed {data !cir.vptr, data !s32i}>
+!rec_PolyPair = !cir.struct<"PolyPair" {data !cir.vptr, data !s64i}>
+
+module attributes {cir.triple = "x86_64-unknown-linux-gnu",
+                   dlti.dl_spec = #dlti.dl_spec<i64 = dense<64> : vector<2xi64>, !cir.ptr<!cir.void> = #cir.ptr_spec<size = 64, abi = 64, preferred = 64, index = 64>, "dlti.endianness" = "little">} {
+  cir.func @take_packed(%arg0: !rec_PackedPoly) -> !rec_PackedPoly {
+    cir.return %arg0 : !rec_PackedPoly
+  }
+// The vptr eightbyte arrives as a void pointer and the int rides in the
+// second register.
+// CHECK: cir.func @take_packed(%arg0: !cir.ptr<!void>, %arg1: !s32i) -> !rec_anon_struct
+// CHECK: cir.get_member %{{.*}}[0] {name = ""} : !cir.ptr<!rec_anon_struct> -> !cir.ptr<!cir.ptr<!void>>
+// CHECK: cir.get_member %{{.*}}[1] {name = ""} : !cir.ptr<!rec_anon_struct> -> !cir.ptr<!s32i>
+// CHECK: cir.cast bitcast %{{.*}} : !cir.ptr<!rec_anon_struct> -> !cir.ptr<!rec_PackedPoly>
+
+  cir.func @take_pair(%arg0: !rec_PolyPair) -> !rec_PolyPair {
+    cir.return %arg0 : !rec_PolyPair
+  }
+// CHECK: cir.func @take_pair(%arg0: !cir.ptr<!void>, %arg1: !s64i) -> !rec_anon_struct1
+}

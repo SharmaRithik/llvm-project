@@ -134,6 +134,11 @@ static bool isSupportedType(mlir::Type ty, const DataLayout &dl) {
            mlir::isa<cir::TargetAddressSpaceAttr>(ptrTy.getAddrSpace());
   if (isa<cir::VoidType, cir::BoolType>(ty))
     return true;
+  // A vtable pointer is an ordinary data pointer to the classifier, one
+  // eightbyte of INTEGER class, so a polymorphic record classifies the
+  // way classic CodeGen classifies it.
+  if (isa<cir::VPtrType>(ty))
+    return true;
   // Every CIR floating-point type carries the semantics the classifier
   // switches on, so all of them are handled.
   if (isa<cir::FPTypeInterface>(ty))
@@ -289,6 +294,11 @@ static const llvm::abi::Type *mapCIRType(mlir::Type type,
         return tb.getIntegerType(intTy.getWidth(),
                                  llvm::Align(dl.getTypeABIAlignment(type)),
                                  intTy.isSigned(), intTy.getIsBitInt());
+      })
+      .Case([&](cir::VPtrType) {
+        return tb.getPointerType(dl.getTypeSizeInBits(type),
+                                 llvm::Align(dl.getTypeABIAlignment(type)),
+                                 /*AddrSpace=*/0);
       })
       .Case([&](cir::PointerType ptrTy) {
         unsigned addrSpace = 0;
