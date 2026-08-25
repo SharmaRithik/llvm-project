@@ -151,6 +151,141 @@ static mlir::Value emitMemCmpIsEqual(CIRBaseBuilderTy &builder,
   return builder.createCompare(loc, cir::CmpOpKind::eq, cmp, zero).getResult();
 }
 
+// The find_if family searches by an equality predicate, so its sought
+// element and licensing marker live in different places than the find
+// forms'.
+template <typename OpT>
+constexpr bool findsByEqPredicate =
+    std::is_same_v<OpT, StdFindIfOp> || std::is_same_v<OpT, StdFindIfNotOp> ||
+    std::is_same_v<OpT, StdRangesFindIfOp> ||
+    std::is_same_v<OpT, StdRangesFindIfNotOp>;
+
+// The sought element arrives behind the pattern reference for find. A
+// predicate either holds it in its single capture, by value or through a
+// reference, or carries it in the typed value attribute.
+template <typename OpT>
+static bool matchEqSoughtShape(OpT findOp, cir::IntType elemTy, bool wide,
+                               cir::IntAttr &predicateValue,
+                               bool &captureByRef) {
+  if constexpr (findsByEqPredicate<OpT>) {
+    predicateValue = findOp->template getAttrOfType<cir::IntAttr>(
+        wide ? cir::CIRDialect::getWideEqPredValueAttrName()
+             : cir::CIRDialect::getByteEqPredValueAttrName());
+    if (predicateValue)
+      return predicateValue.getType() == elemTy;
+    auto closureTy =
+        mlir::dyn_cast<cir::RecordType>(findOp.getPred().getType());
+    if (!closureTy || closureTy.isUnion() || !closureTy.isComplete() ||
+        closureTy.getMembers().size() != 1)
+      return false;
+    mlir::Type capTy = closureTy.getMembers()[0];
+    if (auto capPtrTy = mlir::dyn_cast<cir::PointerType>(capTy)) {
+      if (capPtrTy.getAddrSpace() || capPtrTy.getPointee() != elemTy)
+        return false;
+      captureByRef = true;
+      return true;
+    }
+    return capTy == elemTy;
+  } else {
+    auto patternPtrTy =
+        mlir::dyn_cast<cir::PointerType>(findOp.getPattern().getType());
+    return patternPtrTy && patternPtrTy.getPointee() == elemTy;
+  }
+}
+
+// Only the CIRGen facts license a rewrite, since an enum or atomic element
+// also lowers to a byte-wide integer and a closure of the right shape can
+// compute anything.
+template <typename OpT>
+static bool hasEqSearchMarker(OpT findOp, bool wide,
+                              cir::IntAttr predicateValue) {
+  if constexpr (findsByEqPredicate<OpT>) {
+    if (predicateValue)
+      return true;
+    return static_cast<bool>(findOp->template getAttrOfType<mlir::UnitAttr>(
+        wide ? cir::CIRDialect::getWideEqPredAttrName()
+             : cir::CIRDialect::getByteEqPredAttrName()));
+  } else {
+    return static_cast<bool>(findOp->template getAttrOfType<mlir::UnitAttr>(
+        wide ? cir::CIRDialect::getWideCharParamsAttrName()
+             : cir::CIRDialect::getNarrowCharParamsAttrName()));
+  }
+}
+
+// The introduced operands take the widths the module records, which is
+// what the introduced operation's verifier checks them against, int and
+// size_t for memchr, wchar_t and size_t for wmemchr. An element that is
+// not the target's wide character has no libcall and declines here.
+static bool resolveMemchrWidths(mlir::ModuleOp moduleOp,
+                                const llvm::Triple &triple, bool wide,
+                                cir::IntType elemTy, unsigned &patternWidth,
+                                unsigned &sizeWidth) {
+  std::optional<unsigned> recordedPattern = cir::getRecordedIntegerWidth(
+      moduleOp, wide ? cir::CIRDialect::getWCharTypeWidthAttrName()
+                     : cir::CIRDialect::getIntTypeWidthAttrName());
+  std::optional<unsigned> recordedSize = cir::getRecordedIntegerWidth(
+      moduleOp, cir::CIRDialect::getSizeTypeWidthAttrName());
+  if (!recordedPattern || !recordedSize)
+    return false;
+  // A program built with a nonstandard wchar_t width still links the C
+  // library selected by the triple, and that library's wmemchr walks the
+  // triple's default width. The recorded module attribute answers the
+  // program side question instead, so comparing both is deliberate rather
+  // than a substitute for recording the width.
+  if (wide && *recordedPattern != triple.getDefaultWCharSize() * 8)
+    return false;
+  // Hand written IR can claim the wide character marker while using an
+  // element whose width disagrees with the recorded width.
+  if (wide && *recordedPattern != elemTy.getWidth())
+    return false;
+  patternWidth = *recordedPattern;
+  sizeWidth = *recordedSize;
+  return true;
+}
+
+// The element the call is typed at. For wide it starts as the searched
+// element, but a module may already declare wmemchr at the same width
+// with the other signedness, as a real standard library header does
+// whenever a plain wide find instantiates its own dispatch. Equality of
+// wide elements is bit equality, which is what licensed the rewrite, so
+// the call adopts the declared signedness and casts at the boundary
+// rather than decline.
+static bool resolveMemchrCallTypes(CIRBaseBuilderTy &builder,
+                                   mlir::ModuleOp moduleOp,
+                                   mlir::SymbolTableCollection &symbolTables,
+                                   bool wide, llvm::StringRef libcallName,
+                                   unsigned patternWidth, unsigned sizeWidth,
+                                   cir::IntType elemTy, cir::PointerType iterTy,
+                                   cir::IntType &callElemTy,
+                                   cir::PointerType &callIterTy) {
+  callElemTy = elemTy;
+  callIterTy = iterTy;
+  auto makeWideTy = [&](cir::IntType eTy, cir::PointerType pTy) {
+    return cir::FuncType::get(
+        {mlir::Type(pTy), mlir::Type(eTy), builder.getUIntNTy(sizeWidth)}, pTy);
+  };
+  cir::FuncType libcallTy =
+      wide ? makeWideTy(callElemTy, callIterTy)
+           : cir::FuncType::get({builder.getVoidPtrTy(),
+                                 builder.getSIntNTy(patternWidth),
+                                 builder.getUIntNTy(sizeWidth)},
+                                builder.getVoidPtrTy());
+  if (sharesLibCallSymbol(moduleOp, symbolTables, libcallName, libcallTy))
+    return true;
+  if (!wide)
+    return false;
+  cir::IntType flippedTy = elemTy.isSigned()
+                               ? builder.getUIntNTy(elemTy.getWidth())
+                               : builder.getSIntNTy(elemTy.getWidth());
+  auto flippedPtrTy = cir::PointerType::get(flippedTy);
+  if (!sharesLibCallSymbol(moduleOp, symbolTables, libcallName,
+                           makeWideTy(flippedTy, flippedPtrTy)))
+    return false;
+  callElemTy = flippedTy;
+  callIterTy = flippedPtrTy;
+  return true;
+}
+
 // Rewrites cir.std.find, cir.std.ranges.find, cir.std.ranges.find_range,
 // and the byte equality predicate forms of cir.std.find_if,
 // cir.std.find_if_not, cir.std.ranges.find_if, and
@@ -165,10 +300,7 @@ static void
 rewriteFindLikeToMemchr(OpT findOp, mlir::SymbolTableCollection &symbolTables,
                         mlir::Pass::Statistic &numFindLikeToMemchr,
                         mlir::Pass::Statistic &numFindLikeToWmemchr) {
-  constexpr bool predOp = std::is_same_v<OpT, StdFindIfOp> ||
-                          std::is_same_v<OpT, StdFindIfNotOp> ||
-                          std::is_same_v<OpT, StdRangesFindIfOp> ||
-                          std::is_same_v<OpT, StdRangesFindIfNotOp>;
+  constexpr bool predOp = findsByEqPredicate<OpT>;
   constexpr bool rangeOp = std::is_same_v<OpT, StdRangesFindRangeOp>;
   // A std contiguous iterator wraps the pointer as its only member.  The
   // narrow character fact CIRGen recorded is what licenses reading that
@@ -190,39 +322,10 @@ rewriteFindLikeToMemchr(OpT findOp, mlir::SymbolTableCollection &symbolTables,
   if (wide && rangeOp)
     return;
   const llvm::StringRef libcallName = wide ? "wmemchr" : "memchr";
-  // The sought element arrives behind the pattern reference for find. A
-  // predicate either holds it in its single capture, by value or through a
-  // reference, or carries it in the typed value attribute.
   bool captureByRef = false;
   cir::IntAttr predicateValue;
-  if constexpr (predOp) {
-    predicateValue = findOp->template getAttrOfType<cir::IntAttr>(
-        wide ? cir::CIRDialect::getWideEqPredValueAttrName()
-             : cir::CIRDialect::getByteEqPredValueAttrName());
-    if (predicateValue) {
-      if (predicateValue.getType() != elemTy)
-        return;
-    } else {
-      auto closureTy =
-          mlir::dyn_cast<cir::RecordType>(findOp.getPred().getType());
-      if (!closureTy || closureTy.isUnion() || !closureTy.isComplete() ||
-          closureTy.getMembers().size() != 1)
-        return;
-      mlir::Type capTy = closureTy.getMembers()[0];
-      if (auto capPtrTy = mlir::dyn_cast<cir::PointerType>(capTy)) {
-        if (capPtrTy.getAddrSpace() || capPtrTy.getPointee() != elemTy)
-          return;
-        captureByRef = true;
-      } else if (capTy != elemTy) {
-        return;
-      }
-    }
-  } else {
-    auto patternPtrTy =
-        mlir::dyn_cast<cir::PointerType>(findOp.getPattern().getType());
-    if (!patternPtrTy || patternPtrTy.getPointee() != elemTy)
-      return;
-  }
+  if (!matchEqSoughtShape(findOp, elemTy, wide, predicateValue, captureByRef))
+    return;
 
   // The whole range form owns no bounds operands. Its record's standard
   // library identity names the element and the member paths to the two
@@ -256,80 +359,24 @@ rewriteFindLikeToMemchr(OpT findOp, mlir::SymbolTableCollection &symbolTables,
   if (!env)
     return;
 
-  // Only the CIRGen facts license the rewrite, since an enum or atomic element
-  // also lowers to a byte-wide integer and a closure of the right shape can
-  // compute anything.
-  if constexpr (predOp) {
-    if (!predicateValue && !findOp->template getAttrOfType<mlir::UnitAttr>(
-                               wide ? cir::CIRDialect::getWideEqPredAttrName()
-                                    : cir::CIRDialect::getByteEqPredAttrName()))
-      return;
-  } else if (!findOp->template getAttrOfType<mlir::UnitAttr>(
-                 wide ? cir::CIRDialect::getWideCharParamsAttrName()
-                      : cir::CIRDialect::getNarrowCharParamsAttrName())) {
+  if (!hasEqSearchMarker(findOp, wide, predicateValue))
     return;
-  }
 
   mlir::ModuleOp moduleOp = env->moduleOp;
 
-  // The introduced operands take the widths the module records, which is
-  // what the introduced operation's verifier checks them against: int and
-  // size_t for memchr, wchar_t and size_t for wmemchr. An element that is
-  // not the target's wide character has no libcall and declines here.
-  std::optional<unsigned> patternWidth = cir::getRecordedIntegerWidth(
-      moduleOp, wide ? cir::CIRDialect::getWCharTypeWidthAttrName()
-                     : cir::CIRDialect::getIntTypeWidthAttrName());
-  std::optional<unsigned> sizeWidth = cir::getRecordedIntegerWidth(
-      moduleOp, cir::CIRDialect::getSizeTypeWidthAttrName());
-  if (!patternWidth || !sizeWidth)
-    return;
-  // A program built with a nonstandard wchar_t width still links the C
-  // library selected by the triple, and that library's wmemchr walks the
-  // triple's default width. The recorded module attribute answers the
-  // program side question instead, so comparing both is deliberate rather
-  // than a substitute for recording the width.
-  if (wide && *patternWidth != env->triple.getDefaultWCharSize() * 8)
-    return;
-  // Hand written IR can claim the wide character marker while using an
-  // element whose width disagrees with the recorded width.
-  if (wide && *patternWidth != elemTy.getWidth())
+  unsigned patternWidth, sizeWidth;
+  if (!resolveMemchrWidths(moduleOp, env->triple, wide, elemTy, patternWidth,
+                           sizeWidth))
     return;
 
   CIRBaseBuilderTy builder(*findOp.getContext());
 
-  // The element the call is typed at. For wide it starts as the searched
-  // element, but a module may already declare wmemchr at the same width
-  // with the other signedness, as a real standard library header does
-  // whenever a plain wide find instantiates its own dispatch. Equality of
-  // wide elements is bit equality, which is what licensed the rewrite, so
-  // the call adopts the declared signedness and casts at the boundary
-  // rather than decline.
-  cir::IntType callElemTy = elemTy;
-  cir::PointerType callIterTy = iterTy;
-  auto makeWideTy = [&](cir::IntType eTy, cir::PointerType pTy) {
-    return cir::FuncType::get(
-        {mlir::Type(pTy), mlir::Type(eTy), builder.getUIntNTy(*sizeWidth)},
-        pTy);
-  };
-  cir::FuncType libcallTy =
-      wide ? makeWideTy(callElemTy, callIterTy)
-           : cir::FuncType::get({builder.getVoidPtrTy(),
-                                 builder.getSIntNTy(*patternWidth),
-                                 builder.getUIntNTy(*sizeWidth)},
-                                builder.getVoidPtrTy());
-  if (!sharesLibCallSymbol(moduleOp, symbolTables, libcallName, libcallTy)) {
-    if (!wide)
-      return;
-    cir::IntType flippedTy = elemTy.isSigned()
-                                 ? builder.getUIntNTy(elemTy.getWidth())
-                                 : builder.getSIntNTy(elemTy.getWidth());
-    auto flippedPtrTy = cir::PointerType::get(flippedTy);
-    if (!sharesLibCallSymbol(moduleOp, symbolTables, libcallName,
-                             makeWideTy(flippedTy, flippedPtrTy)))
-      return;
-    callElemTy = flippedTy;
-    callIterTy = flippedPtrTy;
-  }
+  cir::IntType callElemTy;
+  cir::PointerType callIterTy;
+  if (!resolveMemchrCallTypes(builder, moduleOp, symbolTables, wide,
+                              libcallName, patternWidth, sizeWidth, elemTy,
+                              iterTy, callElemTy, callIterTy))
+    return;
 
   mlir::Location loc = findOp.getLoc();
   builder.setInsertionPointAfter(findOp);
@@ -383,7 +430,7 @@ rewriteFindLikeToMemchr(OpT findOp, mlir::SymbolTableCollection &symbolTables,
               sought = builder.createLoad(loc, findOp.getPattern());
             }
             mlir::Value len = cir::PtrDiffOp::create(
-                builder, loc, builder.getUIntNTy(*sizeWidth), last, first);
+                builder, loc, builder.getUIntNTy(sizeWidth), last, first);
             mlir::Value res;
             if (wide) {
               // wmemchr takes and returns the wide type itself and len
@@ -402,7 +449,7 @@ rewriteFindLikeToMemchr(OpT findOp, mlir::SymbolTableCollection &symbolTables,
               mlir::Value src =
                   builder.createBitcast(loc, first, builder.getVoidPtrTy());
               mlir::Value pattern = builder.createIntCast(
-                  sought, builder.getSIntNTy(*patternWidth));
+                  sought, builder.getSIntNTy(patternWidth));
               res = cir::MemChrOp::create(builder, loc, src, pattern, len);
               res = builder.createBitcast(loc, res, iterTy);
             }
