@@ -60,6 +60,11 @@ def CIR_Dialect : Dialect {
     static llvm::StringRef getByteEqPredValueAttrName() {
       return "cir.byte_eq_pred_value";
     }
+    // Marks a plain find over bit iterators whose sought value is a
+    // referenced bool
+    static llvm::StringRef getBoolParamsAttrName() {
+      return "cir.bool_params";
+    }
     // Marks a bit iterator predicate that seeks its single boolean capture
     static llvm::StringRef getBoolEqPredAttrName() {
       return "cir.bool_eq_pred";

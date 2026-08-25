@@ -64,6 +64,18 @@ module attributes {cir.triple = "x86_64-unknown-linux-gnu",
     %4 = cir.std.find_if(%1 : !biter, %2 : !biter, %3 : !closure, @_ZSt7find_ifB) -> !biter {cir.bool_eq_pred_value = true}
     cir.store %4, %0 : !biter, !cir.ptr<!biter>
   }
+  cir.func private @_ZSt4findB(!biter, !biter, !cir.ptr<!cir.bool>) -> !biter func_info<#cir.func_identity<"std::find">>
+
+  cir.func @transforms_value_form(%first: !biter, %last: !biter, %value: !cir.ptr<!cir.bool>) -> !biter {
+    %0 = cir.std.find(%first : !biter, %last : !biter, %value : !cir.ptr<!cir.bool>, @_ZSt4findB) -> !biter {cir.bool_params}
+    cir.return %0 : !biter
+  }
+
+  cir.func @keeps_without_bool_params(%first: !biter, %last: !biter, %value: !cir.ptr<!cir.bool>) -> !biter {
+    %0 = cir.std.find(%first : !biter, %last : !biter, %value : !cir.ptr<!cir.bool>, @_ZSt4findB) -> !biter
+    cir.return %0 : !biter
+  }
+
 }
 
 // A marked constant sought find_if becomes the masked word loop.
@@ -122,4 +134,13 @@ module attributes {cir.triple = "x86_64-unknown-linux-gnu",
 // initializer keeps the call.
 // CHECK-LABEL: cir.global external @global_bits = ctor
 // CHECK: cir.std.find_if
+// CHECK-NOT: cir.ctz
+
+// CHECK-LABEL: cir.func @transforms_value_form
+// CHECK: %[[SOUGHT:.*]] = cir.load %arg2 : !cir.ptr<!cir.bool>, !cir.bool
+// CHECK: cir.ctz
+// CHECK-NOT: cir.std.find
+
+// CHECK-LABEL: cir.func @keeps_without_bool_params
+// CHECK: cir.std.find
 // CHECK-NOT: cir.ctz

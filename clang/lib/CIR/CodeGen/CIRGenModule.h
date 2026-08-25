@@ -855,6 +855,10 @@ public:
   bool hasBoolEqPredicate(const clang::FunctionDecl *funcDecl,
                           cir::KnownFuncKind kind);
 
+  /// Whether `funcDecl` is a standard find over two bit iterators
+  /// carrying the verified identity for bool with a referenced bool value
+  bool hasBoolFindParams(const clang::FunctionDecl *funcDecl);
+
   /// Whether the record is an instantiation of its primary class
   /// template rather than of a partial or explicit specialization.
   static bool isPrimaryTemplateInstantiation(
