@@ -1293,8 +1293,58 @@ CIRABIRewriteContext::rewriteCallSite(mlir::Operation *callOp,
                      !load.getAddr().getDefiningOp<cir::AllocaOp>() ||
                      load->getBlock() != call->getBlock()))
           load = cir::LoadOp();
+        // Most CIR operations declare no memory effect interface, so the
+        // shapes that sit between the operand load and the call are named
+        // rather than treated as writers. CIRGen materializes the other
+        // call operands there and this rewrite inserts its own coercion
+        // slots and stores, reaching some of them through casts. A write
+        // whose destination is a view of a different alloca cannot reach
+        // this slot's storage since distinct allocas never alias.
+        mlir::Operation *slotAlloca =
+            load ? load.getAddr().getDefiningOp<cir::AllocaOp>() : nullptr;
+        auto isDistinctAllocaWrite = [&](mlir::Value dst) {
+          while (mlir::Operation *def = dst.getDefiningOp()) {
+            if (mlir::isa<cir::AllocaOp>(def))
+              return def != slotAlloca;
+            if (auto castOp = mlir::dyn_cast<cir::CastOp>(def)) {
+              dst = castOp.getSrc();
+              continue;
+            }
+            if (auto stride = mlir::dyn_cast<cir::PtrStrideOp>(def)) {
+              dst = stride.getBase();
+              continue;
+            }
+            if (auto member = mlir::dyn_cast<cir::GetMemberOp>(def)) {
+              dst = member.getAddr();
+              continue;
+            }
+            return false;
+          }
+          return false;
+        };
         for (mlir::Operation *it = load ? load->getNextNode() : nullptr;
              it && it != call.getOperation(); it = it->getNextNode()) {
+          if (auto otherLoad = mlir::dyn_cast<cir::LoadOp>(it)) {
+            if (!otherLoad.getIsVolatile() && !otherLoad.getMemOrder())
+              continue;
+            load = cir::LoadOp();
+            break;
+          }
+          if (mlir::isa<cir::AllocaOp>(it))
+            continue;
+          if (auto store = mlir::dyn_cast<cir::StoreOp>(it)) {
+            if (!store.getIsVolatile() && !store.getMemOrder() &&
+                isDistinctAllocaWrite(store.getAddr()))
+              continue;
+            load = cir::LoadOp();
+            break;
+          }
+          if (auto copy = mlir::dyn_cast<cir::CopyOp>(it)) {
+            if (!copy.getIsVolatile() && isDistinctAllocaWrite(copy.getDst()))
+              continue;
+            load = cir::LoadOp();
+            break;
+          }
           auto mem = mlir::dyn_cast<mlir::MemoryEffectOpInterface>(it);
           if (mem && !mem.hasEffect<mlir::MemoryEffects::Write>() &&
               !mem.hasEffect<mlir::MemoryEffects::Free>())
@@ -1355,8 +1405,21 @@ CIRABIRewriteContext::rewriteCallSite(mlir::Operation *callOp,
         newArgs.push_back(load.getAddr());
         replacedWholeLoads.push_back(load);
       } else {
-        // A byref operand that is not such a load has no addressable
-        // original, so the slot itself is the argument object.
+        // A byref operand carries the identity of a C++ argument object,
+        // so a value copy into a fresh slot would split the object the
+        // callee mutates from the object the caller destroys. An operand
+        // that traces to a local alloca is such an object whatever
+        // initialized it, so declining its reuse is a hard error naming
+        // an emission shape the analysis above must learn.
+        if (!ac.byVal) {
+          auto wholeLoad = arg.getDefiningOp<cir::LoadOp>();
+          if (wholeLoad && wholeLoad.getAddr().getDefiningOp<cir::AllocaOp>())
+            return call.emitError()
+                   << "byref argument traces to a local object whose "
+                      "address cannot be reused";
+        }
+        // A byref operand that does not trace to an alloca has no
+        // addressable original, so the slot itself is the argument object.
         mlir::Type argTy = arg.getType();
         auto ptrTy = cir::PointerType::get(argTy);
         uint64_t align = ac.indirectAlign.value();

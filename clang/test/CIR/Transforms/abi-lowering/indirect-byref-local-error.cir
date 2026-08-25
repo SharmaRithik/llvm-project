@@ -1,0 +1,247 @@
+// RUN: cir-opt %s -split-input-file -cir-call-conv-lowering="classification-attr=test_classify" \
+// RUN:   -verify-diagnostics
+
+// A byref operand carries the identity of a C++ argument object, so a
+// value copy into a fresh slot would split the object the callee mutates
+// from the object the caller destroys. Every operand below traces to a
+// local alloca, so when a use pattern blocks address reuse the pass
+// reports it instead of emitting the copy.
+
+!s64i = !cir.int<s, 64>
+!u64i = !cir.int<u, 64>
+!rec_Big = !cir.struct<"Big" {data !s64i, data !s64i, data !s64i, data !s64i}>
+
+
+#byref_arg = {
+  return = { kind = "direct" },
+  args   = [ { kind = "indirect", indirect_align = 8, byval = false } ]
+}
+
+#passthrough = {
+  return = { kind = "direct" },
+  args   = [ ]
+}
+
+#passthrough_ptr = {
+  return = { kind = "direct" },
+  args   = [ { kind = "direct" } ]
+}
+
+module attributes {
+  dlti.dl_spec = #dlti.dl_spec<
+    #dlti.dl_entry<i8, dense<8>: vector<2xi64>>,
+    #dlti.dl_entry<i64, dense<64>: vector<2xi64>>>
+} {
+  cir.func private @big_ctor(!cir.ptr<!rec_Big>) func_info<#cir.cxx_ctor<!rec_Big, default>> attributes { test_classify = #passthrough_ptr }
+
+  cir.func @takes_big_byref(%arg0: !rec_Big)
+      attributes { test_classify = #byref_arg } {
+    cir.return
+  }
+
+// The read of the temporary after the call blocks address reuse.
+  cir.func @caller_ctor_temp_observed(%v: !rec_Big) -> !s64i
+      attributes { test_classify = #passthrough } {
+    %0 = cir.alloca "agg.tmp" align(8) : !cir.ptr<!rec_Big>
+    cir.call @big_ctor(%0) : (!cir.ptr<!rec_Big>) -> ()
+    %1 = cir.load %0 : !cir.ptr<!rec_Big>, !rec_Big
+    // expected-error @below {{byref argument traces to a local object whose address cannot be reused}}
+    cir.call @takes_big_byref(%1) : (!rec_Big) -> ()
+    %m = cir.get_member %0[0] {name = "a"} : !cir.ptr<!rec_Big> -> !cir.ptr<!s64i>
+    %x = cir.load %m : !cir.ptr<!s64i>, !s64i
+    cir.return %x : !s64i
+  }
+}
+
+// -----
+
+!s64i = !cir.int<s, 64>
+!u64i = !cir.int<u, 64>
+!rec_Big = !cir.struct<"Big" {data !s64i, data !s64i, data !s64i, data !s64i}>
+
+
+#byref_arg = {
+  return = { kind = "direct" },
+  args   = [ { kind = "indirect", indirect_align = 8, byval = false } ]
+}
+
+#passthrough = {
+  return = { kind = "direct" },
+  args   = [ ]
+}
+
+#passthrough_ptr = {
+  return = { kind = "direct" },
+  args   = [ { kind = "direct" } ]
+}
+
+module attributes {
+  dlti.dl_spec = #dlti.dl_spec<
+    #dlti.dl_entry<i8, dense<8>: vector<2xi64>>,
+    #dlti.dl_entry<i64, dense<64>: vector<2xi64>>>
+} {
+  cir.func private @big_ctor(!cir.ptr<!rec_Big>) func_info<#cir.cxx_ctor<!rec_Big, default>> attributes { test_classify = #passthrough_ptr }
+
+  cir.func @takes_big_byref(%arg0: !rec_Big)
+      attributes { test_classify = #byref_arg } {
+    cir.return
+  }
+
+  // A write to the temporary between the load and the call.
+  cir.func @caller_byref_clobbered_temp(%v: !rec_Big, %w: !rec_Big)
+      attributes { test_classify = #passthrough } {
+    %0 = cir.alloca "agg.tmp" align(8) : !cir.ptr<!rec_Big>
+    cir.store %v, %0 : !rec_Big, !cir.ptr<!rec_Big>
+    %1 = cir.load %0 : !cir.ptr<!rec_Big>, !rec_Big
+    cir.store %w, %0 : !rec_Big, !cir.ptr<!rec_Big>
+    // expected-error @below {{byref argument traces to a local object whose address cannot be reused}}
+    cir.call @takes_big_byref(%1) : (!rec_Big) -> ()
+    cir.return
+  }
+}
+
+// -----
+
+!s64i = !cir.int<s, 64>
+!u64i = !cir.int<u, 64>
+!rec_Big = !cir.struct<"Big" {data !s64i, data !s64i, data !s64i, data !s64i}>
+
+
+#byref_arg = {
+  return = { kind = "direct" },
+  args   = [ { kind = "indirect", indirect_align = 8, byval = false } ]
+}
+
+#passthrough = {
+  return = { kind = "direct" },
+  args   = [ ]
+}
+
+#passthrough_ptr = {
+  return = { kind = "direct" },
+  args   = [ { kind = "direct" } ]
+}
+
+module attributes {
+  dlti.dl_spec = #dlti.dl_spec<
+    #dlti.dl_entry<i8, dense<8>: vector<2xi64>>,
+    #dlti.dl_entry<i64, dense<64>: vector<2xi64>>>
+} {
+  cir.func private @big_ctor(!cir.ptr<!rec_Big>) func_info<#cir.cxx_ctor<!rec_Big, default>> attributes { test_classify = #passthrough_ptr }
+
+  cir.func @takes_big_byref(%arg0: !rec_Big)
+      attributes { test_classify = #byref_arg } {
+    cir.return
+  }
+
+  // An ordinary local read again after the call.
+  cir.func @caller_byref_local_observed(%v: !rec_Big) -> !s64i
+      attributes { test_classify = #passthrough } {
+    %0 = cir.alloca "local" align(8) : !cir.ptr<!rec_Big>
+    cir.store %v, %0 : !rec_Big, !cir.ptr<!rec_Big>
+    %1 = cir.load %0 : !cir.ptr<!rec_Big>, !rec_Big
+    // expected-error @below {{byref argument traces to a local object whose address cannot be reused}}
+    cir.call @takes_big_byref(%1) : (!rec_Big) -> ()
+    %m = cir.get_member %0[0] {name = "a"} : !cir.ptr<!rec_Big> -> !cir.ptr<!s64i>
+    %x = cir.load %m : !cir.ptr<!s64i>, !s64i
+    cir.return %x : !s64i
+  }
+}
+
+// -----
+
+!s64i = !cir.int<s, 64>
+!u64i = !cir.int<u, 64>
+!rec_Big = !cir.struct<"Big" {data !s64i, data !s64i, data !s64i, data !s64i}>
+
+
+#byref_arg = {
+  return = { kind = "direct" },
+  args   = [ { kind = "indirect", indirect_align = 8, byval = false } ]
+}
+
+#passthrough = {
+  return = { kind = "direct" },
+  args   = [ ]
+}
+
+#passthrough_ptr = {
+  return = { kind = "direct" },
+  args   = [ { kind = "direct" } ]
+}
+
+module attributes {
+  dlti.dl_spec = #dlti.dl_spec<
+    #dlti.dl_entry<i8, dense<8>: vector<2xi64>>,
+    #dlti.dl_entry<i64, dense<64>: vector<2xi64>>>
+} {
+  cir.func private @big_ctor(!cir.ptr<!rec_Big>) func_info<#cir.cxx_ctor<!rec_Big, default>> attributes { test_classify = #passthrough_ptr }
+
+  cir.func @takes_big_byref(%arg0: !rec_Big)
+      attributes { test_classify = #byref_arg } {
+    cir.return
+  }
+
+  // A pointer derived from the local before the call and read after it.
+  cir.func @caller_byref_derived_observed(%v: !rec_Big) -> !s64i
+      attributes { test_classify = #passthrough } {
+    %0 = cir.alloca "local" align(8) : !cir.ptr<!rec_Big>
+    cir.store %v, %0 : !rec_Big, !cir.ptr<!rec_Big>
+    %m = cir.get_member %0[0] {name = "a"} : !cir.ptr<!rec_Big> -> !cir.ptr<!s64i>
+    %1 = cir.load %0 : !cir.ptr<!rec_Big>, !rec_Big
+    // expected-error @below {{byref argument traces to a local object whose address cannot be reused}}
+    cir.call @takes_big_byref(%1) : (!rec_Big) -> ()
+    %x = cir.load %m : !cir.ptr<!s64i>, !s64i
+    cir.return %x : !s64i
+  }
+}
+
+// -----
+
+!s64i = !cir.int<s, 64>
+!u64i = !cir.int<u, 64>
+!rec_Big = !cir.struct<"Big" {data !s64i, data !s64i, data !s64i, data !s64i}>
+
+
+#byref_arg = {
+  return = { kind = "direct" },
+  args   = [ { kind = "indirect", indirect_align = 8, byval = false } ]
+}
+
+#passthrough = {
+  return = { kind = "direct" },
+  args   = [ ]
+}
+
+#passthrough_ptr = {
+  return = { kind = "direct" },
+  args   = [ { kind = "direct" } ]
+}
+
+module attributes {
+  dlti.dl_spec = #dlti.dl_spec<
+    #dlti.dl_entry<i8, dense<8>: vector<2xi64>>,
+    #dlti.dl_entry<i64, dense<64>: vector<2xi64>>>
+} {
+  cir.func private @big_ctor(!cir.ptr<!rec_Big>) func_info<#cir.cxx_ctor<!rec_Big, default>> attributes { test_classify = #passthrough_ptr }
+
+  cir.func @takes_big_byref(%arg0: !rec_Big)
+      attributes { test_classify = #byref_arg } {
+    cir.return
+  }
+
+  // An address laundered through an integer loses its provenance.
+  cir.func @caller_byref_intptr_escape(%v: !rec_Big) -> !s64i
+      attributes { test_classify = #passthrough } {
+    %0 = cir.alloca "local" align(8) : !cir.ptr<!rec_Big>
+    cir.store %v, %0 : !rec_Big, !cir.ptr<!rec_Big>
+    %a = cir.cast ptr_to_int %0 : !cir.ptr<!rec_Big> -> !u64i
+    %1 = cir.load %0 : !cir.ptr<!rec_Big>, !rec_Big
+    // expected-error @below {{byref argument traces to a local object whose address cannot be reused}}
+    cir.call @takes_big_byref(%1) : (!rec_Big) -> ()
+    %p = cir.cast int_to_ptr %a : !u64i -> !cir.ptr<!rec_Big>
+    %m = cir.get_member %p[0] {name = "a"} : !cir.ptr<!rec_Big> -> !cir.ptr<!s64i>
+    %x = cir.load %m : !cir.ptr<!s64i>, !s64i
+    cir.return %x : !s64i
+  }
+}
