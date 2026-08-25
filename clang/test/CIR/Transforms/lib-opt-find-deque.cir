@@ -1,0 +1,229 @@
+// RUN: cir-opt --cir-lib-opt -split-input-file %s -o %t
+// RUN: FileCheck %s --input-file=%t
+
+!s8i = !cir.int<s, 8>
+!iter = !cir.struct<class "std::_Deque_iterator<char>" {data !cir.ptr<!s8i>, data !cir.ptr<!s8i>, data !cir.ptr<!s8i>, data !cir.ptr<!cir.ptr<!s8i>>}, std_type_info = #cir.std_type_info<"std::deque_iterator", !s8i, roles {block_first_pointer = array<i32: 1>, block_last_pointer = array<i32: 2>, block_size = 512 : i64, current_pointer = array<i32: 0>, map_pointer = array<i32: 3>}>>
+
+module attributes {cir.triple = "x86_64-unknown-linux-gnu", cir.size_type_width = 64 : i32, cir.int_type_width = 32 : i32} {
+  cir.func private @find(!iter, !iter, !cir.ptr<!s8i>) -> !iter func_info<#cir.func_identity<"std::find">>
+
+  cir.func @transforms_narrow(%first: !iter, %last: !iter, %value: !cir.ptr<!s8i>) -> !iter {
+    %0 = cir.std.find(%first : !iter, %last : !iter, %value : !cir.ptr<!s8i>, @find) -> !iter {cir.narrow_char_params}
+    cir.return %0 : !iter
+  }
+}
+
+// CHECK-LABEL: cir.func @transforms_narrow
+// CHECK: %[[FIRST_CURRENT:.*]] = cir.extract_member %arg0[0]
+// CHECK: %[[LAST_CURRENT:.*]] = cir.extract_member %arg1[0]
+// CHECK: %[[FIRST_MAP:.*]] = cir.extract_member %arg0[3]
+// CHECK: %[[LAST_MAP:.*]] = cir.extract_member %arg1[3]
+// CHECK: %[[SAME_MAP:.*]] = cir.cmp eq %[[FIRST_MAP]], %[[LAST_MAP]]
+// CHECK: %[[FOUND_PTR_ADDR:.*]] = cir.alloca "find_deque_pointer"
+// CHECK: %[[FOUND_MAP_ADDR:.*]] = cir.alloca "find_deque_map"
+// CHECK: cir.ternary(%[[SAME_MAP]], true {
+// CHECK: cir.ptr_diff %[[LAST_CURRENT]], %[[FIRST_CURRENT]]
+// CHECK: cir.libc.memchr
+// CHECK: }, false {
+// CHECK: %[[FIRST_BLOCK:.*]] = cir.load %[[FIRST_MAP]]
+// CHECK: %[[FIRST_BLOCK_END:.*]] = cir.ptr_stride %[[FIRST_BLOCK]], %{{.*}}
+// CHECK: cir.ptr_diff %[[FIRST_BLOCK_END]], %[[FIRST_CURRENT]]
+// CHECK: cir.libc.memchr
+// CHECK: cir.while {
+// CHECK: } do {
+// CHECK: cir.libc.memchr
+// CHECK: cir.libc.memchr
+// CHECK: %[[HIT_PTR:.*]] = cir.load %[[FOUND_PTR_ADDR]]
+// CHECK: %[[HIT_MAP:.*]] = cir.load %[[FOUND_MAP_ADDR]]
+// CHECK: %[[HIT_CURRENT:.*]] = cir.insert_member %arg1[0], %[[HIT_PTR]]
+// CHECK: %[[HIT_NODE:.*]] = cir.insert_member %[[HIT_CURRENT]][3], %[[HIT_MAP]]
+// CHECK: %[[HIT_BLOCK:.*]] = cir.load %[[HIT_MAP]]
+// CHECK: %[[HIT_FIRST:.*]] = cir.insert_member %[[HIT_NODE]][1], %[[HIT_BLOCK]]
+// CHECK: %[[HIT_BLOCK_END:.*]] = cir.ptr_stride %[[HIT_BLOCK]], %{{.*}}
+// CHECK: cir.insert_member %[[HIT_FIRST]][2], %[[HIT_BLOCK_END]]
+// CHECK: }, false {
+// CHECK: cir.yield %arg1
+// CHECK-NOT: cir.std.find
+
+// -----
+
+!s32i = !cir.int<s, 32>
+!iter = !cir.struct<class "std::__1::__deque_iterator<wchar_t>" {data !cir.ptr<!cir.ptr<!s32i>>, data !cir.ptr<!s32i>}, std_type_info = #cir.std_type_info<"std::deque_iterator", !s32i, roles {block_size = 1024 : i64, current_pointer = array<i32: 1>, map_pointer = array<i32: 0>}>>
+
+module attributes {cir.triple = "x86_64-unknown-linux-gnu", cir.size_type_width = 64 : i32, cir.int_type_width = 32 : i32, cir.wchar_type_width = 32 : i32} {
+  cir.func private @wide_find(!iter, !iter, !cir.ptr<!s32i>) -> !iter func_info<#cir.func_identity<"std::find">>
+
+  cir.func @transforms_wide(%first: !iter, %last: !iter, %value: !cir.ptr<!s32i>) -> !iter {
+    %0 = cir.std.find(%first : !iter, %last : !iter, %value : !cir.ptr<!s32i>, @wide_find) -> !iter {cir.wide_char_params}
+    cir.return %0 : !iter
+  }
+}
+
+// CHECK-LABEL: cir.func @transforms_wide
+// CHECK: cir.libc.wmemchr
+// CHECK: cir.while {
+// CHECK: cir.libc.wmemchr
+// CHECK: cir.insert_member %arg1[1], %{{.*}}
+// CHECK: cir.insert_member %{{.*}}[0], %{{.*}}
+// CHECK-NOT: cir.std.find
+
+// -----
+
+!s8i = !cir.int<s, 8>
+
+!iter = !cir.struct<class "std::__1::__deque_iterator<char>" {data !cir.ptr<!cir.ptr<!s8i>>, data !cir.ptr<!s8i>}, std_type_info = #cir.std_type_info<"std::deque_iterator", !s8i, roles {block_size = 4096 : i64, current_pointer = array<i32: 1>, map_pointer = array<i32: 0>}>>
+!closure = !cir.struct<class "Closure" {data !cir.ptr<!s8i>}>
+
+module attributes {cir.triple = "x86_64-unknown-linux-gnu", cir.size_type_width = 64 : i32, cir.int_type_width = 32 : i32} {
+  cir.func private @find_if(!iter, !iter, !closure) -> !iter func_info<#cir.func_identity<"std::find_if">>
+
+  cir.func @transforms_find_if(%first: !iter, %last: !iter, %pred: !closure) -> !iter {
+    %0 = cir.std.find_if(%first : !iter, %last : !iter, %pred : !closure, @find_if) -> !iter {cir.byte_eq_pred}
+    cir.return %0 : !iter
+  }
+}
+
+// CHECK-LABEL: cir.func @transforms_find_if
+// CHECK: %[[CAPTURE:.*]] = cir.extract_member %arg2[0]
+// CHECK: %[[SOUGHT:.*]] = cir.load %[[CAPTURE]]
+// CHECK: cir.libc.memchr({{.*}}, %{{.*}}, %{{.*}})
+// CHECK: cir.while {
+// CHECK-NOT: cir.std.find_if
+
+// -----
+
+!s8i = !cir.int<s, 8>
+!s32i = !cir.int<s, 32>
+!iter = !cir.struct<class "inconsistent_identity" {data !cir.ptr<!s32i>, data !cir.ptr<!cir.ptr<!s32i>>}, std_type_info = #cir.std_type_info<"std::deque_iterator", !s8i, roles {block_size = 128 : i64, current_pointer = array<i32: 0>, map_pointer = array<i32: 1>}>>
+
+module attributes {cir.triple = "x86_64-unknown-linux-gnu", cir.size_type_width = 64 : i32, cir.int_type_width = 32 : i32} {
+  cir.func private @find(!iter, !iter, !cir.ptr<!s8i>) -> !iter func_info<#cir.func_identity<"std::find">>
+
+  cir.func @keeps_inconsistent_identity(%first: !iter, %last: !iter, %value: !cir.ptr<!s8i>) -> !iter {
+    %0 = cir.std.find(%first : !iter, %last : !iter, %value : !cir.ptr<!s8i>, @find) -> !iter {cir.narrow_char_params}
+    cir.return %0 : !iter
+  }
+}
+
+// CHECK-LABEL: cir.func @keeps_inconsistent_identity
+// CHECK: cir.std.find
+// CHECK-NOT: cir.libc.memchr
+
+// -----
+
+!s8i = !cir.int<s, 8>
+!iter = !cir.struct<class "missing_identity" {data !cir.ptr<!s8i>, data !cir.ptr<!cir.ptr<!s8i>>}>
+
+module attributes {cir.triple = "x86_64-unknown-linux-gnu", cir.size_type_width = 64 : i32, cir.int_type_width = 32 : i32} {
+  cir.func private @find(!iter, !iter, !cir.ptr<!s8i>) -> !iter func_info<#cir.func_identity<"std::find">>
+
+  cir.func @keeps_without_identity(%first: !iter, %last: !iter, %value: !cir.ptr<!s8i>) -> !iter {
+    %0 = cir.std.find(%first : !iter, %last : !iter, %value : !cir.ptr<!s8i>, @find) -> !iter {cir.narrow_char_params}
+    cir.return %0 : !iter
+  }
+}
+
+// CHECK-LABEL: cir.func @keeps_without_identity
+// CHECK: cir.std.find
+// CHECK-NOT: cir.libc.memchr
+
+// -----
+
+// An identity whose roles name fewer members than the record holds would
+// leave stale cached bounds in the rebuilt hit iterator, so the rewrite
+// declines it.
+!s8i = !cir.int<s, 8>
+!iter = !cir.struct<class "undercovering" {data !cir.ptr<!s8i>, data !cir.ptr<!s8i>, data !cir.ptr<!s8i>, data !cir.ptr<!cir.ptr<!s8i>>}, std_type_info = #cir.std_type_info<"std::deque_iterator", !s8i, roles {block_size = 512 : i64, current_pointer = array<i32: 0>, map_pointer = array<i32: 3>}>>
+
+module attributes {cir.triple = "x86_64-unknown-linux-gnu", cir.size_type_width = 64 : i32, cir.int_type_width = 32 : i32} {
+  cir.func private @find(!iter, !iter, !cir.ptr<!s8i>) -> !iter func_info<#cir.func_identity<"std::find">>
+
+  cir.func @keeps_undercovering_identity(%first: !iter, %last: !iter, %value: !cir.ptr<!s8i>) -> !iter {
+    %0 = cir.std.find(%first : !iter, %last : !iter, %value : !cir.ptr<!s8i>, @find) -> !iter {cir.narrow_char_params}
+    cir.return %0 : !iter
+  }
+}
+
+// CHECK-LABEL: cir.func @keeps_undercovering_identity
+// CHECK: cir.std.find
+// CHECK-NOT: cir.libc.memchr
+
+// -----
+
+// Overlapping role paths would let the cached bound refresh clobber the
+// hit current pointer, so the rewrite declines them.
+!s8i = !cir.int<s, 8>
+!iter = !cir.struct<class "overlapping" {data !cir.ptr<!s8i>, data !cir.ptr<!s8i>, data !cir.ptr<!s8i>, data !cir.ptr<!cir.ptr<!s8i>>}, std_type_info = #cir.std_type_info<"std::deque_iterator", !s8i, roles {block_first_pointer = array<i32: 0>, block_last_pointer = array<i32: 2>, block_size = 512 : i64, current_pointer = array<i32: 0>, map_pointer = array<i32: 3>}>>
+
+module attributes {cir.triple = "x86_64-unknown-linux-gnu", cir.size_type_width = 64 : i32, cir.int_type_width = 32 : i32} {
+  cir.func private @find(!iter, !iter, !cir.ptr<!s8i>) -> !iter func_info<#cir.func_identity<"std::find">>
+
+  cir.func @keeps_overlapping_roles(%first: !iter, %last: !iter, %value: !cir.ptr<!s8i>) -> !iter {
+    %0 = cir.std.find(%first : !iter, %last : !iter, %value : !cir.ptr<!s8i>, @find) -> !iter {cir.narrow_char_params}
+    cir.return %0 : !iter
+  }
+}
+
+// CHECK-LABEL: cir.func @keeps_overlapping_roles
+// CHECK: cir.std.find
+// CHECK-NOT: cir.libc.memchr
+
+// -----
+
+!s8i = !cir.int<s, 8>
+!iter = !cir.struct<class "wrong_cached_type" {data !cir.ptr<!s8i>, data !cir.ptr<!cir.ptr<!s8i>>, data !cir.ptr<!s8i>, data !cir.ptr<!cir.ptr<!s8i>>}, std_type_info = #cir.std_type_info<"std::deque_iterator", !s8i, roles {block_first_pointer = array<i32: 1>, block_last_pointer = array<i32: 2>, block_size = 512 : i64, current_pointer = array<i32: 0>, map_pointer = array<i32: 3>}>>
+
+module attributes {cir.triple = "x86_64-unknown-linux-gnu", cir.size_type_width = 64 : i32, cir.int_type_width = 32 : i32} {
+  cir.func private @find(!iter, !iter, !cir.ptr<!s8i>) -> !iter func_info<#cir.func_identity<"std::find">>
+
+  cir.func @keeps_wrong_cached_role_type(%first: !iter, %last: !iter, %value: !cir.ptr<!s8i>) -> !iter {
+    %0 = cir.std.find(%first : !iter, %last : !iter, %value : !cir.ptr<!s8i>, @find) -> !iter {cir.narrow_char_params}
+    cir.return %0 : !iter
+  }
+}
+
+// CHECK-LABEL: cir.func @keeps_wrong_cached_role_type
+// CHECK: cir.std.find
+// CHECK-NOT: cir.libc.memchr
+
+// -----
+
+// A module that already declares wmemchr with the other signedness makes
+// the walk adopt that signature and cast at the call boundary.
+!u32i = !cir.int<u, 32>
+!s32i = !cir.int<s, 32>
+!u64i = !cir.int<u, 64>
+!iter = !cir.struct<class "std::__1::__deque_iterator<wchar_t>" {data !cir.ptr<!cir.ptr<!s32i>>, data !cir.ptr<!s32i>}, std_type_info = #cir.std_type_info<"std::deque_iterator", !s32i, roles {block_size = 1024 : i64, current_pointer = array<i32: 1>, map_pointer = array<i32: 0>}>>
+
+module attributes {cir.triple = "x86_64-unknown-linux-gnu", cir.size_type_width = 64 : i32, cir.int_type_width = 32 : i32, cir.wchar_type_width = 32 : i32} {
+  cir.func private @wmemchr(!cir.ptr<!u32i>, !u32i, !u64i) -> !cir.ptr<!u32i>
+  cir.func private @wide_find(!iter, !iter, !cir.ptr<!s32i>) -> !iter func_info<#cir.func_identity<"std::find">>
+
+  cir.func @transforms_flipped_signedness(%first: !iter, %last: !iter, %value: !cir.ptr<!s32i>) -> !iter {
+    %0 = cir.std.find(%first : !iter, %last : !iter, %value : !cir.ptr<!s32i>, @wide_find) -> !iter {cir.wide_char_params}
+    cir.return %0 : !iter
+  }
+}
+
+// CHECK-LABEL: cir.func @transforms_flipped_signedness
+// CHECK: %[[SRC:.*]] = cir.cast bitcast %{{.*}} : !cir.ptr<!s32i> -> !cir.ptr<!u32i>
+// CHECK: cir.libc.wmemchr(%[[SRC]], %{{.*}}, %{{.*}})
+// CHECK-NOT: cir.std.find
+
+// -----
+
+!s16i = !cir.int<s, 16>
+!iter = !cir.struct<class "std::__1::__deque_iterator<short>" {data !cir.ptr<!cir.ptr<!s16i>>, data !cir.ptr<!s16i>}, std_type_info = #cir.std_type_info<"std::deque_iterator", !s16i, roles {block_size = 2048 : i64, current_pointer = array<i32: 1>, map_pointer = array<i32: 0>}>>
+
+module attributes {cir.triple = "x86_64-unknown-linux-gnu", cir.size_type_width = 64 : i32, cir.int_type_width = 32 : i32, cir.wchar_type_width = 32 : i32} {
+  cir.func private @find(!iter, !iter, !cir.ptr<!s16i>) -> !iter func_info<#cir.func_identity<"std::find">>
+
+  cir.func @keeps_non_character(%first: !iter, %last: !iter, %value: !cir.ptr<!s16i>) -> !iter {
+    %0 = cir.std.find(%first : !iter, %last : !iter, %value : !cir.ptr<!s16i>, @find) -> !iter {cir.narrow_char_params}
+    cir.return %0 : !iter
+  }
+}
+
+// CHECK-LABEL: cir.func @keeps_non_character
+// CHECK: cir.std.find
+// CHECK-NOT: cir.libc.memchr
