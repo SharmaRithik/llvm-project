@@ -1,0 +1,278 @@
+// RUN: cir-opt --cir-lib-opt -split-input-file %s -o %t
+// RUN: FileCheck %s --input-file=%t
+!s8i = !cir.int<s, 8>
+!s32i = !cir.int<s, 32>
+!gnu_char = !cir.struct<class "std::_Deque_iterator<char>" {data !cir.ptr<!s8i>, data !cir.ptr<!s8i>, data !cir.ptr<!s8i>, data !cir.ptr<!cir.ptr<!s8i>>}, std_type_info = #cir.std_type_info<"std::deque_iterator", !s8i, roles {block_first_pointer = array<i32: 1>, block_last_pointer = array<i32: 2>, block_size = 512 : i64, current_pointer = array<i32: 0>, map_pointer = array<i32: 3>}>>
+!libcxx_char = !cir.struct<class "std::__1::__deque_iterator<char>" {data !cir.ptr<!cir.ptr<!s8i>>, data !cir.ptr<!s8i>}, std_type_info = #cir.std_type_info<"std::deque_iterator", !s8i, roles {block_size = 4096 : i64, current_pointer = array<i32: 1>, map_pointer = array<i32: 0>}>>
+!gnu_int = !cir.struct<class "std::_Deque_iterator<int>" {data !cir.ptr<!s32i>, data !cir.ptr<!s32i>, data !cir.ptr<!s32i>, data !cir.ptr<!cir.ptr<!s32i>>}, std_type_info = #cir.std_type_info<"std::deque_iterator", !s32i, roles {block_first_pointer = array<i32: 1>, block_last_pointer = array<i32: 2>, block_size = 128 : i64, current_pointer = array<i32: 0>, map_pointer = array<i32: 3>}>>
+!libcxx_int = !cir.struct<class "std::__1::__deque_iterator<int>" {data !cir.ptr<!cir.ptr<!s32i>>, data !cir.ptr<!s32i>}, std_type_info = #cir.std_type_info<"std::deque_iterator", !s32i, roles {block_size = 1024 : i64, current_pointer = array<i32: 1>, map_pointer = array<i32: 0>}>>
+!gnu_int_pair = !cir.struct<class "GnuIntPair" {data !gnu_int, data !gnu_int}>
+!libcxx_int_pair = !cir.struct<class "LibcxxIntPair" {data !libcxx_int, data !libcxx_int}>
+!mixed_pair = !cir.struct<class "MixedPair" {data !cir.ptr<!s8i>, data !libcxx_char}>
+
+module attributes {cir.triple = "x86_64-unknown-linux-gnu",
+                   cir.int_type_width = 32 : i32,
+                   cir.size_type_width = 64 : i32,
+                   cir.wchar_type_width = 32 : i32} {
+  cir.func private @equal_gnu(!gnu_char, !gnu_char, !gnu_char) -> !cir.bool func_info<#cir.func_identity<"std::equal">>
+  cir.func private @equal_libcxx(!libcxx_char, !libcxx_char, !libcxx_char) -> !cir.bool func_info<#cir.func_identity<"std::equal">>
+  cir.func private @mismatch_gnu(!gnu_int, !gnu_int, !gnu_int) -> !gnu_int_pair func_info<#cir.func_identity<"std::mismatch">>
+  cir.func private @mismatch_libcxx(!libcxx_int, !libcxx_int, !libcxx_int) -> !libcxx_int_pair func_info<#cir.func_identity<"std::mismatch">>
+  cir.func private @equal_mixed(!gnu_char, !gnu_char, !cir.ptr<!s8i>) -> !cir.bool func_info<#cir.func_identity<"std::equal">>
+  cir.func private @mismatch_mixed(!cir.ptr<!s8i>, !cir.ptr<!s8i>, !libcxx_char) -> !mixed_pair func_info<#cir.func_identity<"std::mismatch">>
+
+  cir.func @transforms_equal_gnu(%first1: !gnu_char, %last1: !gnu_char, %first2: !gnu_char) -> !cir.bool {
+    %0 = cir.std.equal(%first1 : !gnu_char, %last1 : !gnu_char, %first2 : !gnu_char, @equal_gnu) -> !cir.bool {cir.narrow_char_params}
+    cir.return %0 : !cir.bool
+  }
+
+  cir.func @transforms_equal_libcxx(%first1: !libcxx_char, %last1: !libcxx_char, %first2: !libcxx_char) -> !cir.bool {
+    %0 = cir.std.equal(%first1 : !libcxx_char, %last1 : !libcxx_char, %first2 : !libcxx_char, @equal_libcxx) -> !cir.bool {cir.narrow_char_params}
+    cir.return %0 : !cir.bool
+  }
+
+  cir.func @transforms_mismatch_gnu(%first1: !gnu_int, %last1: !gnu_int, %first2: !gnu_int) -> !gnu_int_pair {
+    %0 = cir.std.mismatch(%first1 : !gnu_int, %last1 : !gnu_int, %first2 : !gnu_int, @mismatch_gnu) -> !gnu_int_pair {cir.wide_char_params}
+    cir.return %0 : !gnu_int_pair
+  }
+
+  cir.func @transforms_mismatch_libcxx(%first1: !libcxx_int, %last1: !libcxx_int, %first2: !libcxx_int) -> !libcxx_int_pair {
+    %0 = cir.std.mismatch(%first1 : !libcxx_int, %last1 : !libcxx_int, %first2 : !libcxx_int, @mismatch_libcxx) -> !libcxx_int_pair {cir.wide_char_params}
+    cir.return %0 : !libcxx_int_pair
+  }
+
+  cir.func @transforms_equal_mixed(%first1: !gnu_char, %last1: !gnu_char, %first2: !cir.ptr<!s8i>) -> !cir.bool {
+    %0 = cir.std.equal(%first1 : !gnu_char, %last1 : !gnu_char, %first2 : !cir.ptr<!s8i>, @equal_mixed) -> !cir.bool {cir.narrow_char_params}
+    cir.return %0 : !cir.bool
+  }
+
+  cir.func @transforms_mismatch_mixed(%first1: !cir.ptr<!s8i>, %last1: !cir.ptr<!s8i>, %first2: !libcxx_char) -> !mixed_pair {
+    %0 = cir.std.mismatch(%first1 : !cir.ptr<!s8i>, %last1 : !cir.ptr<!s8i>, %first2 : !libcxx_char, @mismatch_mixed) -> !mixed_pair {cir.narrow_char_params}
+    cir.return %0 : !mixed_pair
+  }
+}
+
+// -----
+
+!s8i = !cir.int<s, 8>
+!left = !cir.struct<class "Left" {data !cir.ptr<!s8i>, data !cir.ptr<!s8i>, data !cir.ptr<!s8i>, data !cir.ptr<!cir.ptr<!s8i>>}, std_type_info = #cir.std_type_info<"std::deque_iterator", !s8i, roles {block_first_pointer = array<i32: 1>, block_last_pointer = array<i32: 2>, block_size = 512 : i64, current_pointer = array<i32: 0>, map_pointer = array<i32: 3>}>>
+!right = !cir.struct<class "Right" {data !cir.ptr<!s8i>, data !cir.ptr<!s8i>, data !cir.ptr<!s8i>, data !cir.ptr<!cir.ptr<!s8i>>}, std_type_info = #cir.std_type_info<"std::deque_iterator", !s8i, roles {block_first_pointer = array<i32: 1>, block_last_pointer = array<i32: 2>, block_size = 256 : i64, current_pointer = array<i32: 0>, map_pointer = array<i32: 3>}>>
+
+module attributes {cir.triple = "x86_64-unknown-linux-gnu", cir.int_type_width = 32 : i32, cir.size_type_width = 64 : i32} {
+  cir.func private @equal(!left, !left, !right) -> !cir.bool func_info<#cir.func_identity<"std::equal">>
+  cir.func @keeps_mismatched_identities(%first1: !left, %last1: !left, %first2: !right) -> !cir.bool {
+    %0 = cir.std.equal(%first1 : !left, %last1 : !left, %first2 : !right, @equal) -> !cir.bool {cir.narrow_char_params}
+    cir.return %0 : !cir.bool
+  }
+}
+
+// -----
+
+!s8i = !cir.int<s, 8>
+!undercovered = !cir.struct<class "Undercovered" {data !cir.ptr<!s8i>, data !cir.ptr<!s8i>, data !cir.ptr<!cir.ptr<!s8i>>}, std_type_info = #cir.std_type_info<"std::deque_iterator", !s8i, roles {block_size = 512 : i64, current_pointer = array<i32: 0>, map_pointer = array<i32: 2>}>>
+
+module attributes {cir.triple = "x86_64-unknown-linux-gnu", cir.int_type_width = 32 : i32, cir.size_type_width = 64 : i32} {
+  cir.func private @equal(!undercovered, !undercovered, !undercovered) -> !cir.bool func_info<#cir.func_identity<"std::equal">>
+  cir.func @keeps_undercovered_identity(%first1: !undercovered, %last1: !undercovered, %first2: !undercovered) -> !cir.bool {
+    %0 = cir.std.equal(%first1 : !undercovered, %last1 : !undercovered, %first2 : !undercovered, @equal) -> !cir.bool {cir.narrow_char_params}
+    cir.return %0 : !cir.bool
+  }
+}
+
+// -----
+
+!s8i = !cir.int<s, 8>
+!deque = !cir.struct<class "Deque" {data !cir.ptr<!cir.ptr<!s8i>>, data !cir.ptr<!s8i>}, std_type_info = #cir.std_type_info<"std::deque_iterator", !s8i, roles {block_size = 4096 : i64, current_pointer = array<i32: 1>, map_pointer = array<i32: 0>}>>
+!missing = !cir.struct<class "Missing" {data !cir.ptr<!cir.ptr<!s8i>>, data !cir.ptr<!s8i>}>
+
+module attributes {cir.triple = "x86_64-unknown-linux-gnu", cir.int_type_width = 32 : i32, cir.size_type_width = 64 : i32} {
+  cir.func private @equal(!deque, !deque, !missing) -> !cir.bool func_info<#cir.func_identity<"std::equal">>
+  cir.func @keeps_missing_identity(%first1: !deque, %last1: !deque, %first2: !missing) -> !cir.bool {
+    %0 = cir.std.equal(%first1 : !deque, %last1 : !deque, %first2 : !missing, @equal) -> !cir.bool {cir.narrow_char_params}
+    cir.return %0 : !cir.bool
+  }
+}
+// CHECK-LABEL: cir.func @transforms_equal_gnu
+// CHECK: %[[FIRST_MAP_ADDR:[^ ]+]] = cir.alloca "compare_deque_first_map"
+// CHECK: %[[SECOND_MAP_ADDR:[^ ]+]] = cir.alloca "compare_deque_second_map"
+// CHECK: cir.while {
+// CHECK: } do {
+// CHECK: %[[FIRST_CURRENT:[^ ]+]] = cir.load
+// CHECK: %[[SECOND_CURRENT:[^ ]+]] = cir.load
+// CHECK: %[[FIRST_MAP:[^ ]+]] = cir.load %[[FIRST_MAP_ADDR]]
+// CHECK: %[[SECOND_MAP:[^ ]+]] = cir.load %[[SECOND_MAP_ADDR]]
+// CHECK: %[[FIRST_BLOCK:[^ ]+]] = cir.load %[[FIRST_MAP]]
+// CHECK: %[[FIRST_BLOCK_END:[^ ]+]] = cir.ptr_stride %[[FIRST_BLOCK]]
+// CHECK: %[[BOUND_SHARES_MAP:[^ ]+]] = cir.cmp eq %[[FIRST_MAP]], %{{.*}}
+// CHECK: %[[CLAMPED_END:[^ ]+]] = cir.select if %[[BOUND_SHARES_MAP]] then %{{.*}} else %[[FIRST_BLOCK_END]]
+// CHECK: %[[FIRST_SPAN:[^ ]+]] = cir.ptr_diff %[[CLAMPED_END]], %[[FIRST_CURRENT]]
+// CHECK: %[[SECOND_BLOCK:[^ ]+]] = cir.load %[[SECOND_MAP]]
+// CHECK: %[[SECOND_BLOCK_END:[^ ]+]] = cir.ptr_stride %[[SECOND_BLOCK]]
+// CHECK: %[[SECOND_SPAN:[^ ]+]] = cir.ptr_diff %[[SECOND_BLOCK_END]], %[[SECOND_CURRENT]]
+// CHECK: %[[SECOND_SHORTER:[^ ]+]] = cir.cmp lt %[[SECOND_SPAN]], %[[FIRST_SPAN]]
+// CHECK: %[[SPAN:[^ ]+]] = cir.select if %[[SECOND_SHORTER]] then %[[SECOND_SPAN]] else %[[FIRST_SPAN]]
+// CHECK: cir.libc.memcmp
+// CHECK: cir.ptr_stride %{{.*}}, %{{.*}} : (!cir.ptr<!cir.ptr<!s8i>>, !u64i)
+// CHECK-NEXT: %{{.*}} = cir.load
+// CHECK: cir.ptr_stride %{{.*}}, %{{.*}} : (!cir.ptr<!cir.ptr<!s8i>>, !u64i)
+// CHECK-NEXT: %{{.*}} = cir.load
+// CHECK-NOT: cir.std.equal
+
+// CHECK-LABEL: cir.func @transforms_equal_libcxx
+// CHECK: cir.alloca "compare_deque_first_map"
+// CHECK: cir.alloca "compare_deque_second_map"
+// CHECK: cir.const #cir.int<4096> : !u64i
+// CHECK: cir.libc.memcmp
+// CHECK-NOT: cir.std.equal
+
+// CHECK-LABEL: cir.func @transforms_mismatch_gnu
+// CHECK: %[[M_FIRST_PTR_ADDR:[^ ]+]] = cir.alloca "compare_deque_first_pointer"
+// CHECK: %[[M_SECOND_PTR_ADDR:[^ ]+]] = cir.alloca "compare_deque_second_pointer"
+// CHECK: %[[M_FIRST_MAP_ADDR:[^ ]+]] = cir.alloca "compare_deque_first_map"
+// CHECK: %[[M_SECOND_MAP_ADDR:[^ ]+]] = cir.alloca "compare_deque_second_map"
+// CHECK: cir.libc.memcmp
+// CHECK: cir.while {
+// CHECK: %{{.*}} = cir.load %{{.*}} : !cir.ptr<!s32i>, !s32i
+// CHECK: %[[M_FIRST_CURRENT:[^ ]+]] = cir.insert_member %arg1[0], %{{.*}}
+// CHECK: %[[M_FIRST_NODE:[^ ]+]] = cir.insert_member %[[M_FIRST_CURRENT]][3], %{{.*}}
+// CHECK: %[[M_FIRST_BLOCK:[^ ]+]] = cir.load %{{.*}}
+// CHECK: %[[M_FIRST_BOUND:[^ ]+]] = cir.insert_member %[[M_FIRST_NODE]][1], %[[M_FIRST_BLOCK]]
+// CHECK: %[[M_FIRST_BLOCK_END:[^ ]+]] = cir.ptr_stride %[[M_FIRST_BLOCK]]
+// CHECK: %[[M_FIRST_RESULT:[^ ]+]] = cir.insert_member %[[M_FIRST_BOUND]][2], %[[M_FIRST_BLOCK_END]]
+// CHECK: %[[M_SECOND_CURRENT:[^ ]+]] = cir.insert_member %arg2[0], %{{.*}}
+// CHECK: %[[M_SECOND_NODE:[^ ]+]] = cir.insert_member %[[M_SECOND_CURRENT]][3], %{{.*}}
+// CHECK: %[[M_SECOND_BLOCK:[^ ]+]] = cir.load %{{.*}}
+// CHECK: %[[M_SECOND_BOUND:[^ ]+]] = cir.insert_member %[[M_SECOND_NODE]][1], %[[M_SECOND_BLOCK]]
+// CHECK: %[[M_SECOND_BLOCK_END:[^ ]+]] = cir.ptr_stride %[[M_SECOND_BLOCK]]
+// CHECK: %[[M_SECOND_RESULT:[^ ]+]] = cir.insert_member %[[M_SECOND_BOUND]][2], %[[M_SECOND_BLOCK_END]]
+// CHECK: cir.insert_member %{{.*}}[0], %[[M_FIRST_RESULT]]
+// CHECK: cir.insert_member %{{.*}}[1], %[[M_SECOND_RESULT]]
+// CHECK-NOT: cir.std.mismatch
+
+// CHECK-LABEL: cir.func @transforms_mismatch_libcxx
+// CHECK: cir.alloca "compare_deque_first_map"
+// CHECK: cir.alloca "compare_deque_second_map"
+// CHECK: cir.const #cir.int<1024> : !u64i
+// CHECK: cir.libc.memcmp
+// CHECK: cir.insert_member %arg1[1], %{{.*}}
+// CHECK: cir.insert_member %{{.*}}[0], %{{.*}}
+// CHECK: cir.insert_member %arg2[1], %{{.*}}
+// CHECK: cir.insert_member %{{.*}}[0], %{{.*}}
+// CHECK-NOT: cir.std.mismatch
+
+// CHECK-LABEL: cir.func @transforms_equal_mixed
+// CHECK: cir.alloca "compare_deque_first_map"
+// CHECK-NOT: cir.alloca "compare_deque_second_map"
+// CHECK: cir.libc.memcmp
+// CHECK: cir.ptr_stride %{{.*}}, %{{.*}} : (!cir.ptr<!s8i>, !u64i)
+// CHECK-NOT: cir.std.equal
+
+// CHECK-LABEL: cir.func @transforms_mismatch_mixed
+// CHECK-NOT: cir.alloca "compare_deque_first_map"
+// CHECK: cir.alloca "compare_deque_second_map"
+// CHECK: cir.libc.memcmp
+// CHECK: cir.insert_member %arg2[1], %{{.*}}
+// CHECK: cir.insert_member %{{.*}}[0], %{{.*}}
+// CHECK-NOT: cir.std.mismatch
+
+// CHECK-LABEL: cir.func @keeps_mismatched_identities
+// CHECK: cir.std.equal
+// CHECK-NOT: cir.libc.memcmp
+
+// CHECK-LABEL: cir.func @keeps_undercovered_identity
+// CHECK: cir.std.equal
+// CHECK-NOT: cir.libc.memcmp
+
+// CHECK-LABEL: cir.func @keeps_missing_identity
+// CHECK: cir.std.equal
+// CHECK-NOT: cir.libc.memcmp
+// -----
+
+!s8i = !cir.int<s, 8>
+!iter = !cir.struct<class "std::__1::__deque_iterator<char>" {data !cir.ptr<!cir.ptr<!s8i>>, data !cir.ptr<!s8i>}, std_type_info = #cir.std_type_info<"std::deque_iterator", !s8i, roles {block_size = 4096 : i64, current_pointer = array<i32: 1>, map_pointer = array<i32: 0>}>>
+!pair = !cir.struct<class "BoundedPair" {data !iter, data !iter}>
+
+module attributes {cir.triple = "x86_64-unknown-linux-gnu", cir.int_type_width = 32 : i32, cir.size_type_width = 64 : i32} {
+  cir.func private @mismatch(!iter, !iter, !iter, !iter) -> !pair func_info<#cir.func_identity<"std::mismatch">>
+  cir.func @transforms_bounded_mismatch(%first1: !iter, %last1: !iter, %first2: !iter, %last2: !iter) -> !pair {
+    %0 = cir.std.mismatch_bounded(%first1 : !iter, %last1 : !iter, %first2 : !iter, %last2 : !iter, @mismatch) -> !pair {cir.narrow_char_params}
+    cir.return %0 : !pair
+  }
+}
+
+// CHECK-LABEL: cir.func @transforms_bounded_mismatch
+// CHECK: cir.extract_member %arg1[1]
+// CHECK: cir.extract_member %arg1[0]
+// CHECK: cir.extract_member %arg3[1]
+// CHECK: cir.extract_member %arg3[0]
+// CHECK: cir.libc.memcmp
+// CHECK: cir.insert_member %arg1[1], %{{.*}}
+// CHECK: cir.insert_member %arg3[1], %{{.*}}
+// CHECK-NOT: cir.std.mismatch_bounded
+
+// -----
+
+// A wide element deque pair for equal, and a mixed range whose linear side
+// is a single member contiguous wrapper rather than a raw pointer.
+!s8i = !cir.int<s, 8>
+!s32i = !cir.int<s, 32>
+!iter = !cir.struct<class "std::__1::__deque_iterator<int>" {data !cir.ptr<!cir.ptr<!s32i>>, data !cir.ptr<!s32i>}, std_type_info = #cir.std_type_info<"std::deque_iterator", !s32i, roles {block_size = 1024 : i64, current_pointer = array<i32: 1>, map_pointer = array<i32: 0>}>>
+!citer = !cir.struct<class "std::__1::__deque_iterator<char>" {data !cir.ptr<!cir.ptr<!s8i>>, data !cir.ptr<!s8i>}, std_type_info = #cir.std_type_info<"std::deque_iterator", !s8i, roles {block_size = 4096 : i64, current_pointer = array<i32: 1>, map_pointer = array<i32: 0>}>>
+!wrap = !cir.struct<class "std::__1::__wrap_iter<const char *>" {data !cir.ptr<!s8i>}>
+
+module attributes {cir.triple = "x86_64-unknown-linux-gnu", cir.int_type_width = 32 : i32, cir.size_type_width = 64 : i32, cir.wchar_type_width = 32 : i32} {
+  cir.func private @equal_wide(!iter, !iter, !iter) -> !cir.bool func_info<#cir.func_identity<"std::equal">>
+  cir.func private @equal_wrapped(!citer, !citer, !wrap) -> !cir.bool func_info<#cir.func_identity<"std::equal">>
+
+  cir.func @transforms_equal_wide(%first1: !iter, %last1: !iter, %first2: !iter) -> !cir.bool {
+    %0 = cir.std.equal(%first1 : !iter, %last1 : !iter, %first2 : !iter, @equal_wide) -> !cir.bool {cir.wide_char_params}
+    cir.return %0 : !cir.bool
+  }
+
+  cir.func @transforms_equal_wrapped(%first1: !citer, %last1: !citer, %first2: !wrap) -> !cir.bool {
+    %0 = cir.std.equal(%first1 : !citer, %last1 : !citer, %first2 : !wrap, @equal_wrapped) -> !cir.bool {cir.narrow_char_params}
+    cir.return %0 : !cir.bool
+  }
+}
+
+// CHECK-LABEL: cir.func @transforms_equal_wide
+// CHECK: cir.libc.memcmp
+// CHECK-NOT: cir.std.equal
+
+// CHECK-LABEL: cir.func @transforms_equal_wrapped
+// CHECK: cir.extract_member %arg2[0]
+// CHECK: cir.libc.memcmp
+// CHECK-NOT: cir.std.equal
+
+// -----
+
+// Licensed deque pairs without the CIRGen markers keep their operations,
+// and a predicate form with only the wide width marker keeps as well.
+!s8i = !cir.int<s, 8>
+!s32i = !cir.int<s, 32>
+!iter = !cir.struct<class "std::__1::__deque_iterator<char>" {data !cir.ptr<!cir.ptr<!s8i>>, data !cir.ptr<!s8i>}, std_type_info = #cir.std_type_info<"std::deque_iterator", !s8i, roles {block_size = 4096 : i64, current_pointer = array<i32: 1>, map_pointer = array<i32: 0>}>>
+!witer = !cir.struct<class "std::__1::__deque_iterator<int>" {data !cir.ptr<!cir.ptr<!s32i>>, data !cir.ptr<!s32i>}, std_type_info = #cir.std_type_info<"std::deque_iterator", !s32i, roles {block_size = 1024 : i64, current_pointer = array<i32: 1>, map_pointer = array<i32: 0>}>>
+!closure = !cir.struct<class "Closure" {data !s8i}>
+
+module attributes {cir.triple = "x86_64-unknown-linux-gnu", cir.int_type_width = 32 : i32, cir.size_type_width = 64 : i32, cir.wchar_type_width = 32 : i32} {
+  cir.func private @equal_nomark(!iter, !iter, !iter) -> !cir.bool func_info<#cir.func_identity<"std::equal">>
+  cir.func private @equal_pred_nomark(!witer, !witer, !witer, !closure) -> !cir.bool func_info<#cir.func_identity<"std::equal">>
+
+  cir.func @keeps_without_marker(%first1: !iter, %last1: !iter, %first2: !iter) -> !cir.bool {
+    %0 = cir.std.equal(%first1 : !iter, %last1 : !iter, %first2 : !iter, @equal_nomark) -> !cir.bool
+    cir.return %0 : !cir.bool
+  }
+
+  cir.func @keeps_pred_without_pred_marker(%first1: !witer, %last1: !witer, %first2: !witer, %pred: !closure) -> !cir.bool {
+    %0 = cir.std.equal_pred(%first1 : !witer, %last1 : !witer, %first2 : !witer, %pred : !closure, @equal_pred_nomark) -> !cir.bool {cir.wide_char_params}
+    cir.return %0 : !cir.bool
+  }
+}
+
+// CHECK-LABEL: cir.func @keeps_without_marker
+// CHECK: cir.std.equal
+// CHECK-NOT: cir.libc.memcmp
+
+// CHECK-LABEL: cir.func @keeps_pred_without_pred_marker
+// CHECK: cir.std.equal_pred
+// CHECK-NOT: cir.libc.memcmp

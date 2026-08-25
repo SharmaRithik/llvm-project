@@ -1008,6 +1008,539 @@ rewriteSearchToMemmem(StdSearchOp searchOp,
     ++numSearchEqualLengthToMemcmp;
 }
 
+struct LicensedDequeCompareIterator {
+  cir::StdTypeInfoAttr identity;
+  cir::PointerType elementPointerTy;
+  cir::PointerType mapPointerTy;
+  uint64_t currentPointerIndex;
+  uint64_t mapPointerIndex;
+  std::optional<uint64_t> blockFirstPointerIndex;
+  std::optional<uint64_t> blockLastPointerIndex;
+  uint64_t blockSize;
+};
+
+static std::optional<LicensedDequeCompareIterator>
+licenseDequeCompareIterator(mlir::Type type) {
+  auto iteratorTy = mlir::dyn_cast<cir::StructType>(type);
+  if (!iteratorTy)
+    return std::nullopt;
+
+  cir::StdTypeInfoAttr identity = iteratorTy.getStdTypeInfo();
+  if (!identity || identity.getKind() != cir::StdTypeKind::StdDequeIterator)
+    return std::nullopt;
+
+  auto elementTy = mlir::dyn_cast<cir::IntType>(identity.getElement());
+  if (!elementTy)
+    return std::nullopt;
+  auto elementPointerTy = cir::PointerType::get(elementTy);
+  auto currentPointerTy = mlir::dyn_cast<cir::PointerType>(identity.resolveRole(
+      iteratorTy, cir::StdTypeInfoAttr::kRoleCurrentPointer));
+  auto mapPointerTy = mlir::dyn_cast<cir::PointerType>(
+      identity.resolveRole(iteratorTy, cir::StdTypeInfoAttr::kRoleMapPointer));
+  auto blockPointerTy =
+      mapPointerTy ? mlir::dyn_cast<cir::PointerType>(mapPointerTy.getPointee())
+                   : cir::PointerType();
+  if (currentPointerTy != elementPointerTy || !mapPointerTy ||
+      mapPointerTy.getAddrSpace() || blockPointerTy != elementPointerTy)
+    return std::nullopt;
+
+  llvm::ArrayRef<int32_t> currentPointerPath =
+      identity.getRolePath(cir::StdTypeInfoAttr::kRoleCurrentPointer);
+  llvm::ArrayRef<int32_t> mapPointerPath =
+      identity.getRolePath(cir::StdTypeInfoAttr::kRoleMapPointer);
+  llvm::ArrayRef<int32_t> blockFirstPointerPath =
+      identity.getRolePath(cir::StdTypeInfoAttr::kRoleBlockFirstPointer);
+  llvm::ArrayRef<int32_t> blockLastPointerPath =
+      identity.getRolePath(cir::StdTypeInfoAttr::kRoleBlockLastPointer);
+  if (currentPointerPath.size() != 1 || mapPointerPath.size() != 1)
+    return std::nullopt;
+
+  // The result rebuild copies a seed iterator and replaces the role
+  // members, so an identity whose roles name fewer members than the
+  // record holds would leave stale per position state in the rebuilt
+  // result. The roles must land on distinct members and cover the whole
+  // record, the same rule the find walk enforces.
+  llvm::SmallVector<llvm::ArrayRef<int32_t>, 4> rolePaths{currentPointerPath,
+                                                          mapPointerPath};
+  if (!blockFirstPointerPath.empty()) {
+    rolePaths.push_back(blockFirstPointerPath);
+    rolePaths.push_back(blockLastPointerPath);
+  }
+  llvm::SmallSet<int32_t, 4> coveredMembers;
+  for (llvm::ArrayRef<int32_t> path : rolePaths)
+    if (path.size() != 1 || !coveredMembers.insert(path[0]).second)
+      return std::nullopt;
+  if (coveredMembers.size() != iteratorTy.getMembers().size())
+    return std::nullopt;
+
+  if (!blockFirstPointerPath.empty() &&
+      (identity.resolveRole(iteratorTy,
+                            cir::StdTypeInfoAttr::kRoleBlockFirstPointer) !=
+           elementPointerTy ||
+       identity.resolveRole(iteratorTy,
+                            cir::StdTypeInfoAttr::kRoleBlockLastPointer) !=
+           elementPointerTy))
+    return std::nullopt;
+
+  // The attribute verifier admits only a positive signless 64 bit block
+  // size on a deque identity, so the entry reads unchecked here.
+  uint64_t blockSize = static_cast<uint64_t>(
+      mlir::cast<mlir::IntegerAttr>(
+          identity.getRoles().get(cir::StdTypeInfoAttr::kBlockSize))
+          .getInt());
+
+  LicensedDequeCompareIterator licensed;
+  licensed.identity = identity;
+  licensed.elementPointerTy = elementPointerTy;
+  licensed.mapPointerTy = mapPointerTy;
+  licensed.currentPointerIndex = static_cast<uint64_t>(currentPointerPath[0]);
+  licensed.mapPointerIndex = static_cast<uint64_t>(mapPointerPath[0]);
+  licensed.blockSize = blockSize;
+  if (!blockFirstPointerPath.empty()) {
+    licensed.blockFirstPointerIndex =
+        static_cast<uint64_t>(blockFirstPointerPath[0]);
+    licensed.blockLastPointerIndex =
+        static_cast<uint64_t>(blockLastPointerPath[0]);
+  }
+  return licensed;
+}
+
+template <typename OpT>
+static bool rewriteDequeCompareToBlockWalk(
+    OpT compareOp, mlir::SymbolTableCollection &symbolTables,
+    mlir::Pass::Statistic &numEqualDequeToMemcmp,
+    mlir::Pass::Statistic &numMismatchDequeToMemcmp) {
+  constexpr bool isMismatchForm = std::is_same_v<OpT, StdMismatchOp> ||
+                                  std::is_same_v<OpT, StdMismatchBoundedOp> ||
+                                  std::is_same_v<OpT, StdMismatchPredOp> ||
+                                  std::is_same_v<OpT, StdMismatchBoundedPredOp>;
+  constexpr bool boundedOp = std::is_same_v<OpT, StdMismatchBoundedOp> ||
+                             std::is_same_v<OpT, StdMismatchBoundedPredOp>;
+  constexpr bool predOp = std::is_same_v<OpT, StdEqualPredOp> ||
+                          std::is_same_v<OpT, StdMismatchPredOp> ||
+                          std::is_same_v<OpT, StdMismatchBoundedPredOp>;
+  static_assert(std::is_same_v<OpT, StdEqualOp> ||
+                std::is_same_v<OpT, StdEqualPredOp> || isMismatchForm);
+
+  std::optional<LicensedDequeCompareIterator> firstDeque =
+      licenseDequeCompareIterator(compareOp.getFirst1().getType());
+  std::optional<LicensedDequeCompareIterator> secondDeque =
+      licenseDequeCompareIterator(compareOp.getFirst2().getType());
+  if (!firstDeque && !secondDeque)
+    return false;
+  if (firstDeque && secondDeque &&
+      firstDeque->identity != secondDeque->identity)
+    return false;
+
+  cir::RecordType firstWrapperTy;
+  cir::RecordType secondWrapperTy;
+  cir::PointerType firstPointerTy =
+      firstDeque ? firstDeque->elementPointerTy
+                 : unwrapContiguousIterator(compareOp.getFirst1().getType(),
+                                            firstWrapperTy);
+  cir::PointerType secondPointerTy =
+      secondDeque ? secondDeque->elementPointerTy
+                  : unwrapContiguousIterator(compareOp.getFirst2().getType(),
+                                             secondWrapperTy);
+  if (!firstPointerTy || !secondPointerTy || firstPointerTy.getAddrSpace() ||
+      secondPointerTy.getAddrSpace() ||
+      firstPointerTy.getPointee() != secondPointerTy.getPointee())
+    return false;
+
+  auto elementTy = mlir::dyn_cast<cir::IntType>(firstPointerTy.getPointee());
+  if (!elementTy || elementTy.isBitInt() || elementTy.getWidth() % 8)
+    return false;
+
+  // Only the CIRGen facts license the rewrite, since an enum element also
+  // lowers to the same integer and a closure of the right shape can compute
+  // anything. The predicate forms carry their real second bound inside the
+  // pred operand, which this walk never inspects, so the predicate marker
+  // is required in addition to the width facts
+  const bool wide = elementTy.getWidth() != 8;
+  constexpr llvm::StringLiteral libcallName = "memcmp";
+  std::optional<LibCallEnv> env =
+      checkLibCallEnv(compareOp, libcallName, llvm::LibFunc_memcmp);
+  if (!env || !env->enclosing)
+    return false;
+  if (wide) {
+    std::optional<unsigned> wcharWidth = cir::getRecordedIntegerWidth(
+        env->moduleOp, cir::CIRDialect::getWCharTypeWidthAttrName());
+    if (!wcharWidth || *wcharWidth != elementTy.getWidth() ||
+        !compareOp->template getAttrOfType<mlir::UnitAttr>(
+            cir::CIRDialect::getWideCharParamsAttrName()))
+      return false;
+  } else if (!predOp && !compareOp->template getAttrOfType<mlir::UnitAttr>(
+                            cir::CIRDialect::getNarrowCharParamsAttrName())) {
+    return false;
+  }
+  if constexpr (predOp)
+    if (!compareOp->template getAttrOfType<mlir::UnitAttr>(
+            cir::CIRDialect::getElemEqBinaryPredAttrName()))
+      return false;
+
+  std::optional<unsigned> intWidth = cir::getRecordedIntegerWidth(
+      env->moduleOp, cir::CIRDialect::getIntTypeWidthAttrName());
+  std::optional<unsigned> sizeWidth = cir::getRecordedIntegerWidth(
+      env->moduleOp, cir::CIRDialect::getSizeTypeWidthAttrName());
+  if (!intWidth || !sizeWidth)
+    return false;
+  // The memcmp length is the element span times the element byte width,
+  // so the block count must stay representable after that multiply. Hand
+  // written IR can carry a block size CIRGen never emits.
+  auto blockSizeRepresentable = [&](uint64_t blockSize, uint64_t elemBytes) {
+    if (*sizeWidth >= 64)
+      return true;
+    uint64_t maxCount = (uint64_t{1} << *sizeWidth) / elemBytes;
+    return blockSize < maxCount;
+  };
+  uint64_t elementBytes = elementTy.getWidth() / 8;
+  if ((firstDeque &&
+       !blockSizeRepresentable(firstDeque->blockSize, elementBytes)) ||
+      (secondDeque &&
+       !blockSizeRepresentable(secondDeque->blockSize, elementBytes)))
+    return false;
+
+  CIRBaseBuilderTy builder(*compareOp.getContext());
+  auto sizeTy = builder.getUIntNTy(*sizeWidth);
+  auto intTy = builder.getSIntNTy(*intWidth);
+  if (!sharesLibCallSymbol(
+          env->moduleOp, symbolTables, libcallName,
+          cir::FuncType::get(
+              {builder.getVoidPtrTy(), builder.getVoidPtrTy(), sizeTy}, intTy)))
+    return false;
+
+  // Hand written IR can name any two member record as the result pair, so
+  // the members are re proved against the operand types before the rebuilt
+  // iterators are stored through them
+  cir::RecordType pairTy;
+  if constexpr (isMismatchForm) {
+    pairTy = mlir::dyn_cast<cir::RecordType>(compareOp.getResult().getType());
+    if (!pairTy || pairTy.isUnion() || !pairTy.isComplete() ||
+        pairTy.getMembers().size() != 2 ||
+        pairTy.getMembers()[0] != compareOp.getFirst1().getType() ||
+        pairTy.getMembers()[1] != compareOp.getFirst2().getType())
+      return false;
+  }
+
+  mlir::Location loc = compareOp.getLoc();
+  builder.setInsertionPointAfter(compareOp);
+  auto extractCurrent = [&](mlir::Value iterator,
+                            const LicensedDequeCompareIterator &deque) {
+    return cir::ExtractMemberOp::create(builder, loc, iterator,
+                                        deque.currentPointerIndex);
+  };
+  auto extractMap = [&](mlir::Value iterator,
+                        const LicensedDequeCompareIterator &deque) {
+    return cir::ExtractMemberOp::create(builder, loc, iterator,
+                                        deque.mapPointerIndex);
+  };
+  auto unwrap = [&](mlir::Value iterator, cir::RecordType wrapperTy) {
+    return wrapperTy ? cir::ExtractMemberOp::create(builder, loc, iterator, 0)
+                     : iterator;
+  };
+  auto advance = [&](mlir::Location stepLoc, mlir::Value base,
+                     mlir::Value offset) {
+    return cir::PtrStrideOp::create(builder, stepLoc, base.getType(), base,
+                                    offset)
+        .getResult();
+  };
+  auto loadBlock = [&](mlir::Location loadLoc, mlir::Value mapSlot) {
+    // The identity licenses this load because iterator increment performs
+    // the same load whenever it enters a block
+    return builder.createLoad(loadLoc, mapSlot);
+  };
+
+  // The operation verifier makes first1 and last1 one type, so first1's
+  // licensed member indices read last1 as well, and likewise for the
+  // second range
+  mlir::Value firstCurrent =
+      firstDeque ? extractCurrent(compareOp.getFirst1(), *firstDeque)
+                 : unwrap(compareOp.getFirst1(), firstWrapperTy);
+  mlir::Value last1Current =
+      firstDeque ? extractCurrent(compareOp.getLast1(), *firstDeque)
+                 : unwrap(compareOp.getLast1(), firstWrapperTy);
+  mlir::Value firstMap = firstDeque
+                             ? extractMap(compareOp.getFirst1(), *firstDeque)
+                             : mlir::Value();
+  mlir::Value last1Map = firstDeque
+                             ? extractMap(compareOp.getLast1(), *firstDeque)
+                             : mlir::Value();
+
+  mlir::Value secondCurrent =
+      secondDeque ? extractCurrent(compareOp.getFirst2(), *secondDeque)
+                  : unwrap(compareOp.getFirst2(), secondWrapperTy);
+  mlir::Value last2Current;
+  mlir::Value secondMap = secondDeque
+                              ? extractMap(compareOp.getFirst2(), *secondDeque)
+                              : mlir::Value();
+  mlir::Value last2Map;
+  if constexpr (boundedOp) {
+    last2Current = secondDeque
+                       ? extractCurrent(compareOp.getLast2(), *secondDeque)
+                       : unwrap(compareOp.getLast2(), secondWrapperTy);
+    if (secondDeque)
+      last2Map = extractMap(compareOp.getLast2(), *secondDeque);
+  }
+
+  mlir::IntegerAttr pointerAlign = builder.getAlignmentAttr(8);
+  mlir::Value firstCurrentAddr =
+      builder.createAlloca(loc, builder.getPointerTo(firstPointerTy),
+                           "compare_deque_first_pointer", pointerAlign);
+  mlir::Value secondCurrentAddr =
+      builder.createAlloca(loc, builder.getPointerTo(secondPointerTy),
+                           "compare_deque_second_pointer", pointerAlign);
+  builder.createStore(loc, firstCurrent, firstCurrentAddr);
+  builder.createStore(loc, secondCurrent, secondCurrentAddr);
+
+  mlir::Value firstMapAddr;
+  if (firstDeque) {
+    firstMapAddr = builder.createAlloca(
+        loc, builder.getPointerTo(firstDeque->mapPointerTy),
+        "compare_deque_first_map", pointerAlign);
+    builder.createStore(loc, firstMap, firstMapAddr);
+  }
+  mlir::Value secondMapAddr;
+  if (secondDeque) {
+    secondMapAddr = builder.createAlloca(
+        loc, builder.getPointerTo(secondDeque->mapPointerTy),
+        "compare_deque_second_map", pointerAlign);
+    builder.createStore(loc, secondMap, secondMapAddr);
+  }
+
+  mlir::Value equalAddr =
+      builder.createAlloca(loc, builder.getPointerTo(builder.getBoolTy()),
+                           "compare_deque_equal", builder.getAlignmentAttr(1));
+  builder.createStore(loc, builder.getTrue(loc), equalAddr);
+  mlir::Value one = builder.getUnsignedInt(loc, 1, *sizeWidth);
+  mlir::Value elementSize =
+      builder.getUnsignedInt(loc, elementTy.getWidth() / 8, *sizeWidth);
+  mlir::Value zero = builder.getNullValue(intTy, loc);
+
+  auto atEnd = [&](mlir::Location checkLoc,
+                   const std::optional<LicensedDequeCompareIterator> &deque,
+                   mlir::Value currentAddr, mlir::Value mapAddr,
+                   mlir::Value lastCurrent, mlir::Value lastMap) {
+    mlir::Value current = builder.createLoad(checkLoc, currentAddr);
+    mlir::Value sameCurrent = builder.createCompare(
+        checkLoc, cir::CmpOpKind::eq, current, lastCurrent);
+    if (!deque)
+      return sameCurrent;
+    mlir::Value map = builder.createLoad(checkLoc, mapAddr);
+    mlir::Value sameMap =
+        builder.createCompare(checkLoc, cir::CmpOpKind::eq, map, lastMap);
+    return builder.createLogicalAnd(checkLoc, sameMap, sameCurrent);
+  };
+
+  auto blockEnd = [&](mlir::Location endLoc,
+                      const LicensedDequeCompareIterator &deque,
+                      mlir::Value map) {
+    mlir::Value block = loadBlock(endLoc, map);
+    mlir::Value blockCount =
+        builder.getUnsignedInt(endLoc, deque.blockSize, *sizeWidth);
+    return advance(endLoc, block, blockCount);
+  };
+
+  auto remaining = [&](mlir::Location remainingLoc,
+                       const std::optional<LicensedDequeCompareIterator> &deque,
+                       mlir::Value current, mlir::Value map, bool hasBound,
+                       mlir::Value lastCurrent, mlir::Value lastMap) {
+    if (!deque)
+      return cir::PtrDiffOp::create(builder, remainingLoc, sizeTy, lastCurrent,
+                                    current)
+          .getResult();
+    mlir::Value end = blockEnd(remainingLoc, *deque, map);
+    // When the logical bound lives in the current block the span must stop
+    // at the bound rather than the block end, otherwise the memcmp would
+    // read the tail of the final block past the range
+    if (hasBound) {
+      mlir::Value sameMap =
+          builder.createCompare(remainingLoc, cir::CmpOpKind::eq, map, lastMap);
+      end = builder.createSelect(remainingLoc, sameMap, lastCurrent, end);
+    }
+    return cir::PtrDiffOp::create(builder, remainingLoc, sizeTy, end, current)
+        .getResult();
+  };
+
+  auto advanceState =
+      [&](mlir::Location stepLoc,
+          const std::optional<LicensedDequeCompareIterator> &deque,
+          mlir::Value currentAddr, mlir::Value mapAddr, mlir::Value span) {
+        mlir::Value current = builder.createLoad(stepLoc, currentAddr);
+        mlir::Value next = advance(stepLoc, current, span);
+        if (!deque) {
+          builder.createStore(stepLoc, next, currentAddr);
+          return;
+        }
+
+        mlir::Value map = builder.createLoad(stepLoc, mapAddr);
+        mlir::Value end = blockEnd(stepLoc, *deque, map);
+        mlir::Value crossed =
+            builder.createCompare(stepLoc, cir::CmpOpKind::eq, next, end);
+        cir::TernaryOp::create(
+            builder, stepLoc, crossed,
+            [&](mlir::OpBuilder &, mlir::Location crossedLoc) {
+              mlir::Value followingMap = advance(crossedLoc, map, one);
+              mlir::Value followingBlock = loadBlock(crossedLoc, followingMap);
+              builder.createStore(crossedLoc, followingBlock, currentAddr);
+              builder.createStore(crossedLoc, followingMap, mapAddr);
+              builder.createYield(crossedLoc);
+            },
+            [&](mlir::OpBuilder &, mlir::Location withinLoc) {
+              builder.createStore(withinLoc, next, currentAddr);
+              builder.createYield(withinLoc);
+            });
+      };
+
+  builder.createWhile(
+      loc,
+      [&](mlir::OpBuilder &, mlir::Location conditionLoc) {
+        mlir::Value firstMore = builder.createNot(
+            conditionLoc, atEnd(conditionLoc, firstDeque, firstCurrentAddr,
+                                firstMapAddr, last1Current, last1Map));
+        mlir::Value rangesRemain = firstMore;
+        if constexpr (boundedOp) {
+          mlir::Value secondMore = builder.createNot(
+              conditionLoc, atEnd(conditionLoc, secondDeque, secondCurrentAddr,
+                                  secondMapAddr, last2Current, last2Map));
+          rangesRemain =
+              builder.createLogicalAnd(conditionLoc, firstMore, secondMore);
+        }
+        mlir::Value equal = builder.createLoad(conditionLoc, equalAddr);
+        builder.createCondition(
+            builder.createLogicalAnd(conditionLoc, rangesRemain, equal));
+      },
+      [&](mlir::OpBuilder &, mlir::Location bodyLoc) {
+        mlir::Value current1 = builder.createLoad(bodyLoc, firstCurrentAddr);
+        mlir::Value current2 = builder.createLoad(bodyLoc, secondCurrentAddr);
+        mlir::Value map1 = firstDeque
+                               ? builder.createLoad(bodyLoc, firstMapAddr)
+                               : mlir::Value();
+        mlir::Value map2 = secondDeque
+                               ? builder.createLoad(bodyLoc, secondMapAddr)
+                               : mlir::Value();
+        mlir::Value span = remaining(bodyLoc, firstDeque, current1, map1,
+                                     /*hasBound=*/true, last1Current, last1Map);
+        if (secondDeque || boundedOp) {
+          mlir::Value secondRemaining =
+              remaining(bodyLoc, secondDeque, current2, map2,
+                        /*hasBound=*/boundedOp, last2Current, last2Map);
+          mlir::Value secondIsShorter = builder.createCompare(
+              bodyLoc, cir::CmpOpKind::lt, secondRemaining, span);
+          span = builder.createSelect(bodyLoc, secondIsShorter, secondRemaining,
+                                      span);
+        }
+
+        mlir::Value lhs =
+            builder.createBitcast(bodyLoc, current1, builder.getVoidPtrTy());
+        mlir::Value rhs =
+            builder.createBitcast(bodyLoc, current2, builder.getVoidPtrTy());
+        mlir::Value byteCount = builder.createMul(bodyLoc, span, elementSize);
+        mlir::Value spanEqual = emitMemCmpIsEqual(builder, bodyLoc, lhs, rhs,
+                                                  byteCount, intTy, zero);
+        cir::TernaryOp::create(
+            builder, bodyLoc, spanEqual,
+            [&](mlir::OpBuilder &, mlir::Location equalLoc) {
+              advanceState(equalLoc, firstDeque, firstCurrentAddr, firstMapAddr,
+                           span);
+              advanceState(equalLoc, secondDeque, secondCurrentAddr,
+                           secondMapAddr, span);
+              builder.createYield(equalLoc);
+            },
+            [&](mlir::OpBuilder &, mlir::Location unequalLoc) {
+              if constexpr (isMismatchForm) {
+                // A failing span cannot cross a block edge, and the memcmp
+                // just proved a differing element exists inside it, so the
+                // typed rescan terminates before either block end
+                builder.createWhile(
+                    unequalLoc,
+                    [&](mlir::OpBuilder &, mlir::Location rescanConditionLoc) {
+                      mlir::Value rescan1 = builder.createLoad(
+                          rescanConditionLoc, firstCurrentAddr);
+                      mlir::Value rescan2 = builder.createLoad(
+                          rescanConditionLoc, secondCurrentAddr);
+                      mlir::Value value1 =
+                          builder.createLoad(rescanConditionLoc, rescan1);
+                      mlir::Value value2 =
+                          builder.createLoad(rescanConditionLoc, rescan2);
+                      builder.createCondition(builder.createCompare(
+                          rescanConditionLoc, cir::CmpOpKind::eq, value1,
+                          value2));
+                    },
+                    [&](mlir::OpBuilder &, mlir::Location rescanLoc) {
+                      mlir::Value rescan1 =
+                          builder.createLoad(rescanLoc, firstCurrentAddr);
+                      mlir::Value rescan2 =
+                          builder.createLoad(rescanLoc, secondCurrentAddr);
+                      builder.createStore(rescanLoc,
+                                          advance(rescanLoc, rescan1, one),
+                                          firstCurrentAddr);
+                      builder.createStore(rescanLoc,
+                                          advance(rescanLoc, rescan2, one),
+                                          secondCurrentAddr);
+                      builder.createYield(rescanLoc);
+                    });
+              }
+              builder.createStore(unequalLoc, builder.getFalse(unequalLoc),
+                                  equalAddr);
+              builder.createYield(unequalLoc);
+            });
+        builder.createYield(bodyLoc);
+      });
+
+  if constexpr (!isMismatchForm) {
+    mlir::Value equal = builder.createLoad(loc, equalAddr);
+    compareOp.getResult().replaceAllUsesWith(equal);
+  } else {
+    auto rebuild = [&](const std::optional<LicensedDequeCompareIterator> &deque,
+                       cir::RecordType wrapperTy, mlir::Value seed,
+                       mlir::Value currentAddr, mlir::Value mapAddr) {
+      mlir::Value current = builder.createLoad(loc, currentAddr);
+      if (!deque)
+        return wrapperTy
+                   ? cir::InsertMemberOp::create(builder, loc, seed, 0, current)
+                         .getResult()
+                   : current;
+
+      mlir::Value map = builder.createLoad(loc, mapAddr);
+      mlir::Value rebuilt = cir::InsertMemberOp::create(
+          builder, loc, seed, deque->currentPointerIndex, current);
+      rebuilt = cir::InsertMemberOp::create(builder, loc, rebuilt,
+                                            deque->mapPointerIndex, map);
+      if (deque->blockFirstPointerIndex) {
+        mlir::Value block = loadBlock(loc, map);
+        rebuilt = cir::InsertMemberOp::create(
+            builder, loc, rebuilt, *deque->blockFirstPointerIndex, block);
+        mlir::Value count =
+            builder.getUnsignedInt(loc, deque->blockSize, *sizeWidth);
+        rebuilt = cir::InsertMemberOp::create(builder, loc, rebuilt,
+                                              *deque->blockLastPointerIndex,
+                                              advance(loc, block, count));
+      }
+      return rebuilt;
+    };
+
+    mlir::Value result1 =
+        rebuild(firstDeque, firstWrapperTy, compareOp.getLast1(),
+                firstCurrentAddr, firstMapAddr);
+    mlir::Value secondSeed = compareOp.getFirst2();
+    if constexpr (boundedOp)
+      secondSeed = compareOp.getLast2();
+    mlir::Value result2 = rebuild(secondDeque, secondWrapperTy, secondSeed,
+                                  secondCurrentAddr, secondMapAddr);
+    mlir::Value pair = builder.getConstant(loc, cir::UndefAttr::get(pairTy));
+    pair = cir::InsertMemberOp::create(builder, loc, pair, 0, result1);
+    pair = cir::InsertMemberOp::create(builder, loc, pair, 1, result2);
+    compareOp.getResult().replaceAllUsesWith(pair);
+  }
+
+  compareOp.erase();
+  if constexpr (isMismatchForm)
+    ++numMismatchDequeToMemcmp;
+  else
+    ++numEqualDequeToMemcmp;
+  return true;
+}
+
 template <typename OpT>
 static void rewriteEqualToMemcmp(OpT equalOp,
                                  mlir::SymbolTableCollection &symbolTables,
@@ -1741,10 +2274,18 @@ void LibOptPass::runOnOperation() {
                                 numSearchEqualLengthToMemcmp);
         })
         .Case<StdEqualOp, StdEqualPredOp>([&](auto equal) {
+          if (rewriteDequeCompareToBlockWalk(equal, symbolTables,
+                                             numEqualDequeToMemcmp,
+                                             numMismatchDequeToMemcmp))
+            return;
           rewriteEqualToMemcmp(equal, symbolTables, numEqualToMemcmp);
         })
         .Case<StdMismatchOp, StdMismatchBoundedOp, StdMismatchPredOp,
               StdMismatchBoundedPredOp>([&](auto mismatch) {
+          if (rewriteDequeCompareToBlockWalk(mismatch, symbolTables,
+                                             numEqualDequeToMemcmp,
+                                             numMismatchDequeToMemcmp))
+            return;
           rewriteMismatchToMemcmpLoop(mismatch, symbolTables,
                                       numMismatchToMemcmpLoop);
         });

@@ -255,7 +255,11 @@ def LibOpt : Pass<"cir-lib-opt"> {
     Statistic<"numFindDequeToMemchr", "find-deque-to-memchr",
               "Number of deque find operations rewritten to a memchr block walk">,
     Statistic<"numFindDequeToWmemchr", "find-deque-to-wmemchr",
-              "Number of deque find operations rewritten to a wmemchr block walk">
+              "Number of deque find operations rewritten to a wmemchr block walk">,
+    Statistic<"numEqualDequeToMemcmp", "equal-deque-to-memcmp",
+              "Number of deque equal operations rewritten to a memcmp block walk">,
+    Statistic<"numMismatchDequeToMemcmp", "mismatch-deque-to-memcmp",
+              "Number of deque mismatch operations rewritten to a memcmp block walk">
   ];
   let constructor = "mlir::createLibOptPass()";
   let dependentDialects = ["cir::CIRDialect"];

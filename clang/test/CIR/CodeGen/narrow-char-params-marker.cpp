@@ -926,7 +926,7 @@ bool equal_pred_int(int *first1, int *last1, int *first2) {
 }
 // The lambda proof covers wide elements too.
 // CHECK-LABEL: cir.func{{.*}} @_Z14equal_pred_int
-// CHECK: cir.call @_ZNSt3__15equalIPiS1_Z14equal_pred_intS1_S1_S1_E3$_0EEbT_S3_T0_T1_({{.*}}) {cir.elem_eq_binary_pred}
+// CHECK: cir.call @_ZNSt3__15equalIPiS1_Z14equal_pred_intS1_S1_S1_E3$_0EEbT_S3_T0_T1_({{.*}}) {cir.elem_eq_binary_pred, cir.wide_char_params}
 
 struct UserEqual {
   bool operator()(int lhs, int rhs) const { return lhs == rhs; }

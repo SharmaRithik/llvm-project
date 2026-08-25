@@ -827,8 +827,9 @@ public:
   /// Whether each parameter of `funcDecl` is a pointer, reference or
   /// standard library contiguous iterator designating the same non-volatile
   /// narrow character type, meaning char, signed char, unsigned char or
-  /// char8_t. The iterator parameters of a standard find may instead be
-  /// deque iterators carrying the verified identity for the same element.
+  /// char8_t. The iterator parameters of a standard find, of a standard
+  /// equal, and of a standard mismatch may instead be deque iterators
+  /// carrying the verified identity for the same element.
   bool hasNarrowCharParams(const clang::FunctionDecl *funcDecl);
 
   /// Whether `funcDecl` is a call operator taking a narrow character
@@ -871,9 +872,9 @@ public:
   /// verified identity for wchar_t or an integer of the target wchar width.
   bool hasWideCharParams(const clang::FunctionDecl *funcDecl);
 
-  /// Whether every iterator parameter of a mismatch overload designates
-  /// the same wide element wideCharPointee accepts.
-  static bool hasWideCharMismatchParams(const clang::FunctionDecl *funcDecl);
+  /// Whether every iterator parameter of a compare overload designates
+  /// the same wide element accepted for pointers and licensed deques.
+  bool hasWideCharCompareParams(const clang::FunctionDecl *funcDecl);
 
   /// Whether the call operator takes a whole range whose record carries a
   /// standard library identity over the searched narrow character type,
@@ -901,7 +902,7 @@ public:
   /// proves its body. The standard library's internal __equal_to functor
   /// is licensed by its reserved name and empty shape instead, since its
   /// body is usually a pending instantiation when the call is emitted.
-  static bool hasElemEqBinaryPredicate(const clang::FunctionDecl *funcDecl);
+  bool hasElemEqBinaryPredicate(const clang::FunctionDecl *funcDecl);
 
   cir::FuncOp createRuntimeFunction(cir::FuncType ty, llvm::StringRef name,
                                     mlir::NamedAttrList extraAttrs = {},

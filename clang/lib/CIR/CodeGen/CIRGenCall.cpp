@@ -391,14 +391,15 @@ void CIRGenModule::constructAttributeList(
           addUnitAttr(cir::CIRDialect::getNarrowCharParamsAttrName());
         } else if ((kind == cir::KnownFuncKind::StdFind &&
                     hasWideCharParams(func)) ||
+                   ((kind == cir::KnownFuncKind::StdEqual ||
+                     kind == cir::KnownFuncKind::StdMismatch) &&
+                    hasWideCharCompareParams(func)) ||
                    (kind == cir::KnownFuncKind::StdRangesFind &&
-                    hasWideCharRangesFindParams(func)) ||
-                   (kind == cir::KnownFuncKind::StdMismatch &&
-                    hasWideCharMismatchParams(func))) {
+                    hasWideCharRangesFindParams(func))) {
           // memcmp equality needs only a padding free element, so the
-          // wchar_t width restriction is stronger than mismatch requires.
-          // Reusing the one reviewed wide classifier keeps a single trust
-          // surface, and other widths stay future work.
+          // wchar_t width restriction is stronger than equal and mismatch
+          // require. Reusing the one reviewed wide classifier keeps a single
+          // trust surface, and other widths stay future work.
           addUnitAttr(cir::CIRDialect::getWideCharParamsAttrName());
         }
 
