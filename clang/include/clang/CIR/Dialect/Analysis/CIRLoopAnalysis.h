@@ -17,6 +17,10 @@
 
 #include <memory>
 
+namespace mlir {
+class AliasAnalysis;
+}
+
 namespace cir {
 
 /// Normalized loop domain expression independent of CIR memory form
@@ -99,15 +103,7 @@ enum class LoopMemoryLegality {
 llvm::StringRef stringifyLoopMemoryLegality(LoopMemoryLegality result);
 
 struct LoopMemoryBase {
-  cir::GlobalOp global;
-  mlir::BlockArgument argument;
-
-  bool operator==(const LoopMemoryBase &other) const {
-    return global == other.global && argument == other.argument;
-  }
-  bool operator!=(const LoopMemoryBase &other) const {
-    return !(*this == other);
-  }
+  mlir::Value pointer;
 };
 
 struct LoopMemoryAccess {
@@ -165,12 +161,16 @@ analyzeThreeLevelLoopBand(cir::ForOp anchorLoop);
 
 llvm::SmallVector<LoopElementRecurrence, 2>
 analyzeLoopElementRecurrences(const ThreeLevelLoopBand &band,
-                              const LoopDomain &inner);
+                              const LoopDomain &inner,
+                              mlir::AliasAnalysis &aliasAnalysis);
 
-LoopBandMemoryAnalysis analyzeLoopBandMemory(const ThreeLevelLoopBand &band);
+LoopBandMemoryAnalysis
+analyzeLoopBandMemory(const ThreeLevelLoopBand &band,
+                      mlir::AliasAnalysis &aliasAnalysis);
 
 /// Restricted memory independence for pointwise array nests
-LoopMemoryAnalysis analyzeLoopMemory(const TwoLevelLoopNest &nest);
+LoopMemoryAnalysis analyzeLoopMemory(const TwoLevelLoopNest &nest,
+                                     mlir::AliasAnalysis &aliasAnalysis);
 
 } // namespace cir
 

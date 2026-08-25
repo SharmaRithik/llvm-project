@@ -209,7 +209,7 @@ void volatile_element_recurrence(void) {
       VX[i] += A[j][i];
 }
 
-// CHECK-DAG: recognized loop nest in @aliased_element_recurrence {{.*}} memory unsupported address {{.*}} floating recurrences 0
+// CHECK-DAG: recognized loop nest in @aliased_element_recurrence {{.*}} memory potential dependence {{.*}} floating recurrences 1
 void aliased_element_recurrence(double *x, double (*a)[N], double *y) {
   for (int i = 0; i < N; ++i)
     for (int j = 0; j < N; ++j)
@@ -223,11 +223,18 @@ void shifted_dependence(void) {
       B[j][i] = B[j][i - 1];
 }
 
-// CHECK-DAG: recognized loop nest in @pointer_access {{.*}} memory unsupported address
+// CHECK-DAG: recognized loop nest in @pointer_access {{.*}} memory potential dependence
 void pointer_access(double *p) {
   for (int i = 1; i < N; ++i)
     for (int j = 0; j < i; ++j)
       p[j * N + i] = 0.0;
+}
+
+// CHECK-DAG: recognized loop nest in @single_pointer_access {{.*}} memory safe profitability profitable
+void single_pointer_access(double (*a)[N]) {
+  for (int i = 1; i < N; ++i)
+    for (int j = 0; j < i; ++j)
+      a[j][i] = 0.0;
 }
 
 // CHECK-DAG: recognized loop nest in @restricted_pointer_access {{.*}} memory safe profitability profitable
@@ -238,7 +245,7 @@ void restricted_pointer_access(double (*restrict a)[N],
       b[j][i] = a[j][i];
 }
 
-// CHECK-DAG: recognized loop nest in @unrestricted_pointer_access {{.*}} memory unsupported address
+// CHECK-DAG: recognized loop nest in @unrestricted_pointer_access {{.*}} memory potential dependence
 void unrestricted_pointer_access(double (*a)[N], double (*b)[N]) {
   for (int i = 1; i < N; ++i)
     for (int j = 0; j < i; ++j)
@@ -259,6 +266,18 @@ void reassigned_restricted_pointer(double (*restrict a)[N],
   for (int i = 1; i < N; ++i)
     for (int j = 0; j < i; ++j)
       a[j][i] = 0.0;
+}
+
+// CHECK-DAG: recognized anchored loop band in @anchored_unrestricted_pointer_band {{.*}} floating recurrences 1 band memory potential dependence
+void anchored_unrestricted_pointer_band(double (*a)[N], double (*b)[N],
+                                        double (*c)[N]) {
+  for (int i = 0; i < N; ++i)
+    for (int j = i + 1; j < N; ++j) {
+      b[i][j] = 0.0;
+      for (int k = 0; k < N; ++k)
+        b[i][j] += a[k][i] * a[k][j];
+      c[j][i] = b[i][j];
+    }
 }
 
 // CHECK-DAG: recognized anchored loop band in @anchored_single_phase outer init add(induction,constant) inner candidates 1 floating recurrences 1 band memory safe candidate 0 locality improved 3 regressed 0 profitable
@@ -672,6 +691,16 @@ void rejected_volatile(void) {
 // INTERCHANGE: [[SHIFTI:%[0-9]+]] = cir.alloca "i"
 // INTERCHANGE-NEXT: [[SHIFTONE:%[0-9]+]] = cir.const #cir.int<1>
 // INTERCHANGE-NEXT: cir.store{{.*}} [[SHIFTONE]], [[SHIFTI]]
+
+// INTERCHANGE-LABEL: cir.func dso_local @single_pointer_access(
+// INTERCHANGE: [[SINGLEI:%[0-9]+]] = cir.alloca "i"
+// INTERCHANGE-NEXT: [[SINGLEJ:%[0-9]+]] = cir.alloca "j"
+// INTERCHANGE-NEXT: [[SINGLEZERO:%[0-9]+]] = cir.const #cir.int<0>
+// INTERCHANGE-NEXT: cir.store{{.*}} [[SINGLEZERO]], [[SINGLEJ]]
+// INTERCHANGE-NEXT: cir.for : cond {
+// INTERCHANGE: } body {
+// INTERCHANGE: cir.store{{.*}}, [[SINGLEI]]
+// INTERCHANGE-NEXT: cir.for : cond {
 
 // INTERCHANGE-LABEL: cir.func dso_local @restricted_pointer_access(
 // INTERCHANGE: [[RESTRICTI:%[0-9]+]] = cir.alloca "i"

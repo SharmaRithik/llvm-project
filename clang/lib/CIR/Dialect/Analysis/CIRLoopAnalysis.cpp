@@ -7,10 +7,11 @@
 //===----------------------------------------------------------------------===//
 
 #include "clang/CIR/Dialect/Analysis/CIRLoopAnalysis.h"
+#include "clang/CIR/Dialect/Analysis/CIRAliasAnalysis.h"
 
+#include "mlir/Analysis/AliasAnalysis.h"
 #include "mlir/IR/Block.h"
 #include "mlir/IR/Operation.h"
-#include "mlir/IR/SymbolTable.h"
 #include "mlir/Interfaces/SideEffectInterfaces.h"
 #include "llvm/ADT/STLExtras.h"
 
@@ -308,54 +309,6 @@ static FailureOr<Value> stripIndexCast(Value value) {
   return value;
 }
 
-static bool isNoAliasFunctionArgument(BlockArgument argument) {
-  auto function =
-      dyn_cast_or_null<cir::FuncOp>(argument.getOwner()->getParentOp());
-  return function && argument.getOwner() == &function.getBody().front() &&
-         function.getArgAttr(argument.getArgNumber(), "llvm.noalias");
-}
-
-static FailureOr<BlockArgument> resolveNoAliasArgument(Value value) {
-  if (auto argument = dyn_cast<BlockArgument>(value)) {
-    if (isNoAliasFunctionArgument(argument))
-      return argument;
-    return failure();
-  }
-
-  auto load = value.getDefiningOp<cir::LoadOp>();
-  if (!load || load.getIsVolatile() || load.getMemOrder())
-    return failure();
-  auto slot = load.getAddr().getDefiningOp<cir::AllocaOp>();
-  if (!slot)
-    return failure();
-
-  cir::StoreOp definingStore;
-  for (OpOperand &use : slot.getAddr().getUses()) {
-    Operation *user = use.getOwner();
-    if (auto candidate = dyn_cast<cir::LoadOp>(user)) {
-      if (use.getOperandNumber() != cir::LoadOp::odsIndex_addr ||
-          candidate.getIsVolatile() || candidate.getMemOrder())
-        return failure();
-      continue;
-    }
-    if (auto candidate = dyn_cast<cir::StoreOp>(user)) {
-      if (use.getOperandNumber() != cir::StoreOp::odsIndex_addr ||
-          candidate.getIsVolatile() || candidate.getMemOrder() || definingStore)
-        return failure();
-      definingStore = candidate;
-      continue;
-    }
-    return failure();
-  }
-
-  if (!definingStore)
-    return failure();
-  auto argument = dyn_cast<BlockArgument>(definingStore.getValue());
-  if (!argument || !isNoAliasFunctionArgument(argument))
-    return failure();
-  return argument;
-}
-
 static FailureOr<LoopMemoryAccess>
 analyzeMemoryAccess(Operation *operation, Value address, bool isWrite,
                     ArrayRef<cir::AllocaOp> inductions) {
@@ -375,23 +328,15 @@ analyzeMemoryAccess(Operation *operation, Value address, bool isWrite,
     break;
   }
 
-  auto getGlobal = current.getDefiningOp<cir::GetGlobalOp>();
-  LoopMemoryBase base;
-  if (getGlobal) {
+  if (auto getGlobal = current.getDefiningOp<cir::GetGlobalOp>()) {
     if (getGlobal.getTls())
       return failure();
-    base.global = SymbolTable::lookupNearestSymbolFrom<cir::GlobalOp>(
-        getGlobal, getGlobal.getNameAttr());
-    if (!base.global || base.global.isDeclaration() ||
-        base.global.getAliasee() ||
-        !cir::isLocalLinkage(base.global.getLinkage()))
-      return failure();
   } else {
-    FailureOr<BlockArgument> argument = resolveNoAliasArgument(current);
+    FailureOr<BlockArgument> argument = resolveCIRPointerArgument(current);
     if (failed(argument))
       return failure();
-    base.argument = *argument;
   }
+  LoopMemoryBase base{current};
 
   SmallVector<LoopDomainExpr, 2> subscripts;
   for (Value index : indices) {
@@ -480,7 +425,8 @@ static ElementRecurrenceMatch matchElementRecurrence(cir::StoreOp store) {
 
 static FailureOr<LoopElementRecurrence> analyzeOrderedElementRecurrence(
     cir::StoreOp store, ArrayRef<cir::AllocaOp> inductions,
-    cir::AllocaOp recurrenceInduction, ArrayRef<cir::AllocaOp> laneInductions) {
+    cir::AllocaOp recurrenceInduction, ArrayRef<cir::AllocaOp> laneInductions,
+    AliasAnalysis &aliasAnalysis) {
   Block *body = store->getBlock();
   ElementRecurrenceMatch match = matchElementRecurrence(store);
   if (!match.combiner || match.combiner->getBlock() != body ||
@@ -498,7 +444,9 @@ static FailureOr<LoopElementRecurrence> analyzeOrderedElementRecurrence(
       continue;
     FailureOr<LoopMemoryAccess> loaded =
         analyzeMemoryAccess(load, load.getAddr(), false, inductions);
-    if (failed(loaded) || loaded->base != target->base ||
+    if (failed(loaded) ||
+        !aliasAnalysis.alias(loaded->base.pointer, target->base.pointer)
+             .isMust() ||
         !hasIdenticalSubscripts(*loaded, *target))
       continue;
 
@@ -513,7 +461,8 @@ static FailureOr<LoopElementRecurrence> analyzeOrderedElementRecurrence(
 
 SmallVector<LoopElementRecurrence, 2>
 analyzeLoopElementRecurrences(const ThreeLevelLoopBand &band,
-                              const LoopDomain &inner) {
+                              const LoopDomain &inner,
+                              AliasAnalysis &aliasAnalysis) {
   SmallVector<LoopElementRecurrence, 2> recurrences;
   cir::ForOp innerLoop = inner.loop;
   if (!innerLoop.getBody().hasOneBlock() ||
@@ -532,10 +481,11 @@ analyzeLoopElementRecurrences(const ThreeLevelLoopBand &band,
   innerLoop.getBody().walk([&](cir::StoreOp store) {
     FailureOr<LoopElementRecurrence> recurrence =
         analyzeOrderedElementRecurrence(store, inductions, inner.induction,
-                                        innerRecurrenceLanes);
+                                        innerRecurrenceLanes, aliasAnalysis);
     if (failed(recurrence))
       recurrence = analyzeOrderedElementRecurrence(
-          store, inductions, band.outer.induction, outerRecurrenceLanes);
+          store, inductions, band.outer.induction, outerRecurrenceLanes,
+          aliasAnalysis);
     if (failed(recurrence))
       return;
     recurrences.push_back(std::move(*recurrence));
@@ -544,7 +494,8 @@ analyzeLoopElementRecurrences(const ThreeLevelLoopBand &band,
 }
 
 static SmallVector<LoopElementRecurrence, 2>
-analyzeTwoLevelElementRecurrences(const TwoLevelLoopNest &nest) {
+analyzeTwoLevelElementRecurrences(const TwoLevelLoopNest &nest,
+                                  AliasAnalysis &aliasAnalysis) {
   SmallVector<LoopElementRecurrence, 2> recurrences;
   cir::ForOp innerLoop = nest.inner.loop;
   if (!innerLoop.getBody().hasOneBlock())
@@ -557,7 +508,7 @@ analyzeTwoLevelElementRecurrences(const TwoLevelLoopNest &nest) {
   innerLoop.getBody().walk([&](cir::StoreOp store) {
     FailureOr<LoopElementRecurrence> recurrence =
         analyzeOrderedElementRecurrence(store, inductions, nest.inner.induction,
-                                        laneInductions);
+                                        laneInductions, aliasAnalysis);
     if (succeeded(recurrence))
       recurrences.push_back(std::move(*recurrence));
   });
@@ -651,9 +602,15 @@ static bool isPositiveOffsetFromAnchor(const LoopDomain &inner,
 
 static bool areBandAccessesIndependent(const LoopMemoryAccess &lhs,
                                        const LoopMemoryAccess &rhs,
-                                       const ThreeLevelLoopBand &band) {
-  if ((!lhs.isWrite && !rhs.isWrite) || lhs.base != rhs.base)
+                                       const ThreeLevelLoopBand &band,
+                                       AliasAnalysis &aliasAnalysis) {
+  if (!lhs.isWrite && !rhs.isWrite)
     return true;
+  AliasResult alias = aliasAnalysis.alias(lhs.base.pointer, rhs.base.pointer);
+  if (alias.isNo())
+    return true;
+  if (!alias.isMust())
+    return false;
   if (hasIdenticalSubscripts(lhs, rhs))
     return true;
 
@@ -695,12 +652,13 @@ static bool areBandAccessesIndependent(const LoopMemoryAccess &lhs,
   return foundDifference;
 }
 
-LoopBandMemoryAnalysis analyzeLoopBandMemory(const ThreeLevelLoopBand &band) {
+LoopBandMemoryAnalysis analyzeLoopBandMemory(const ThreeLevelLoopBand &band,
+                                             AliasAnalysis &aliasAnalysis) {
   SmallVector<LoopMemoryAccess, 16> accesses;
   SmallVector<LoopElementRecurrence, 2> recurrences;
   for (const LoopDomain &inner : band.innerCandidates) {
     SmallVector<LoopElementRecurrence, 2> innerRecurrences =
-        analyzeLoopElementRecurrences(band, inner);
+        analyzeLoopElementRecurrences(band, inner, aliasAnalysis);
     for (LoopElementRecurrence &recurrence : innerRecurrences)
       recurrences.push_back(std::move(recurrence));
   }
@@ -725,7 +683,7 @@ LoopBandMemoryAnalysis analyzeLoopBandMemory(const ThreeLevelLoopBand &band) {
                        [&](cir::AllocaOp induction) {
                          return load.getAddr() == induction.getAddr();
                        }) ||
-          succeeded(resolveNoAliasArgument(load.getResult())) ||
+          succeeded(resolveCIRPointerArgument(load.getResult())) ||
           isInvariantLoad(load, anchorLoop))
         return WalkResult::advance();
 
@@ -800,7 +758,7 @@ LoopBandMemoryAnalysis analyzeLoopBandMemory(const ThreeLevelLoopBand &band) {
 
   for (auto lhs = accesses.begin(), end = accesses.end(); lhs != end; ++lhs)
     for (auto rhs = std::next(lhs); rhs != end; ++rhs)
-      if (!areBandAccessesIndependent(*lhs, *rhs, band))
+      if (!areBandAccessesIndependent(*lhs, *rhs, band, aliasAnalysis))
         return LoopBandMemoryAnalysis{LoopMemoryLegality::PotentialDependence,
                                       std::move(accesses),
                                       std::move(recurrences)};
@@ -861,10 +819,11 @@ static FailureOr<LoopReduction> analyzePrivateAddReduction(
   return LoopReduction{variable, load, addition, store};
 }
 
-LoopMemoryAnalysis analyzeLoopMemory(const TwoLevelLoopNest &nest) {
+LoopMemoryAnalysis analyzeLoopMemory(const TwoLevelLoopNest &nest,
+                                     AliasAnalysis &aliasAnalysis) {
   SmallVector<LoopMemoryAccess, 8> accesses;
   SmallVector<LoopElementRecurrence, 2> recurrences =
-      analyzeTwoLevelElementRecurrences(nest);
+      analyzeTwoLevelElementRecurrences(nest, aliasAnalysis);
   SmallVector<cir::LoadOp, 2> privateLoads;
   SmallVector<cir::StoreOp, 2> privateStores;
   SmallVector<cir::AllocaOp, 2> privateVariables;
@@ -886,7 +845,7 @@ LoopMemoryAnalysis analyzeLoopMemory(const TwoLevelLoopNest &nest) {
       if (load.getAddr() == outerInductionAddress ||
           load.getAddr() == innerInductionAddress)
         return WalkResult::advance();
-      if (succeeded(resolveNoAliasArgument(load.getResult())))
+      if (succeeded(resolveCIRPointerArgument(load.getResult())))
         return WalkResult::advance();
       if (isInvariantLoad(load, nest.outer.loop))
         return WalkResult::advance();
@@ -967,9 +926,13 @@ LoopMemoryAnalysis analyzeLoopMemory(const TwoLevelLoopNest &nest) {
 
   for (auto lhs = accesses.begin(), end = accesses.end(); lhs != end; ++lhs) {
     for (auto rhs = std::next(lhs); rhs != end; ++rhs) {
-      if ((!lhs->isWrite && !rhs->isWrite) || lhs->base != rhs->base)
+      if (!lhs->isWrite && !rhs->isWrite)
         continue;
-      if (!hasIdenticalSubscripts(*lhs, *rhs))
+      AliasResult alias =
+          aliasAnalysis.alias(lhs->base.pointer, rhs->base.pointer);
+      if (alias.isNo())
+        continue;
+      if (!alias.isMust() || !hasIdenticalSubscripts(*lhs, *rhs))
         return LoopMemoryAnalysis{LoopMemoryLegality::PotentialDependence,
                                   std::move(accesses),
                                   {},

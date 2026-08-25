@@ -9,6 +9,7 @@
 #include "PassDetail.h"
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/IRMapping.h"
+#include "clang/CIR/Dialect/Analysis/CIRAliasAnalysis.h"
 #include "clang/CIR/Dialect/Analysis/CIRLoopAnalysis.h"
 #include "clang/CIR/Dialect/IR/CIRDialect.h"
 #include "clang/CIR/Dialect/Passes.h"
@@ -1111,6 +1112,9 @@ struct CIRLoopInterchangePass
   using CIRLoopInterchangeBase::CIRLoopInterchangeBase;
 
   void runOnOperation() override {
+    AliasAnalysis aliasAnalysis(getOperation());
+    cir::registerCIRAliasAnalyses(aliasAnalysis);
+
     bool changed = false;
     SmallVector<cir::ForOp, 8> outerLoops;
     getOperation()->walk([&](cir::ForOp loop) {
@@ -1123,7 +1127,7 @@ struct CIRLoopInterchangePass
           cir::analyzeThreeLevelLoopBand(loop);
       if (succeeded(band)) {
         cir::LoopBandMemoryAnalysis bandMemory =
-            cir::analyzeLoopBandMemory(*band);
+            cir::analyzeLoopBandMemory(*band, aliasAnalysis);
         SmallVector<InterchangeLocality, 2> localities;
         for (const cir::LoopDomain &inner : band->innerCandidates)
           localities.push_back(
@@ -1182,7 +1186,8 @@ struct CIRLoopInterchangePass
       if (failed(nest))
         continue;
 
-      cir::LoopMemoryAnalysis memory = cir::analyzeLoopMemory(*nest);
+      cir::LoopMemoryAnalysis memory =
+          cir::analyzeLoopMemory(*nest, aliasAnalysis);
       bool profitable = isProfitableInterchange(*nest, memory);
 
       std::string message;

@@ -9,6 +9,7 @@
 #include "clang/CIR/Dialect/Analysis/CIRBasicAliasAnalysis.h"
 #include "mlir/IR/SymbolTable.h"
 #include "mlir/Interfaces/SideEffectInterfaces.h"
+#include "clang/CIR/Dialect/Analysis/CIRAliasAnalysis.h"
 #include "clang/CIR/Dialect/IR/CIRAttrs.h"
 #include "clang/CIR/Dialect/IR/CIRDialect.h"
 #include "llvm/Support/DebugLog.h"
@@ -41,17 +42,27 @@ static bool isNoAliasFunctionArgument(mlir::Value value) {
          function.getArgAttr(argument.getArgNumber(), "llvm.noalias");
 }
 
-static mlir::BlockArgument resolveArgumentSlot(cir::LoadOp load) {
+mlir::FailureOr<mlir::BlockArgument>
+cir::resolveCIRPointerArgument(mlir::Value value) {
+  if (auto argument = mlir::dyn_cast<mlir::BlockArgument>(value)) {
+    if (getArgumentFunction(argument))
+      return argument;
+    return mlir::failure();
+  }
+
+  auto load = value.getDefiningOp<cir::LoadOp>();
+  if (!load)
+    return mlir::failure();
   if (load.getIsVolatile() || load.getMemOrder())
-    return {};
+    return mlir::failure();
 
   auto slot = load.getAddr().getDefiningOp<cir::AllocaOp>();
   if (!slot)
-    return {};
+    return mlir::failure();
 
   auto function = slot->getParentOfType<cir::FuncOp>();
   if (!function || slot->getBlock() != &function.getBody().front())
-    return {};
+    return mlir::failure();
 
   cir::StoreOp definingStore;
   llvm::SmallVector<cir::LoadOp, 4> loads;
@@ -60,36 +71,36 @@ static mlir::BlockArgument resolveArgumentSlot(cir::LoadOp load) {
     if (auto candidate = mlir::dyn_cast<cir::LoadOp>(user)) {
       if (use.getOperandNumber() != cir::LoadOp::odsIndex_addr ||
           candidate.getIsVolatile() || candidate.getMemOrder())
-        return {};
+        return mlir::failure();
       loads.push_back(candidate);
       continue;
     }
     if (auto candidate = mlir::dyn_cast<cir::StoreOp>(user)) {
       if (use.getOperandNumber() != cir::StoreOp::odsIndex_addr ||
           candidate.getIsVolatile() || candidate.getMemOrder() || definingStore)
-        return {};
+        return mlir::failure();
       definingStore = candidate;
       continue;
     }
-    return {};
+    return mlir::failure();
   }
 
   if (!definingStore)
-    return {};
+    return mlir::failure();
   auto argument = mlir::dyn_cast<mlir::BlockArgument>(definingStore.getValue());
   if (!argument || getArgumentFunction(argument) != function)
-    return {};
+    return mlir::failure();
 
   mlir::Block *entry = slot->getBlock();
   if (definingStore->getBlock() != entry)
-    return {};
+    return mlir::failure();
   for (cir::LoadOp candidate : loads) {
     mlir::Operation *entryAncestor = candidate;
     while (entryAncestor && entryAncestor->getBlock() != entry)
       entryAncestor = entryAncestor->getParentOp();
     if (candidate.getType() != argument.getType() || !entryAncestor ||
         !definingStore->isBeforeInBlock(entryAncestor))
-      return {};
+      return mlir::failure();
   }
   return argument;
 }
@@ -140,13 +151,14 @@ mlir::Value CIRBasicAliasAnalysis::getUnderlyingObject(mlir::Value val) {
     }
 
     if (auto load = mlir::dyn_cast<cir::LoadOp>(defOp)) {
-      mlir::BlockArgument argument = resolveArgumentSlot(load);
-      if (!argument) {
+      mlir::FailureOr<mlir::BlockArgument> argument =
+          cir::resolveCIRPointerArgument(load.getResult());
+      if (mlir::failed(argument)) {
         LDBG() << "Noncanonical pointer slot load";
         break;
       }
       LDBG() << "Walking through canonical argument slot";
-      val = argument;
+      val = *argument;
       continue;
     }
 
