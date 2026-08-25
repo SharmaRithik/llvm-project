@@ -4296,6 +4296,37 @@ static std::optional<ElemEqPredicateShape> elemEqPredicateShape(
   return ElemEqPredicateShape{closure, elemTy, other};
 }
 
+// Whether `funcDecl` is a standard find over two bit iterators carrying
+// the verified identity for bool, searching a referenced bool value. The
+// value form has no lambda to prove, the parameter types carry the whole
+// fact.
+bool CIRGenModule::hasBoolFindParams(const FunctionDecl *funcDecl) {
+  if (funcDecl->getNumParams() != 3)
+    return false;
+  clang::QualType iteratorTy = funcDecl->getParamDecl(0)->getType();
+  clang::QualType lastTy = funcDecl->getParamDecl(1)->getType();
+  if (iteratorTy.isVolatileQualified() || lastTy.isVolatileQualified() ||
+      !iteratorTy->isRecordType() || !lastTy->isRecordType())
+    return false;
+  iteratorTy = iteratorTy.getCanonicalType().getUnqualifiedType();
+  lastTy = lastTy.getCanonicalType().getUnqualifiedType();
+  if (iteratorTy != lastTy)
+    return false;
+  auto structTy = mlir::dyn_cast<cir::StructType>(convertType(iteratorTy));
+  cir::StdTypeInfoAttr info =
+      structTy ? structTy.getStdTypeInfo() : cir::StdTypeInfoAttr();
+  if (!info || info.getKind() != cir::StdTypeKind::StdBitIterator ||
+      info.getElement() != convertType(astContext.BoolTy))
+    return false;
+  clang::QualType valueTy = funcDecl->getParamDecl(2)->getType();
+  if (!valueTy->isReferenceType())
+    return false;
+  valueTy = valueTy.getNonReferenceType();
+  if (valueTy.isVolatileQualified())
+    return false;
+  return valueTy.getCanonicalType().getUnqualifiedType() == astContext.BoolTy;
+}
+
 static std::optional<BoolEqPredicateShape>
 boolEqPredicateShape(CIRGenModule &cgm, const FunctionDecl *funcDecl,
                      cir::KnownFuncKind kind) {

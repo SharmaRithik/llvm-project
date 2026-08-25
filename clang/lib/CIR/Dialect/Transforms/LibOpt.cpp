@@ -1901,10 +1901,14 @@ template <typename OpT>
 static bool
 rewriteFindBitToWordScan(OpT findOp,
                          mlir::Pass::Statistic &numFindBitToWordScan) {
-  static_assert(std::is_same_v<OpT, StdFindIfOp> ||
+  static_assert(std::is_same_v<OpT, StdFindOp> ||
+                std::is_same_v<OpT, StdFindIfOp> ||
                 std::is_same_v<OpT, StdFindIfNotOp> ||
                 std::is_same_v<OpT, StdRangesFindIfOp> ||
                 std::is_same_v<OpT, StdRangesFindIfNotOp>);
+  // The value form has no predicate, its sought bool arrives behind the
+  // pattern reference and the cir.bool_params marker carries the proof.
+  constexpr bool valueForm = std::is_same_v<OpT, StdFindOp>;
 
   // The loop state needs a function allocation scope
   cir::FuncOp enclosing = findOp->template getParentOfType<cir::FuncOp>();
@@ -1919,30 +1923,41 @@ rewriteFindBitToWordScan(OpT findOp,
       noBuiltinListDisables(enclosing, algorithmName))
     return false;
 
-  mlir::BoolAttr predicateValue =
-      findOp->template getAttrOfType<mlir::BoolAttr>(
-          cir::CIRDialect::getBoolEqPredValueAttrName());
-
+  mlir::BoolAttr predicateValue;
   bool captureByRef = false;
-  if (!predicateValue) {
+  if constexpr (valueForm) {
     if (!findOp->template getAttrOfType<mlir::UnitAttr>(
-            cir::CIRDialect::getBoolEqPredAttrName()))
+            cir::CIRDialect::getBoolParamsAttrName()))
       return false;
-
-    auto closureTy =
-        mlir::dyn_cast<cir::RecordType>(findOp.getPred().getType());
-    if (!closureTy || closureTy.isUnion() || !closureTy.isComplete() ||
-        closureTy.getMembers().size() != 1)
+    auto patternPtrTy =
+        mlir::dyn_cast<cir::PointerType>(findOp.getPattern().getType());
+    if (!patternPtrTy || patternPtrTy.getAddrSpace() ||
+        !mlir::isa<cir::BoolType>(patternPtrTy.getPointee()))
       return false;
+  } else {
+    predicateValue = findOp->template getAttrOfType<mlir::BoolAttr>(
+        cir::CIRDialect::getBoolEqPredValueAttrName());
 
-    mlir::Type captureTy = closureTy.getMembers()[0];
-    if (auto capturePtrTy = mlir::dyn_cast<cir::PointerType>(captureTy)) {
-      if (capturePtrTy.getAddrSpace() ||
-          !mlir::isa<cir::BoolType>(capturePtrTy.getPointee()))
+    if (!predicateValue) {
+      if (!findOp->template getAttrOfType<mlir::UnitAttr>(
+              cir::CIRDialect::getBoolEqPredAttrName()))
         return false;
-      captureByRef = true;
-    } else if (!mlir::isa<cir::BoolType>(captureTy)) {
-      return false;
+
+      auto closureTy =
+          mlir::dyn_cast<cir::RecordType>(findOp.getPred().getType());
+      if (!closureTy || closureTy.isUnion() || !closureTy.isComplete() ||
+          closureTy.getMembers().size() != 1)
+        return false;
+
+      mlir::Type captureTy = closureTy.getMembers()[0];
+      if (auto capturePtrTy = mlir::dyn_cast<cir::PointerType>(captureTy)) {
+        if (capturePtrTy.getAddrSpace() ||
+            !mlir::isa<cir::BoolType>(capturePtrTy.getPointee()))
+          return false;
+        captureByRef = true;
+      } else if (!mlir::isa<cir::BoolType>(captureTy)) {
+        return false;
+      }
     }
   }
 
@@ -2043,7 +2058,9 @@ rewriteFindBitToWordScan(OpT findOp,
           },
           [&](mlir::OpBuilder &, mlir::Location l) {
             mlir::Value sought;
-            if (predicateValue) {
+            if constexpr (valueForm) {
+              sought = builder.createLoad(l, findOp.getPattern());
+            } else if (predicateValue) {
               sought = builder.getBool(predicateValue.getValue(), l);
             } else {
               sought =
@@ -2246,6 +2263,8 @@ void LibOptPass::runOnOperation() {
     llvm::TypeSwitch<mlir::Operation *>(op)
         .Case<StdFindOp, StdRangesFindOp, StdRangesFindRangeOp>([&](auto find) {
           if constexpr (std::is_same_v<decltype(find), StdFindOp>) {
+            if (rewriteFindBitToWordScan(find, numFindBitToWordScan))
+              return;
             if (rewriteFindDequeToBlockWalk(find, symbolTables,
                                             numFindDequeToMemchr,
                                             numFindDequeToWmemchr))

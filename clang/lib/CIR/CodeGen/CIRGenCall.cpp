@@ -403,6 +403,9 @@ void CIRGenModule::constructAttributeList(
           addUnitAttr(cir::CIRDialect::getWideCharParamsAttrName());
         }
 
+        if (kind == cir::KnownFuncKind::StdFind && hasBoolFindParams(func)) {
+          addUnitAttr(cir::CIRDialect::getBoolParamsAttrName());
+        }
         if (kind == cir::KnownFuncKind::StdFindIf ||
             kind == cir::KnownFuncKind::StdFindIfNot ||
             kind == cir::KnownFuncKind::StdRangesFindIf ||
