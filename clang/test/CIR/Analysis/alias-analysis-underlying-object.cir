@@ -107,17 +107,18 @@ cir.func @ptr_stride_dynamic_not_stripped(%n: !s32i) {
 // CHECK-DAG: s1#0 <-> m1_0#0: MustAlias
 // CHECK-DAG: s2#0 <-> m1_0#0: NoAlias
 // CHECK-DAG: s1#0 <-> m1_1#0: MayAlias
-// CHECK-DAG: s2#0 <-> m1_1#0: MayAlias
-// CHECK-DAG: m1_0#0 <-> m1_1#0: MayAlias
+// CHECK-DAG: s2#0 <-> m1_1#0: NoAlias
+// CHECK-DAG: m1_0#0 <-> m1_1#0: NoAlias
 // CHECK-DAG: s1#0 <-> m2_0#0: NoAlias
 // CHECK-DAG: s2#0 <-> m2_0#0: MustAlias
 // CHECK-DAG: m1_0#0 <-> m2_0#0: NoAlias
-// CHECK-DAG: m1_1#0 <-> m2_0#0: MayAlias
-// CHECK-DAG: s1#0 <-> m2_1#0: MayAlias
+// CHECK-DAG: m1_1#0 <-> m2_0#0: NoAlias
+// CHECK-DAG: s1#0 <-> m2_1#0: NoAlias
 // CHECK-DAG: s2#0 <-> m2_1#0: MayAlias
-// CHECK-DAG: m1_0#0 <-> m2_1#0: MayAlias
-// CHECK-DAG: m1_1#0 <-> m2_1#0: MayAlias
-// CHECK-DAG: m2_0#0 <-> m2_1#0: MayAlias
+// CHECK-DAG: m1_0#0 <-> m2_1#0: NoAlias
+// CHECK-DAG: m1_1#0 <-> m2_1#0: NoAlias
+// CHECK-DAG: m2_0#0 <-> m2_1#0: NoAlias
+// CHECK-DAG: m1_1#0 <-> m1_1_again#0: MustAlias
 
 !s32i = !cir.int<s, 32>
 !rec_S = !cir.struct<"S" {data !s32i, data !s32i}>
@@ -132,6 +133,50 @@ cir.func @get_member_distinct_allocas() {
           : !cir.ptr<!rec_S> -> !cir.ptr<!s32i>
   %m2_1 = cir.get_member %s2[1] {name = "y", test.ptr = "m2_1"}
           : !cir.ptr<!rec_S> -> !cir.ptr<!s32i>
+  %m1_1_again = cir.get_member %s1[1] {name = "y", test.ptr = "m1_1_again"}
+          : !cir.ptr<!rec_S> -> !cir.ptr<!s32i>
+  cir.return
+}
+
+// -----
+
+// CHECK-LABEL: Testing : "get_member_global_subobjects"
+// CHECK-DAG: first_x#0 <-> second_x#0: MustAlias
+// CHECK-DAG: first_x#0 <-> second_y#0: NoAlias
+// CHECK-DAG: first_y#0 <-> second_x#0: NoAlias
+// CHECK-DAG: first_y#0 <-> second_y#0: MustAlias
+
+!s32i = !cir.int<s, 32>
+!rec_S = !cir.struct<"S" {data !s32i, data !s32i}>
+cir.global "private" external @record : !rec_S
+cir.func @get_member_global_subobjects() {
+  %first = cir.get_global @record : !cir.ptr<!rec_S>
+  %second = cir.get_global @record : !cir.ptr<!rec_S>
+  %first_x = cir.get_member %first[0] {name = "x", test.ptr = "first_x"}
+          : !cir.ptr<!rec_S> -> !cir.ptr<!s32i>
+  %first_y = cir.get_member %first[1] {name = "y", test.ptr = "first_y"}
+          : !cir.ptr<!rec_S> -> !cir.ptr<!s32i>
+  %second_x = cir.get_member %second[0] {name = "x", test.ptr = "second_x"}
+          : !cir.ptr<!rec_S> -> !cir.ptr<!s32i>
+  %second_y = cir.get_member %second[1] {name = "y", test.ptr = "second_y"}
+          : !cir.ptr<!rec_S> -> !cir.ptr<!s32i>
+  cir.return
+}
+
+// -----
+
+// CHECK-LABEL: Testing : "get_union_members"
+// CHECK-DAG: first#0 <-> second#0: MayAlias
+
+!s32i = !cir.int<s, 32>
+!u32i = !cir.int<u, 32>
+!rec_U = !cir.union<"U" {data !s32i, data !u32i}>
+cir.func @get_union_members() {
+  %value = cir.alloca "value" align(4) : !cir.ptr<!rec_U>
+  %first = cir.get_member %value[0] {name = "first", test.ptr = "first"}
+          : !cir.ptr<!rec_U> -> !cir.ptr<!s32i>
+  %second = cir.get_member %value[1] {name = "second", test.ptr = "second"}
+          : !cir.ptr<!rec_U> -> !cir.ptr<!u32i>
   cir.return
 }
 

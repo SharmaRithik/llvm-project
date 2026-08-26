@@ -54,11 +54,6 @@ public:
   mlir::ModRefResult getModRef(mlir::Operation *op, mlir::Value location);
 
 private:
-  /// Attempt to find the underlying allocation source for `val` by walking
-  /// through pointer arithmetic, casts, and other CIR ops. Returns `val` if
-  /// no more specific source is found.
-  mlir::Value getUnderlyingObject(mlir::Value val);
-
   /// Classify the relationship between \p lhs and \p rhs.  Returns one of:
   ///   Distinct      – provably different allocations
   ///   Identical     – same allocation, no offset

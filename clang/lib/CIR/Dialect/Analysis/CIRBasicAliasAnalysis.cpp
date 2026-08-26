@@ -12,6 +12,7 @@
 #include "clang/CIR/Dialect/Analysis/CIRAliasAnalysis.h"
 #include "clang/CIR/Dialect/IR/CIRAttrs.h"
 #include "clang/CIR/Dialect/IR/CIRDialect.h"
+#include "clang/CIR/Dialect/IR/CIRTypes.h"
 #include "llvm/Support/DebugLog.h"
 
 #define DEBUG_TYPE "cir-basic-alias-analysis"
@@ -24,6 +25,20 @@ using namespace cir;
 //===----------------------------------------------------------------------===//
 
 static constexpr unsigned MaxLookupDepth = 6;
+
+namespace {
+
+struct RecordSubobject {
+  cir::RecordType record;
+  uint64_t index;
+};
+
+struct UnderlyingObject {
+  mlir::Value value;
+  llvm::SmallVector<RecordSubobject, 2> path;
+};
+
+} // namespace
 
 static cir::FuncOp getArgumentFunction(mlir::BlockArgument argument) {
   auto function =
@@ -126,8 +141,10 @@ static mlir::Operation *getIdentifiedObject(mlir::Value value,
   return global.getOperation();
 }
 
-mlir::Value CIRBasicAliasAnalysis::getUnderlyingObject(mlir::Value val) {
+static UnderlyingObject getUnderlyingObject(mlir::Value val) {
   LDBG() << "Getting underlying object for: " << val;
+
+  UnderlyingObject object{val, {}};
 
   for (unsigned depth = 0; depth < MaxLookupDepth; ++depth) {
     mlir::Operation *defOp = val.getDefiningOp();
@@ -183,16 +200,13 @@ mlir::Value CIRBasicAliasAnalysis::getUnderlyingObject(mlir::Value val) {
       break;
     }
 
-    // Handle special cases for zero-offset sub-object accesses.
+    // Track static record subobjects.
     if (auto op = mlir::dyn_cast<cir::GetMemberOp>(defOp)) {
-      if (op.getIndex() == 0) {
-        LDBG() << "GetMemberOp[0], following to underlying object";
-        val = op.getAddr();
-        continue;
-      } else {
-        LDBG() << "GetMemberOp, non-zero index, stopping";
-        break;
-      }
+      auto record = mlir::cast<cir::RecordType>(op.getAddrTy().getPointee());
+      object.path.push_back(RecordSubobject{record, op.getIndex()});
+      LDBG() << "Walking through GetMemberOp[" << op.getIndex() << ']';
+      val = op.getAddr();
+      continue;
     }
     if (auto op = mlir::dyn_cast<cir::GetElementOp>(defOp)) {
       cir::IntAttr index;
@@ -242,19 +256,74 @@ mlir::Value CIRBasicAliasAnalysis::getUnderlyingObject(mlir::Value val) {
     LDBG() << "Unhandled operation, stopping";
     break; // Unknown op — stop here conservatively.
   }
-  return val;
+  object.value = val;
+  return object;
+}
+
+static bool hasSameRecordPath(ArrayRef<RecordSubobject> lhs,
+                              ArrayRef<RecordSubobject> rhs) {
+  return lhs.size() == rhs.size() &&
+         llvm::equal(lhs, rhs,
+                     [](const RecordSubobject &lhsStep,
+                        const RecordSubobject &rhsStep) {
+                       return lhsStep.record == rhsStep.record &&
+                              lhsStep.index == rhsStep.index;
+                     });
+}
+
+static bool hasOnlyZeroOffsetMembers(ArrayRef<RecordSubobject> path) {
+  return llvm::all_of(path,
+                      [](const RecordSubobject &step) { return !step.index; });
 }
 
 CIRBasicAliasAnalysis::ObjectRelation
 CIRBasicAliasAnalysis::classifyObjects(mlir::Value lhs, mlir::Value rhs) {
   LDBG() << "Checking if " << lhs << " and " << rhs << " are distinct objects";
 
-  mlir::Value lhsObj = getUnderlyingObject(lhs);
-  mlir::Value rhsObj = getUnderlyingObject(rhs);
+  UnderlyingObject lhsUnderlying = getUnderlyingObject(lhs);
+  UnderlyingObject rhsUnderlying = getUnderlyingObject(rhs);
+  mlir::Value lhsObj = lhsUnderlying.value;
+  mlir::Value rhsObj = rhsUnderlying.value;
+
+  auto classifySameObject = [&]() {
+    ArrayRef<RecordSubobject> lhsPath = lhsUnderlying.path;
+    ArrayRef<RecordSubobject> rhsPath = rhsUnderlying.path;
+    if (hasSameRecordPath(lhsPath, rhsPath))
+      return ObjectRelation::Identical;
+
+    auto lhsStep = lhsPath.rbegin();
+    auto rhsStep = rhsPath.rbegin();
+    while (lhsStep != lhsPath.rend() && rhsStep != rhsPath.rend() &&
+           lhsStep->record == rhsStep->record &&
+           lhsStep->index == rhsStep->index) {
+      ++lhsStep;
+      ++rhsStep;
+    }
+
+    if (lhsStep == lhsPath.rend() || rhsStep == rhsPath.rend()) {
+      ArrayRef<RecordSubobject> remainder =
+          lhsStep == lhsPath.rend()
+              ? rhsPath.take_front(rhsPath.rend() - rhsStep)
+              : lhsPath.take_front(lhsPath.rend() - lhsStep);
+      return hasOnlyZeroOffsetMembers(remainder) ? ObjectRelation::Identical
+                                                 : ObjectRelation::Unknown;
+    }
+
+    if (lhsStep->record != rhsStep->record)
+      return ObjectRelation::Unknown;
+    auto record = mlir::dyn_cast<cir::StructType>(lhsStep->record);
+    if (!record)
+      return ObjectRelation::Unknown;
+    ArrayRef<cir::RecordMemberKind> kinds = record.getMemberKinds();
+    if (kinds[lhsStep->index] != cir::RecordMemberKind::Data ||
+        kinds[rhsStep->index] != cir::RecordMemberKind::Data)
+      return ObjectRelation::Unknown;
+    return ObjectRelation::Distinct;
+  };
 
   if (lhsObj == rhsObj) {
     LDBG() << "Identical values, not distinct";
-    return ObjectRelation::Identical;
+    return classifySameObject();
   }
 
   auto lhsGlobal = lhsObj.getDefiningOp<cir::GetGlobalOp>();
@@ -262,7 +331,7 @@ CIRBasicAliasAnalysis::classifyObjects(mlir::Value lhs, mlir::Value rhs) {
   if (lhsGlobal && rhsGlobal &&
       lhsGlobal.getNameAttr() == rhsGlobal.getNameAttr()) {
     LDBG() << "Same global object";
-    return ObjectRelation::Identical;
+    return classifySameObject();
   }
 
   bool lhsMayAliasOtherGlobal;
