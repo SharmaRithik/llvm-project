@@ -309,6 +309,17 @@ static FailureOr<Value> stripIndexCast(Value value) {
   return value;
 }
 
+static bool isSupportedMemoryBase(Value value) {
+  Value root = value;
+  while (auto member = root.getDefiningOp<cir::GetMemberOp>())
+    root = member.getAddr();
+
+  if (auto getGlobal = root.getDefiningOp<cir::GetGlobalOp>())
+    return !getGlobal.getTls();
+
+  return succeeded(resolveCIRPointerArgument(root));
+}
+
 static FailureOr<LoopMemoryAccess>
 analyzeMemoryAccess(Operation *operation, Value address, bool isWrite,
                     ArrayRef<cir::AllocaOp> inductions) {
@@ -328,14 +339,8 @@ analyzeMemoryAccess(Operation *operation, Value address, bool isWrite,
     break;
   }
 
-  if (auto getGlobal = current.getDefiningOp<cir::GetGlobalOp>()) {
-    if (getGlobal.getTls())
-      return failure();
-  } else {
-    FailureOr<BlockArgument> argument = resolveCIRPointerArgument(current);
-    if (failed(argument))
-      return failure();
-  }
+  if (!isSupportedMemoryBase(current))
+    return failure();
   LoopMemoryBase base{current};
 
   SmallVector<LoopDomainExpr, 2> subscripts;
@@ -734,7 +739,7 @@ LoopBandMemoryAnalysis analyzeLoopBandMemory(const ThreeLevelLoopBand &band,
     }
 
     if (isa<cir::YieldOp, cir::ConditionOp, cir::ScopeOp, cir::GetGlobalOp,
-            cir::GetElementOp, cir::PtrStrideOp>(operation))
+            cir::GetMemberOp, cir::GetElementOp, cir::PtrStrideOp>(operation))
       return WalkResult::advance();
     if (isa<cir::LoopOpInterface, cir::BreakOp, cir::ContinueOp, cir::ReturnOp>(
             operation) ||
@@ -886,8 +891,8 @@ LoopMemoryAnalysis analyzeLoopMemory(const TwoLevelLoopNest &nest,
       return WalkResult::advance();
     }
 
-    if (isa<cir::YieldOp, cir::ScopeOp, cir::GetGlobalOp, cir::GetElementOp,
-            cir::PtrStrideOp>(operation))
+    if (isa<cir::YieldOp, cir::ScopeOp, cir::GetGlobalOp, cir::GetMemberOp,
+            cir::GetElementOp, cir::PtrStrideOp>(operation))
       return WalkResult::advance();
     if (isa<cir::LoopOpInterface, cir::BreakOp, cir::ContinueOp, cir::ReturnOp>(
             operation) ||

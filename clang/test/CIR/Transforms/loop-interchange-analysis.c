@@ -25,11 +25,24 @@ static double Y[N];
 static volatile double VX[N];
 static long L[N][N];
 
+struct RecordArrays {
+  double first[N][N];
+  double second[N][N];
+};
+static struct RecordArrays RecordData;
+
 // CHECK-DAG: recognized loop nest in @tri_upper outer init constant condition induction lt constant inner init constant condition induction lt induction memory safe
 void tri_upper(void) {
   for (int i = 1; i < N; ++i)
     for (int j = 0; j < i; ++j)
       B[j][i] = A[j][i];
+}
+
+// CHECK-DAG: recognized loop nest in @record_field_access {{.*}} memory safe profitability profitable
+void record_field_access(void) {
+  for (int i = 0; i < N; ++i)
+    for (int j = 0; j < N; ++j)
+      RecordData.second[j][i] = RecordData.first[j][i];
 }
 
 // CHECK-DAG: recognized loop nest in @tri_fill outer init constant condition induction lt constant inner init constant condition induction lt induction memory safe
