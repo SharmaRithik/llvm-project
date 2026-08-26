@@ -19,5 +19,7 @@ include_directories(${LLVM_MAIN_SRC_DIR}/../mlir/include)
 include_directories(${CMAKE_BINARY_DIR}/tools/mlir/include)
 include_directories(${CUDA_TILE_SOURCE_DIR}/include)
 include_directories(${CUDA_TILE_BINARY_DIR}/include)
+include_directories(${CMAKE_CURRENT_SOURCE_DIR}/include)
 
+add_subdirectory(lib)
 add_subdirectory(tools)

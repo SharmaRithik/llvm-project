@@ -1,0 +1,43 @@
+// RUN: split-file %s %t
+// RUN: not cir-tile-translate %t/version.cir 2>&1 | FileCheck %s --check-prefix=VERSION
+// RUN: not cir-tile-translate %t/name.cir 2>&1 | FileCheck %s --check-prefix=NAME
+// RUN: not cir-tile-translate %t/count.cir 2>&1 | FileCheck %s --check-prefix=COUNT
+// RUN: not cir-tile-translate %t/type.cir 2>&1 | FileCheck %s --check-prefix=TYPE
+// RUN: not cir-tile-translate %t/duplicate.cir 2>&1 | FileCheck %s --check-prefix=DUPLICATE
+// RUN: not cir-tile-translate %t/axis.cir 2>&1 | FileCheck %s --check-prefix=AXIS
+
+//--- version.cir
+module {
+  cir.func private @bad() [#cir.annotation<"cir_tile.v2.bid", [0 : i32]>]
+}
+// VERSION: uses unsupported CIR Tile annotation 'cir_tile.v2.bid'
+
+//--- name.cir
+module {
+  cir.func private @bad() [#cir.annotation<"cir_tile.v1.unknown">]
+}
+// NAME: uses unknown CIR Tile annotation 'cir_tile.v1.unknown'
+
+//--- count.cir
+module {
+  cir.func private @bad() [#cir.annotation<"cir_tile.v1.mma", [32 : i32, 32 : i32]>]
+}
+// COUNT: annotation 'cir_tile.v1.mma' expects 3 integer arguments, got 2
+
+//--- type.cir
+module {
+  cir.func private @bad() [#cir.annotation<"cir_tile.v1.bid", ["x"]>]
+}
+// TYPE: annotation 'cir_tile.v1.bid' requires integer arguments
+
+//--- duplicate.cir
+module {
+  cir.func private @bad() [#cir.annotation<"cir_tile.v1.kernel">, #cir.annotation<"cir_tile.v1.kernel">]
+}
+// DUPLICATE: has more than one CIR Tile annotation
+
+//--- axis.cir
+module {
+  cir.func private @bad() [#cir.annotation<"cir_tile.v1.bid", [3 : i32]>]
+}
+// AXIS: annotation 'cir_tile.v1.bid' requires an axis from 0 to 2

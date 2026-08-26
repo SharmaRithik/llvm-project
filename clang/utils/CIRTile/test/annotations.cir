@@ -1,0 +1,19 @@
+// RUN: cir-tile-translate --print-annotations %s | FileCheck %s
+
+!s32i = !cir.int<s, 32>
+
+module {
+  cir.func private @kernel() [#cir.annotation<"unrelated">, #cir.annotation<"cir_tile.v1.kernel">]
+  cir.func private @bid() -> (!s32i) [#cir.annotation<"cir_tile.v1.bid", [1 : i32]>]
+  cir.func private @zero() [#cir.annotation<"cir_tile.v1.zero", [32 : i32, 32 : i32]>]
+  cir.func private @load() [#cir.annotation<"cir_tile.v1.load", [32 : i32, 16 : i32, 64 : i32, 64 : i32]>]
+  cir.func private @mma() [#cir.annotation<"cir_tile.v1.mma", [32 : i32, 32 : i32, 16 : i32]>]
+  cir.func private @store() [#cir.annotation<"cir_tile.v1.store", [32 : i32, 32 : i32, 64 : i32, 64 : i32]>]
+}
+
+// CHECK: @kernel cir_tile.v1.kernel
+// CHECK: @bid cir_tile.v1.bid(1)
+// CHECK: @zero cir_tile.v1.zero(32, 32)
+// CHECK: @load cir_tile.v1.load(32, 16, 64, 64)
+// CHECK: @mma cir_tile.v1.mma(32, 32, 16)
+// CHECK: @store cir_tile.v1.store(32, 32, 64, 64)

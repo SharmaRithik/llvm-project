@@ -1,11 +1,26 @@
 //===- cir-tile-translate.cpp - CIR to CUDA Tile tool --------------------===//
 
 #include "cuda_tile/Dialect/CudaTile/IR/Dialect.h"
+#include "mlir/Dialect/LLVMIR/LLVMDialect.h"
 #include "mlir/IR/DialectRegistry.h"
 #include "mlir/IR/MLIRContext.h"
-#include "clang/CIR/Dialect/IR/CIRDialect.h"
+#include "mlir/Parser/Parser.h"
+#include "clang/CIR/InitAllDialects.h"
+#include "clang/CIRTile/Annotation.h"
 #include "llvm/Support/CommandLine.h"
+#include "llvm/Support/ErrorOr.h"
 #include "llvm/Support/InitLLVM.h"
+#include "llvm/Support/MemoryBuffer.h"
+#include "llvm/Support/SourceMgr.h"
+#include "llvm/Support/raw_ostream.h"
+
+static llvm::cl::opt<std::string>
+    inputFilename(llvm::cl::Positional, llvm::cl::desc("<input CIR file>"),
+                  llvm::cl::init("-"), llvm::cl::value_desc("filename"));
+
+static llvm::cl::opt<bool>
+    printAnnotations("print-annotations",
+                     llvm::cl::desc("Print decoded CIR Tile annotations"));
 
 int main(int argc, char **argv) {
   llvm::InitLLVM initLLVM(argc, argv);
@@ -13,9 +28,25 @@ int main(int argc, char **argv) {
                                     "CIR to CUDA Tile translator\n");
 
   mlir::DialectRegistry registry;
-  registry.insert<cir::CIRDialect, mlir::cuda_tile::CudaTileDialect>();
+  cir::registerAllDialects(registry);
+  registry.insert<mlir::LLVM::LLVMDialect, mlir::cuda_tile::CudaTileDialect>();
 
   mlir::MLIRContext context(registry);
-  context.loadAllAvailableDialects();
-  return 0;
+  llvm::ErrorOr<std::unique_ptr<llvm::MemoryBuffer>> input =
+      llvm::MemoryBuffer::getFileOrSTDIN(inputFilename);
+  if (std::error_code error = input.getError()) {
+    llvm::errs() << "error: cannot open '" << inputFilename
+                 << "': " << error.message() << '\n';
+    return 1;
+  }
+
+  llvm::SourceMgr sourceManager;
+  sourceManager.AddNewSourceBuffer(std::move(*input), llvm::SMLoc());
+  mlir::OwningOpRef<mlir::ModuleOp> module =
+      mlir::parseSourceFile<mlir::ModuleOp>(sourceManager, &context);
+  if (!module)
+    return 1;
+
+  llvm::raw_ostream *output = printAnnotations ? &llvm::outs() : nullptr;
+  return mlir::failed(clang::CIRTile::validateAnnotations(*module, output));
 }
