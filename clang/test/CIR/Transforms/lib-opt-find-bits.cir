@@ -2,6 +2,7 @@
 
 !u32i = !cir.int<u, 32>
 !u64i = !cir.int<u, 64>
+!u8i = !cir.int<u, 8>
 !biter = !cir.struct<class "bit_iterator" {data !cir.ptr<!u64i>, data !u32i}, std_type_info = #cir.std_type_info<"std::bit_iterator", !cir.bool, roles {bit_offset = array<i32: 1>, word_pointer = array<i32: 0>}>>
 !closure = !cir.struct<class "BoolClosure" {data !cir.bool}>
 !refclosure = !cir.struct<class "RefBoolClosure" {data !cir.ptr<!cir.bool>}>
@@ -76,6 +77,11 @@ module attributes {cir.triple = "x86_64-unknown-linux-gnu",
     cir.return %0 : !biter
   }
 
+  cir.func @keeps_non_bool_pattern(%first: !biter, %last: !biter, %value: !cir.ptr<!u8i>) -> !biter {
+    %0 = cir.std.find(%first : !biter, %last : !biter, %value : !cir.ptr<!u8i>, @_ZSt4findB) -> !biter {cir.bool_params}
+    cir.return %0 : !biter
+  }
+
 }
 
 // A marked constant sought find_if becomes the masked word loop.
@@ -91,7 +97,15 @@ module attributes {cir.triple = "x86_64-unknown-linux-gnu",
 // CHECK: cir.insert_member %arg1[0], %[[FW]] : !rec_bit_iterator, !cir.ptr<!u64i>
 // CHECK: cir.insert_member %{{[0-9]+}}[1], %{{[0-9]+}} : !rec_bit_iterator, !u32i
 // CHECK: cir.alloca "find_bit_current"
+// CHECK-NEXT: cir.store
+// CHECK-NEXT: cir.while {
+// CHECK-NEXT: cir.load
+// CHECK-NEXT: cir.ptr_diff
+// CHECK-NEXT: cir.cmp ge
+// CHECK: } do {
 // CHECK: cir.while {
+// CHECK-NEXT: cir.load
+// CHECK-NEXT: cir.cmp ne %{{[0-9]+}}, %{{[0-9]+}} : !cir.ptr<!u64i>
 // CHECK-NOT: cir.std.find_if
 
 // The runtime capture form loads the sought value from the closure.
@@ -142,5 +156,9 @@ module attributes {cir.triple = "x86_64-unknown-linux-gnu",
 // CHECK-NOT: cir.std.find
 
 // CHECK-LABEL: cir.func @keeps_without_bool_params
+// CHECK: cir.std.find
+// CHECK-NOT: cir.ctz
+
+// CHECK-LABEL: cir.func @keeps_non_bool_pattern
 // CHECK: cir.std.find
 // CHECK-NOT: cir.ctz

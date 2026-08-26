@@ -1897,6 +1897,10 @@ rewriteMismatchToMemcmpLoop(OpT mismatchOp,
 // touched, and the last word only when its offset is nonzero. The
 // verified identity guarantees offsets below the word width, which the
 // mask shifts rely on.
+
+// Complete words tested per iteration of the grouped scan loop. Eight
+// 64 bit words fill two 256 bit vector registers.
+static constexpr unsigned kScanGroupWords = 8;
 template <typename OpT>
 static bool
 rewriteFindBitToWordScan(OpT findOp,
@@ -2079,6 +2083,10 @@ rewriteFindBitToWordScan(OpT findOp,
                 builder.getUnsignedInt(l, 0, bitOffsetTy.getWidth());
             mlir::Value oneStride =
                 builder.getUnsignedInt(l, 1, bitOffsetTy.getWidth());
+            mlir::Value groupStride = builder.getUnsignedInt(
+                l, kScanGroupWords, bitOffsetTy.getWidth());
+            mlir::Value groupCount =
+                builder.getUnsignedInt(l, kScanGroupWords, 64);
 
             // One select before the scan turns both polarities into the
             // same question, a zero mask for a sought true and an all
@@ -2090,43 +2098,46 @@ rewriteFindBitToWordScan(OpT findOp,
             // The load reads the whole word the iterator would read, and
             // the mask discards every bit outside the searched range
             // before the candidates test.
-            auto candidatesOf = [&](mlir::Location cl, mlir::Value wordPtr,
+            auto candidatesOf = [&](mlir::Location loadLoc, mlir::Value wordPtr,
                                     mlir::Value validMask) {
-              mlir::Value loaded = builder.createLoad(cl, wordPtr);
-              mlir::Value searched = builder.createXor(cl, loaded, invertMask);
-              return builder.createAnd(cl, searched, validMask);
+              mlir::Value loaded = builder.createLoad(loadLoc, wordPtr);
+              mlir::Value searched =
+                  builder.createXor(loadLoc, loaded, invertMask);
+              return builder.createAnd(loadLoc, searched, validMask);
             };
-            auto hitIterator = [&](mlir::Location hl, mlir::Value wordPtr,
+            auto hitIterator = [&](mlir::Location rebuildLoc,
+                                   mlir::Value wordPtr,
                                    mlir::Value candidates) {
               mlir::Value bit =
-                  cir::BitCtzOp::create(builder, hl, candidates, true);
+                  cir::BitCtzOp::create(builder, rebuildLoc, candidates, true);
               bit = builder.createIntCast(bit, bitOffsetTy);
               mlir::Value rebuilt = findOp.getLast();
-              rebuilt = insertPath(hl, rebuilt, wordPath, wordPtr);
-              rebuilt = insertPath(hl, rebuilt, bitPath, bit);
+              rebuilt = insertPath(rebuildLoc, rebuilt, wordPath, wordPtr);
+              rebuilt = insertPath(rebuildLoc, rebuilt, bitPath, bit);
               return rebuilt;
             };
             // Each hit path yields the rebuilt iterator directly, so the
             // scan carries no found state and the loop below stays a
             // predictable branch instead of a flag driven select chain.
             auto yieldHitOrElse =
-                [&](mlir::Location yl, mlir::Value wordPtr, mlir::Value mask,
+                [&](mlir::Location testLoc, mlir::Value wordPtr,
+                    mlir::Value mask,
                     llvm::function_ref<void(mlir::Location)> onMiss) {
-                  mlir::Value c = candidatesOf(yl, wordPtr, mask);
+                  mlir::Value c = candidatesOf(testLoc, wordPtr, mask);
                   mlir::Value hit = builder.createCompare(
-                      yl, cir::CmpOpKind::ne, c, wordZero);
+                      testLoc, cir::CmpOpKind::ne, c, wordZero);
                   mlir::Value v =
                       cir::TernaryOp::create(
-                          builder, yl, hit,
-                          [&](mlir::OpBuilder &, mlir::Location hl) {
-                            builder.createYield(hl,
-                                                hitIterator(hl, wordPtr, c));
+                          builder, testLoc, hit,
+                          [&](mlir::OpBuilder &, mlir::Location hitLoc) {
+                            builder.createYield(
+                                hitLoc, hitIterator(hitLoc, wordPtr, c));
                           },
-                          [&](mlir::OpBuilder &, mlir::Location ml) {
-                            onMiss(ml);
+                          [&](mlir::OpBuilder &, mlir::Location missLoc) {
+                            onMiss(missLoc);
                           })
                           .getResult();
-                  builder.createYield(yl, v);
+                  builder.createYield(testLoc, v);
                 };
             // The loop keeps the zero test in its condition, so a zero
             // word costs one load, one xor, and one compare, and the ctz
@@ -2134,50 +2145,116 @@ rewriteFindBitToWordScan(OpT findOp,
             // guards the load behind the bound check because the one past
             // bound word is not dereferenceable when the finish offset is
             // zero.
-            auto scanLoopAndTail = [&](mlir::Location sl,
+            auto scanLoopAndTail = [&](mlir::Location scanLoc,
                                        mlir::Value beginPtr) {
               mlir::IntegerAttr ptrAlign = builder.getAlignmentAttr(8);
               mlir::Value currentAddr =
-                  builder.createAlloca(sl, builder.getPointerTo(wordPtrTy),
+                  builder.createAlloca(scanLoc, builder.getPointerTo(wordPtrTy),
                                        "find_bit_current", ptrAlign);
-              builder.createStore(sl, beginPtr, currentAddr);
+              builder.createStore(scanLoc, beginPtr, currentAddr);
+              // The guard keeps every group load strictly before the
+              // last word, and on a group hit the single word loop below
+              // retests the group in address order, so the earliest hit
+              // wins.
               builder.createWhile(
-                  sl,
-                  [&](mlir::OpBuilder &, mlir::Location cl) {
-                    mlir::Value current = builder.createLoad(cl, currentAddr);
-                    mlir::Value more = builder.createCompare(
-                        cl, cir::CmpOpKind::ne, current, lastWord);
+                  scanLoc,
+                  [&](mlir::OpBuilder &, mlir::Location guardLoc) {
+                    mlir::Value current =
+                        builder.createLoad(guardLoc, currentAddr);
+                    // The count is 64 bit so no span length can wrap it
+                    // below the group size.
+                    mlir::Value remaining = cir::PtrDiffOp::create(
+                        builder, guardLoc, builder.getUIntNTy(64), lastWord,
+                        current);
+                    mlir::Value enough = builder.createCompare(
+                        guardLoc, cir::CmpOpKind::ge, remaining, groupCount);
                     mlir::Value keepScanning =
                         cir::TernaryOp::create(
-                            builder, cl, more,
-                            [&](mlir::OpBuilder &, mlir::Location ml) {
-                              mlir::Value c =
-                                  candidatesOf(ml, current, wordAllOnes);
+                            builder, guardLoc, enough,
+                            [&](mlir::OpBuilder &, mlir::Location groupLoc) {
+                              llvm::SmallVector<mlir::Value, kScanGroupWords>
+                                  group;
+                              group.push_back(
+                                  candidatesOf(groupLoc, current, wordAllOnes));
+                              for (unsigned i = 1; i < kScanGroupWords; ++i) {
+                                mlir::Value stride = builder.getUnsignedInt(
+                                    groupLoc, i, bitOffsetTy.getWidth());
+                                mlir::Value ptr = cir::PtrStrideOp::create(
+                                    builder, groupLoc, current.getType(),
+                                    current, stride);
+                                group.push_back(
+                                    candidatesOf(groupLoc, ptr, wordAllOnes));
+                              }
+                              while (group.size() > 1) {
+                                llvm::SmallVector<mlir::Value, kScanGroupWords>
+                                    reduced;
+                                for (unsigned i = 0; i + 1 < group.size();
+                                     i += 2)
+                                  reduced.push_back(builder.createOr(
+                                      groupLoc, group[i], group[i + 1]));
+                                group = reduced;
+                              }
                               mlir::Value allZero = builder.createCompare(
-                                  ml, cir::CmpOpKind::eq, c, wordZero);
-                              builder.createYield(ml, allZero);
+                                  groupLoc, cir::CmpOpKind::eq, group.front(),
+                                  wordZero);
+                              builder.createYield(groupLoc, allZero);
                             },
-                            [&](mlir::OpBuilder &, mlir::Location dl) {
-                              mlir::Value stop = builder.getFalse(dl);
-                              builder.createYield(dl, stop);
+                            [&](mlir::OpBuilder &, mlir::Location stopLoc) {
+                              mlir::Value stop = builder.getFalse(stopLoc);
+                              builder.createYield(stopLoc, stop);
                             })
                             .getResult();
                     builder.createCondition(keepScanning);
                   },
-                  [&](mlir::OpBuilder &, mlir::Location bl) {
-                    mlir::Value current = builder.createLoad(bl, currentAddr);
+                  [&](mlir::OpBuilder &, mlir::Location stepLoc) {
+                    mlir::Value current =
+                        builder.createLoad(stepLoc, currentAddr);
                     mlir::Value next = cir::PtrStrideOp::create(
-                        builder, bl, current.getType(), current, oneStride);
-                    builder.createStore(bl, next, currentAddr);
-                    builder.createYield(bl);
+                        builder, stepLoc, current.getType(), current,
+                        groupStride);
+                    builder.createStore(stepLoc, next, currentAddr);
+                    builder.createYield(stepLoc);
                   });
-              mlir::Value current = builder.createLoad(sl, currentAddr);
+              builder.createWhile(
+                  scanLoc,
+                  [&](mlir::OpBuilder &, mlir::Location condLoc) {
+                    mlir::Value current =
+                        builder.createLoad(condLoc, currentAddr);
+                    mlir::Value more = builder.createCompare(
+                        condLoc, cir::CmpOpKind::ne, current, lastWord);
+                    mlir::Value keepScanning =
+                        cir::TernaryOp::create(
+                            builder, condLoc, more,
+                            [&](mlir::OpBuilder &, mlir::Location moreLoc) {
+                              mlir::Value c =
+                                  candidatesOf(moreLoc, current, wordAllOnes);
+                              mlir::Value allZero = builder.createCompare(
+                                  moreLoc, cir::CmpOpKind::eq, c, wordZero);
+                              builder.createYield(moreLoc, allZero);
+                            },
+                            [&](mlir::OpBuilder &, mlir::Location doneLoc) {
+                              mlir::Value stop = builder.getFalse(doneLoc);
+                              builder.createYield(doneLoc, stop);
+                            })
+                            .getResult();
+                    builder.createCondition(keepScanning);
+                  },
+                  [&](mlir::OpBuilder &, mlir::Location advanceLoc) {
+                    mlir::Value current =
+                        builder.createLoad(advanceLoc, currentAddr);
+                    mlir::Value next = cir::PtrStrideOp::create(
+                        builder, advanceLoc, current.getType(), current,
+                        oneStride);
+                    builder.createStore(advanceLoc, next, currentAddr);
+                    builder.createYield(advanceLoc);
+                  });
+              mlir::Value current = builder.createLoad(scanLoc, currentAddr);
               mlir::Value loopHit = builder.createCompare(
-                  sl, cir::CmpOpKind::ne, current, lastWord);
+                  scanLoc, cir::CmpOpKind::ne, current, lastWord);
               mlir::Value v =
                   cir::TernaryOp::create(
-                      builder, sl, loopHit,
-                      [&](mlir::OpBuilder &, mlir::Location hl) {
+                      builder, scanLoc, loopHit,
+                      [&](mlir::OpBuilder &, mlir::Location foundLoc) {
                         // The word that stopped the loop reloads once to
                         // name the bit. The reread is legal because the
                         // source dereference already reads this word, so a
@@ -2185,37 +2262,41 @@ rewriteFindBitToWordScan(OpT findOp,
                         // The miss branch of the retest is unreachable
                         // because the loop exit just proved the word has
                         // candidates.
-                        yieldHitOrElse(
-                            hl, current, wordAllOnes, [&](mlir::Location ml) {
-                              builder.createYield(ml, findOp.getLast());
-                            });
+                        yieldHitOrElse(foundLoc, current, wordAllOnes,
+                                       [&](mlir::Location missLoc) {
+                                         builder.createYield(missLoc,
+                                                             findOp.getLast());
+                                       });
                       },
-                      [&](mlir::OpBuilder &, mlir::Location tl) {
+                      [&](mlir::OpBuilder &, mlir::Location tailLoc) {
                         mlir::Value hasTail = builder.createCompare(
-                            tl, cir::CmpOpKind::ne, lastOffset, bitZero);
+                            tailLoc, cir::CmpOpKind::ne, lastOffset, bitZero);
                         mlir::Value tv =
                             cir::TernaryOp::create(
-                                builder, tl, hasTail,
-                                [&](mlir::OpBuilder &, mlir::Location wl) {
+                                builder, tailLoc, hasTail,
+                                [&](mlir::OpBuilder &, mlir::Location maskLoc) {
                                   mlir::Value tailMask = builder.createSub(
-                                      wl,
-                                      builder.createShiftLeft(wl, wordOne,
+                                      maskLoc,
+                                      builder.createShiftLeft(maskLoc, wordOne,
                                                               lastOffset),
                                       wordOne);
-                                  yieldHitOrElse(wl, lastWord, tailMask,
-                                                 [&](mlir::Location ml) {
+                                  yieldHitOrElse(maskLoc, lastWord, tailMask,
+                                                 [&](mlir::Location missLoc) {
                                                    builder.createYield(
-                                                       ml, findOp.getLast());
+                                                       missLoc,
+                                                       findOp.getLast());
                                                  });
                                 },
-                                [&](mlir::OpBuilder &, mlir::Location ol) {
-                                  builder.createYield(ol, findOp.getLast());
+                                [&](mlir::OpBuilder &,
+                                    mlir::Location noTailLoc) {
+                                  builder.createYield(noTailLoc,
+                                                      findOp.getLast());
                                 })
                                 .getResult();
-                        builder.createYield(tl, tv);
+                        builder.createYield(tailLoc, tv);
                       })
                       .getResult();
-              builder.createYield(sl, v);
+              builder.createYield(scanLoc, v);
             };
 
             mlir::Value scanResult =
@@ -2236,15 +2317,17 @@ rewriteFindBitToWordScan(OpT findOp,
                       mlir::Value v =
                           cir::TernaryOp::create(
                               builder, sameLoc, hasValidBits,
-                              [&](mlir::OpBuilder &, mlir::Location gl) {
-                                yieldHitOrElse(gl, firstWord, validMask,
-                                               [&](mlir::Location ml) {
+                              [&](mlir::OpBuilder &,
+                                  mlir::Location guardedLoc) {
+                                yieldHitOrElse(guardedLoc, firstWord, validMask,
+                                               [&](mlir::Location missLoc) {
                                                  builder.createYield(
-                                                     ml, findOp.getLast());
+                                                     missLoc, findOp.getLast());
                                                });
                               },
-                              [&](mlir::OpBuilder &, mlir::Location ml) {
-                                builder.createYield(ml, findOp.getLast());
+                              [&](mlir::OpBuilder &, mlir::Location noBitsLoc) {
+                                builder.createYield(noBitsLoc,
+                                                    findOp.getLast());
                               })
                               .getResult();
                       builder.createYield(sameLoc, v);
@@ -2255,21 +2338,21 @@ rewriteFindBitToWordScan(OpT findOp,
                       mlir::Value v =
                           cir::TernaryOp::create(
                               builder, diffLoc, hasHead,
-                              [&](mlir::OpBuilder &, mlir::Location hl) {
+                              [&](mlir::OpBuilder &, mlir::Location headLoc) {
                                 mlir::Value headMask = builder.createShiftLeft(
-                                    hl, wordAllOnes, firstOffset);
-                                yieldHitOrElse(hl, firstWord, headMask,
-                                               [&](mlir::Location ml) {
+                                    headLoc, wordAllOnes, firstOffset);
+                                yieldHitOrElse(headLoc, firstWord, headMask,
+                                               [&](mlir::Location restLoc) {
                                                  mlir::Value next =
                                                      cir::PtrStrideOp::create(
-                                                         builder, ml,
+                                                         builder, restLoc,
                                                          firstWord.getType(),
                                                          firstWord, oneStride);
-                                                 scanLoopAndTail(ml, next);
+                                                 scanLoopAndTail(restLoc, next);
                                                });
                               },
-                              [&](mlir::OpBuilder &, mlir::Location wl) {
-                                scanLoopAndTail(wl, firstWord);
+                              [&](mlir::OpBuilder &, mlir::Location wholeLoc) {
+                                scanLoopAndTail(wholeLoc, firstWord);
                               })
                               .getResult();
                       builder.createYield(diffLoc, v);
