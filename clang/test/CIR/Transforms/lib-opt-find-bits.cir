@@ -85,13 +85,13 @@ module attributes {cir.triple = "x86_64-unknown-linux-gnu",
 // CHECK: cir.ternary(%{{[0-9]+}}, true {
 // CHECK: cir.yield %arg1 : !rec_bit_iterator
 // CHECK: }, false {
-// CHECK: cir.alloca "find_bit_word"
-// CHECK: cir.alloca "find_bit_found"
 // CHECK: cir.shift(left, %{{[0-9]+}} : !u64i, %[[FO]] : !u32i) -> !u64i
+// CHECK: cir.xor
 // CHECK: cir.ctz
-// CHECK: cir.while {
-// CHECK: cir.insert_member %arg1[0], %{{[0-9]+}} : !rec_bit_iterator, !cir.ptr<!u64i>
+// CHECK: cir.insert_member %arg1[0], %[[FW]] : !rec_bit_iterator, !cir.ptr<!u64i>
 // CHECK: cir.insert_member %{{[0-9]+}}[1], %{{[0-9]+}} : !rec_bit_iterator, !u32i
+// CHECK: cir.alloca "find_bit_current"
+// CHECK: cir.while {
 // CHECK-NOT: cir.std.find_if
 
 // The runtime capture form loads the sought value from the closure.

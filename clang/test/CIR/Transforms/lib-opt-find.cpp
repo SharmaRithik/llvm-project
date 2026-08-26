@@ -186,7 +186,7 @@ bit_iterator test_ranges_bool_find_if(bit_iterator first,
       first, last, [](bool element) { return element; });
 }
 // CHECK-LABEL: @_Z24test_ranges_bool_find_if
-// CHECK: cir.alloca "find_bit_word"
+// CHECK: cir.xor
 // CHECK: cir.ctz
 // CHECK-NOT: cir.call @_ZNKSt6ranges9__find_if
 
