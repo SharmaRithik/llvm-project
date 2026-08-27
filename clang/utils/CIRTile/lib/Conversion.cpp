@@ -7,14 +7,17 @@
 //===----------------------------------------------------------------------===//
 
 #include "clang/CIRTile/Conversion.h"
+#include "cuda_tile/Dialect/CudaTile/IR/Attributes.h"
 #include "cuda_tile/Dialect/CudaTile/IR/Types.h"
 #include "mlir/IR/Builders.h"
+#include "mlir/IR/BuiltinAttributes.h"
 #include "mlir/IR/SymbolTable.h"
 #include "mlir/IR/Verifier.h"
 #include "clang/CIRTile/Annotation.h"
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/SmallVector.h"
+#include <utility>
 
 namespace clang::CIRTile {
 namespace {
@@ -28,9 +31,24 @@ public:
   mlir::OwningOpRef<mlir::cuda_tile::ModuleOp> convert();
 
 private:
+  using AnnotatedCallee = std::pair<cir::FuncOp, IntrinsicAnnotation>;
+  using ViewKey = std::pair<mlir::Value, mlir::Operation *>;
+
   mlir::Type convertScalarType(mlir::Type type);
   mlir::FailureOr<mlir::Type> convertArgumentType(mlir::Type type,
                                                   cir::FuncOp kernel);
+  mlir::FailureOr<AnnotatedCallee> getAnnotatedCallee(cir::CallOp call);
+  mlir::FailureOr<mlir::Value> lookupValue(mlir::Value source,
+                                           mlir::Operation &operation);
+  mlir::FailureOr<mlir::Value>
+  getOrCreatePartitionView(cir::CallOp call, cir::FuncOp callee,
+                           const IntrinsicAnnotation &annotation);
+  mlir::LogicalResult materializeViews(mlir::Block &sourceBlock);
+  mlir::LogicalResult convertConstant(cir::ConstantOp constant);
+  mlir::LogicalResult convertLoad(cir::CallOp call, cir::FuncOp callee,
+                                  const IntrinsicAnnotation &annotation);
+  mlir::LogicalResult convertStore(cir::CallOp call, cir::FuncOp callee,
+                                   const IntrinsicAnnotation &annotation);
   mlir::LogicalResult convertKernel(cir::FuncOp kernel);
   mlir::LogicalResult convertCall(cir::CallOp call);
   mlir::LogicalResult convertOperation(mlir::Operation &operation);
@@ -41,6 +59,7 @@ private:
   mlir::OpBuilder builder;
   mlir::cuda_tile::ModuleOp targetModule;
   llvm::DenseMap<mlir::Value, mlir::Value> values;
+  llvm::DenseMap<ViewKey, mlir::Value> partitionViews;
   mlir::cuda_tile::GetTileBlockIdOp blockIds;
 };
 
@@ -82,7 +101,8 @@ mlir::FailureOr<mlir::Type> Converter::convertArgumentType(mlir::Type type,
   return mlir::cuda_tile::TileType::get({}, elementType);
 }
 
-mlir::LogicalResult Converter::convertCall(cir::CallOp call) {
+mlir::FailureOr<Converter::AnnotatedCallee>
+Converter::getAnnotatedCallee(cir::CallOp call) {
   std::optional<llvm::StringRef> calleeName = call.getCallee();
   if (!calleeName) {
     call.emitError("does not support indirect calls");
@@ -103,9 +123,177 @@ mlir::LogicalResult Converter::convertCall(cir::CallOp call) {
                      << " is not a CIR Tile intrinsic";
     return mlir::failure();
   }
-  if ((*annotation)->kind != IntrinsicKind::BlockId) {
+  return AnnotatedCallee(callee, **annotation);
+}
+
+mlir::FailureOr<mlir::Value>
+Converter::lookupValue(mlir::Value source, mlir::Operation &operation) {
+  auto found = values.find(source);
+  if (found == values.end()) {
+    operation.emitError("uses a value that has not been converted");
+    return mlir::failure();
+  }
+  return found->second;
+}
+
+mlir::FailureOr<mlir::Value>
+Converter::getOrCreatePartitionView(cir::CallOp call, cir::FuncOp callee,
+                                    const IntrinsicAnnotation &annotation) {
+  if (call.getArgs().empty()) {
+    call.emitError("CIR Tile view call requires a base pointer");
+    return mlir::failure();
+  }
+
+  ViewKey key(call.getArgs().front(), callee.getOperation());
+  if (auto found = partitionViews.find(key); found != partitionViews.end())
+    return found->second;
+
+  auto base = lookupValue(call.getArgs().front(), *call);
+  if (mlir::failed(base))
+    return mlir::failure();
+  auto baseTile = mlir::dyn_cast<mlir::cuda_tile::TileType>((*base).getType());
+  auto pointer = baseTile ? mlir::dyn_cast<mlir::cuda_tile::PointerType>(
+                                baseTile.getElementType())
+                          : mlir::cuda_tile::PointerType();
+  if (!pointer) {
+    call.emitError("CIR Tile view base must be a scalar pointer tile");
+    return mlir::failure();
+  }
+
+  llvm::SmallVector<int64_t, 2> tensorShape{annotation.arguments[2],
+                                            annotation.arguments[3]};
+  llvm::SmallVector<int64_t, 2> tensorStrides{annotation.arguments[3], 1};
+  auto tensorType = mlir::cuda_tile::TensorViewType::get(
+      context, pointer.getPointeeType(), tensorShape, tensorStrides);
+  auto tensor = mlir::cuda_tile::MakeTensorViewOp::create(
+      builder, call.getLoc(), tensorType, *base, mlir::ValueRange(),
+      mlir::ValueRange());
+
+  llvm::SmallVector<int32_t, 2> tileShape{
+      static_cast<int32_t>(annotation.arguments[0]),
+      static_cast<int32_t>(annotation.arguments[1])};
+  auto partitionType = mlir::cuda_tile::PartitionViewType::get(
+      context, builder.getDenseI32ArrayAttr(tileShape), tensorType, {0, 1},
+      mlir::cuda_tile::PaddingValueAttr());
+  auto partition = mlir::cuda_tile::MakePartitionViewOp::create(
+      builder, call.getLoc(), partitionType, tensor.getResult());
+  partitionViews[key] = partition.getResult();
+  return partition.getResult();
+}
+
+mlir::LogicalResult Converter::materializeViews(mlir::Block &sourceBlock) {
+  for (cir::CallOp call : sourceBlock.getOps<cir::CallOp>()) {
+    auto annotatedCallee = getAnnotatedCallee(call);
+    if (mlir::failed(annotatedCallee))
+      return mlir::failure();
+    if (annotatedCallee->second.kind != IntrinsicKind::Load &&
+        annotatedCallee->second.kind != IntrinsicKind::Store)
+      continue;
+    if (mlir::failed(getOrCreatePartitionView(call, annotatedCallee->first,
+                                              annotatedCallee->second)))
+      return mlir::failure();
+  }
+  return mlir::success();
+}
+
+mlir::LogicalResult Converter::convertConstant(cir::ConstantOp constant) {
+  auto integerType = mlir::dyn_cast<cir::IntType>(constant.getRes().getType());
+  if (!integerType || integerType.isBitInt() ||
+      !constant.getValueAttr<cir::IntAttr>()) {
+    constant.emitError("only fixed-width integer constants are supported");
+    return mlir::failure();
+  }
+  mlir::Type elementType = convertScalarType(integerType);
+  if (!elementType) {
+    constant.emitError() << "does not support integer constant type "
+                         << integerType;
+    return mlir::failure();
+  }
+
+  auto tileType = mlir::cuda_tile::TileType::get({}, elementType);
+  auto value =
+      mlir::DenseIntElementsAttr::get(tileType, constant.getIntValue());
+  auto target = mlir::cuda_tile::ConstantOp::create(builder, constant.getLoc(),
+                                                    tileType, value);
+  values[constant.getResult()] = target.getResult();
+  return mlir::success();
+}
+
+mlir::LogicalResult
+Converter::convertLoad(cir::CallOp call, cir::FuncOp callee,
+                       const IntrinsicAnnotation &annotation) {
+  if (call.getArgs().size() != 3 || call.getNumResults() != 1) {
+    call.emitError(
+        "CIR Tile load call must have three arguments and one result");
+    return mlir::failure();
+  }
+  auto view = getOrCreatePartitionView(call, callee, annotation);
+  if (mlir::failed(view))
+    return mlir::failure();
+
+  llvm::SmallVector<mlir::Value, 2> indices;
+  for (mlir::Value source : call.getArgs().drop_front()) {
+    auto target = lookupValue(source, *call);
+    if (mlir::failed(target))
+      return mlir::failure();
+    indices.push_back(*target);
+  }
+  auto viewType =
+      mlir::cast<mlir::cuda_tile::PartitionViewType>((*view).getType());
+  auto load = mlir::cuda_tile::LoadViewTkoOp::create(
+      builder, call.getLoc(), viewType.getViewTileType(),
+      mlir::cuda_tile::TokenType::get(context),
+      mlir::cuda_tile::MemoryOrderingSemantics::WEAK,
+      mlir::cuda_tile::MemoryScopeAttr(), *view, indices, mlir::Value(),
+      mlir::cuda_tile::OptimizationHintsAttr());
+  values[call.getResult()] = load.getTile();
+  return mlir::success();
+}
+
+mlir::LogicalResult
+Converter::convertStore(cir::CallOp call, cir::FuncOp callee,
+                        const IntrinsicAnnotation &annotation) {
+  if (call.getArgs().size() != 4 || call.getNumResults() != 0) {
+    call.emitError(
+        "CIR Tile store call must have four arguments and no results");
+    return mlir::failure();
+  }
+  auto view = getOrCreatePartitionView(call, callee, annotation);
+  if (mlir::failed(view))
+    return mlir::failure();
+  auto tile = lookupValue(call.getArgs()[1], *call);
+  if (mlir::failed(tile))
+    return mlir::failure();
+
+  llvm::SmallVector<mlir::Value, 2> indices;
+  for (mlir::Value source : call.getArgs().drop_front(2)) {
+    auto target = lookupValue(source, *call);
+    if (mlir::failed(target))
+      return mlir::failure();
+    indices.push_back(*target);
+  }
+  mlir::cuda_tile::StoreViewTkoOp::create(
+      builder, call.getLoc(), mlir::cuda_tile::TokenType::get(context),
+      mlir::cuda_tile::MemoryOrderingSemantics::WEAK,
+      mlir::cuda_tile::MemoryScopeAttr(), *tile, *view, indices, mlir::Value(),
+      mlir::cuda_tile::OptimizationHintsAttr());
+  return mlir::success();
+}
+
+mlir::LogicalResult Converter::convertCall(cir::CallOp call) {
+  auto annotatedCallee = getAnnotatedCallee(call);
+  if (mlir::failed(annotatedCallee))
+    return mlir::failure();
+  cir::FuncOp callee = annotatedCallee->first;
+  const IntrinsicAnnotation &annotation = annotatedCallee->second;
+
+  if (annotation.kind == IntrinsicKind::Load)
+    return convertLoad(call, callee, annotation);
+  if (annotation.kind == IntrinsicKind::Store)
+    return convertStore(call, callee, annotation);
+  if (annotation.kind != IntrinsicKind::BlockId) {
     call.emitError() << "lowering for annotation '"
-                     << getAnnotationName((*annotation)->kind)
+                     << getAnnotationName(annotation.kind)
                      << "' is not implemented";
     return mlir::failure();
   }
@@ -119,11 +307,13 @@ mlir::LogicalResult Converter::convertCall(cir::CallOp call) {
     blockIds =
         mlir::cuda_tile::GetTileBlockIdOp::create(builder, call.getLoc());
   values[call.getResult()] =
-      blockIds->getResult(static_cast<unsigned>((*annotation)->arguments[0]));
+      blockIds->getResult(static_cast<unsigned>(annotation.arguments[0]));
   return mlir::success();
 }
 
 mlir::LogicalResult Converter::convertOperation(mlir::Operation &operation) {
+  if (auto constant = mlir::dyn_cast<cir::ConstantOp>(operation))
+    return convertConstant(constant);
   if (auto call = mlir::dyn_cast<cir::CallOp>(operation))
     return convertCall(call);
   if (auto returnOp = mlir::dyn_cast<cir::ReturnOp>(operation)) {
@@ -168,12 +358,16 @@ mlir::LogicalResult Converter::convertKernel(cir::FuncOp kernel) {
   mlir::Block *targetBlock = entry.addEntryBlock();
 
   mlir::Block &sourceBlock = kernel.getBody().front();
+  values.clear();
+  partitionViews.clear();
+  blockIds = {};
   for (auto [sourceArgument, targetArgument] :
        llvm::zip(sourceBlock.getArguments(), targetBlock->getArguments()))
     values[sourceArgument] = targetArgument;
 
   builder.setInsertionPointToStart(targetBlock);
-  blockIds = {};
+  if (mlir::failed(materializeViews(sourceBlock)))
+    return mlir::failure();
   for (mlir::Operation &operation : sourceBlock)
     if (mlir::failed(convertOperation(operation)))
       return mlir::failure();
