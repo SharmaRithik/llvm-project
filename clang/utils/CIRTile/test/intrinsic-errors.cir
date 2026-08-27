@@ -1,0 +1,46 @@
+// RUN: split-file %s %t
+// RUN: not cir-tile-translate --print-annotations %t/bid.cir 2>&1 | FileCheck %s --check-prefix=BID
+// RUN: not cir-tile-translate --print-annotations %t/zero.cir 2>&1 | FileCheck %s --check-prefix=ZERO
+// RUN: not cir-tile-translate --print-annotations %t/load.cir 2>&1 | FileCheck %s --check-prefix=LOAD
+// RUN: not cir-tile-translate --print-annotations %t/mma.cir 2>&1 | FileCheck %s --check-prefix=MMA
+// RUN: not cir-tile-translate --print-annotations %t/store.cir 2>&1 | FileCheck %s --check-prefix=STORE
+// RUN: not cir-tile-translate --print-annotations %t/kernel.cir 2>&1 | FileCheck %s --check-prefix=KERNEL
+
+//--- bid.cir
+module {
+  cir.func private @bad() -> (!cir.float) [#cir.annotation<"cir_tile.v1.bid", [0 : i32]>]
+}
+// BID: intrinsic 'cir_tile.v1.bid' requires type
+
+//--- zero.cir
+module {
+  cir.func private @bad() -> (!cir.vector<512 x !cir.float>) [#cir.annotation<"cir_tile.v1.zero", [32 : i32, 32 : i32]>]
+}
+// ZERO: intrinsic 'cir_tile.v1.zero' requires type
+
+//--- load.cir
+!s32i = !cir.int<s, 32>
+module {
+  cir.func private @bad(!cir.ptr<!cir.float>, !s32i, !s32i) -> (!cir.vector<512 x !cir.f16>) [#cir.annotation<"cir_tile.v1.load", [32 : i32, 16 : i32, 64 : i32, 64 : i32]>]
+}
+// LOAD: intrinsic 'cir_tile.v1.load' requires type
+
+//--- mma.cir
+module {
+  cir.func private @bad(!cir.vector<256 x !cir.f16>, !cir.vector<512 x !cir.f16>, !cir.vector<1024 x !cir.float>) -> (!cir.vector<1024 x !cir.float>) [#cir.annotation<"cir_tile.v1.mma", [32 : i32, 32 : i32, 16 : i32]>]
+}
+// MMA: intrinsic 'cir_tile.v1.mma' requires type
+
+//--- store.cir
+!s32i = !cir.int<s, 32>
+module {
+  cir.func private @bad(!cir.ptr<!cir.f16>, !cir.vector<1024 x !cir.float>, !s32i, !s32i) [#cir.annotation<"cir_tile.v1.store", [32 : i32, 32 : i32, 64 : i32, 64 : i32]>]
+}
+// STORE: intrinsic 'cir_tile.v1.store' requires type
+
+//--- kernel.cir
+!s32i = !cir.int<s, 32>
+module {
+  cir.func private @bad() -> (!s32i) [#cir.annotation<"cir_tile.v1.kernel">]
+}
+// KERNEL: kernel intrinsic must be non-variadic and return void

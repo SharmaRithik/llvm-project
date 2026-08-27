@@ -437,6 +437,8 @@ mlir::OwningOpRef<mlir::cuda_tile::ModuleOp> Converter::convert() {
     auto annotation = decodeAnnotation(function);
     if (mlir::failed(annotation))
       return {};
+    if (*annotation && mlir::failed(validateIntrinsic(function, **annotation)))
+      return {};
     if (*annotation && (*annotation)->kind == IntrinsicKind::Kernel)
       kernels.push_back(function);
   }

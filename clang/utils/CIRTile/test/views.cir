@@ -6,28 +6,42 @@
 
 module {
   cir.func private @bid_x() -> (!s32i) [#cir.annotation<"cir_tile.v1.bid", [0 : i32]>]
-  cir.func private @load(%arg0: !cir.ptr<!cir.float>, %arg1: !s32i, %arg2: !s32i) -> (!cir.vector<1024 x !cir.float>) [#cir.annotation<"cir_tile.v1.load", [32 : i32, 32 : i32, 64 : i32, 64 : i32]>]
+  cir.func private @zero() -> (!cir.vector<1024 x !cir.float>) [#cir.annotation<"cir_tile.v1.zero", [32 : i32, 32 : i32]>]
+  cir.func private @load(%arg0: !cir.ptr<!cir.f16>, %arg1: !s32i, %arg2: !s32i) -> (!cir.vector<1024 x !cir.f16>) [#cir.annotation<"cir_tile.v1.load", [32 : i32, 32 : i32, 64 : i32, 64 : i32]>]
   cir.func private @store(%arg0: !cir.ptr<!cir.float>, %arg1: !cir.vector<1024 x !cir.float>, %arg2: !s32i, %arg3: !s32i) [#cir.annotation<"cir_tile.v1.store", [32 : i32, 32 : i32, 64 : i32, 64 : i32]>]
 
-  cir.func @views(%arg0: !cir.ptr<!cir.float>, %arg1: !cir.ptr<!cir.float>) [#cir.annotation<"cir_tile.v1.kernel">] {
+  cir.func @load_view(%arg0: !cir.ptr<!cir.f16>) [#cir.annotation<"cir_tile.v1.kernel">] {
     %0 = cir.call @bid_x() : () -> (!s32i)
     %1 = cir.const #cir.int<0> : !s32i
-    %2 = cir.call @load(%arg0, %0, %1) : (!cir.ptr<!cir.float>, !s32i, !s32i) -> (!cir.vector<1024 x !cir.float>)
-    cir.call @store(%arg1, %2, %0, %1) : (!cir.ptr<!cir.float>, !cir.vector<1024 x !cir.float>, !s32i, !s32i) -> ()
+    %2 = cir.call @load(%arg0, %0, %1) : (!cir.ptr<!cir.f16>, !s32i, !s32i) -> (!cir.vector<1024 x !cir.f16>)
+    cir.return
+  }
+
+  cir.func @store_view(%arg0: !cir.ptr<!cir.float>) [#cir.annotation<"cir_tile.v1.kernel">] {
+    %0 = cir.call @bid_x() : () -> (!s32i)
+    %1 = cir.call @zero() : () -> (!cir.vector<1024 x !cir.float>)
+    %2 = cir.const #cir.int<0> : !s32i
+    cir.call @store(%arg0, %1, %0, %2) : (!cir.ptr<!cir.float>, !cir.vector<1024 x !cir.float>, !s32i, !s32i) -> ()
     cir.return
   }
 }
 
 // CHECK: cuda_tile.module @cir_module attributes {producer = "clang-cir"}
-// CHECK-LABEL: entry @views(
-// CHECK-SAME: %[[SRC:[A-Za-z0-9_]+]]: tile<ptr<f32>>
-// CHECK-SAME: %[[DST:[A-Za-z0-9_]+]]: tile<ptr<f32>>
-// CHECK: %[[SRC_TENSOR:.*]] = make_tensor_view %[[SRC]], shape = [64, 64], strides = [64, 1] : tensor_view<64x64xf32, strides=[64,1]>
-// CHECK-NEXT: %[[SRC_VIEW:.*]] = make_partition_view %[[SRC_TENSOR]] : partition_view<tile=(32x32), tensor_view<64x64xf32, strides=[64,1]>>
-// CHECK-NEXT: %[[DST_TENSOR:.*]] = make_tensor_view %[[DST]], shape = [64, 64], strides = [64, 1] : tensor_view<64x64xf32, strides=[64,1]>
+// CHECK-LABEL: entry @load_view(
+// CHECK-SAME: %[[SRC:[A-Za-z0-9_]+]]: tile<ptr<f16>>)
+// CHECK: %[[SRC_TENSOR:.*]] = make_tensor_view %[[SRC]], shape = [64, 64], strides = [64, 1] : tensor_view<64x64xf16, strides=[64,1]>
+// CHECK-NEXT: %[[SRC_VIEW:.*]] = make_partition_view %[[SRC_TENSOR]] : partition_view<tile=(32x32), tensor_view<64x64xf16, strides=[64,1]>>
+// CHECK-NEXT: %[[LOAD_X:.*]], %{{.*}}, %{{.*}} = get_tile_block_id : tile<i32>
+// CHECK-NEXT: %[[LOAD_ZERO:.*]] = constant <i32: 0> : tile<i32>
+// CHECK-NEXT: %{{.*}}, %{{.*}} = load_view_tko weak %[[SRC_VIEW]][%[[LOAD_X]], %[[LOAD_ZERO]]] : partition_view<tile=(32x32), tensor_view<64x64xf16, strides=[64,1]>>, tile<i32> -> tile<32x32xf16>, token
+// CHECK-NEXT: return
+
+// CHECK-LABEL: entry @store_view(
+// CHECK-SAME: %[[DST:[A-Za-z0-9_]+]]: tile<ptr<f32>>)
+// CHECK: %[[DST_TENSOR:.*]] = make_tensor_view %[[DST]], shape = [64, 64], strides = [64, 1] : tensor_view<64x64xf32, strides=[64,1]>
 // CHECK-NEXT: %[[DST_VIEW:.*]] = make_partition_view %[[DST_TENSOR]] : partition_view<tile=(32x32), tensor_view<64x64xf32, strides=[64,1]>>
-// CHECK: %[[X:.*]], %{{.*}}, %{{.*}} = get_tile_block_id : tile<i32>
-// CHECK-NEXT: %[[ZERO:.*]] = constant <i32: 0> : tile<i32>
-// CHECK-NEXT: %[[TILE:.*]], %[[LOAD_TOKEN:.*]] = load_view_tko weak %[[SRC_VIEW]][%[[X]], %[[ZERO]]] : partition_view<tile=(32x32), tensor_view<64x64xf32, strides=[64,1]>>, tile<i32> -> tile<32x32xf32>, token
-// CHECK-NEXT: %[[STORE_TOKEN:.*]] = store_view_tko weak %[[TILE]], %[[DST_VIEW]][%[[X]], %[[ZERO]]] : tile<32x32xf32>, partition_view<tile=(32x32), tensor_view<64x64xf32, strides=[64,1]>>, tile<i32> -> token
+// CHECK-NEXT: %[[STORE_X:.*]], %{{.*}}, %{{.*}} = get_tile_block_id : tile<i32>
+// CHECK-NEXT: %[[TILE_ZERO:.*]] = constant <f32: 0.000000e+00> : tile<32x32xf32>
+// CHECK-NEXT: %[[STORE_ZERO:.*]] = constant <i32: 0> : tile<i32>
+// CHECK-NEXT: %{{.*}} = store_view_tko weak %[[TILE_ZERO]], %[[DST_VIEW]][%[[STORE_X]], %[[STORE_ZERO]]] : tile<32x32xf32>, partition_view<tile=(32x32), tensor_view<64x64xf32, strides=[64,1]>>, tile<i32> -> token
 // CHECK-NEXT: return

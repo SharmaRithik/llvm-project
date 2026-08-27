@@ -31,6 +31,9 @@ llvm::StringRef getAnnotationName(IntrinsicKind kind);
 mlir::FailureOr<std::optional<IntrinsicAnnotation>>
 decodeAnnotation(cir::FuncOp function);
 
+mlir::LogicalResult validateIntrinsic(cir::FuncOp function,
+                                      const IntrinsicAnnotation &annotation);
+
 mlir::LogicalResult validateAnnotations(mlir::ModuleOp module,
                                         llvm::raw_ostream *output = nullptr);
 

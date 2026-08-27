@@ -7,8 +7,13 @@
 //===----------------------------------------------------------------------===//
 
 #include "clang/CIRTile/Annotation.h"
+#include "cuda_tile/Dialect/CudaTile/IR/Types.h"
 #include "mlir/IR/BuiltinAttributes.h"
+#include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/StringSwitch.h"
+#include "llvm/Support/MathExtras.h"
+#include <limits>
+#include <utility>
 
 namespace clang::CIRTile {
 namespace {
@@ -42,6 +47,71 @@ unsigned getArgumentCount(IntrinsicKind kind) {
     return 3;
   }
   llvm_unreachable("unknown CIR Tile intrinsic");
+}
+
+bool isValidDimension(int64_t value) {
+  return value > 0 && value <= std::numeric_limits<int32_t>::max() &&
+         llvm::isPowerOf2_64(static_cast<uint64_t>(value));
+}
+
+mlir::LogicalResult
+validateTileElementCount(cir::FuncOp function,
+                         const IntrinsicAnnotation &annotation, int64_t rows,
+                         int64_t columns) {
+  if (rows <= mlir::cuda_tile::maxTileNumElements / columns)
+    return mlir::success();
+  function.emitError()
+      << "annotation '" << getAnnotationName(annotation.kind)
+      << "' produces a tile larger than the CUDA Tile limit of "
+      << mlir::cuda_tile::maxTileNumElements << " elements";
+  return mlir::failure();
+}
+
+mlir::LogicalResult
+validateAnnotationValues(cir::FuncOp function,
+                         const IntrinsicAnnotation &annotation) {
+  if (annotation.kind == IntrinsicKind::BlockId) {
+    if (annotation.arguments[0] >= 0 && annotation.arguments[0] <= 2)
+      return mlir::success();
+    function.emitError() << "annotation '" << getAnnotationName(annotation.kind)
+                         << "' requires an axis from 0 to 2";
+    return mlir::failure();
+  }
+  if (annotation.kind == IntrinsicKind::Kernel)
+    return mlir::success();
+
+  if (!llvm::all_of(annotation.arguments, isValidDimension)) {
+    function.emitError()
+        << "annotation '" << getAnnotationName(annotation.kind)
+        << "' requires positive power-of-two dimensions that fit in 32 bits";
+    return mlir::failure();
+  }
+
+  if (annotation.kind == IntrinsicKind::Load ||
+      annotation.kind == IntrinsicKind::Store) {
+    if (annotation.arguments[2] % annotation.arguments[0] != 0 ||
+        annotation.arguments[3] % annotation.arguments[1] != 0) {
+      function.emitError()
+          << "annotation '" << getAnnotationName(annotation.kind)
+          << "' requires tensor dimensions divisible by tile dimensions";
+      return mlir::failure();
+    }
+    return validateTileElementCount(
+        function, annotation, annotation.arguments[0], annotation.arguments[1]);
+  }
+
+  if (annotation.kind == IntrinsicKind::Zero)
+    return validateTileElementCount(
+        function, annotation, annotation.arguments[0], annotation.arguments[1]);
+
+  for (auto [rows, columns] :
+       {std::pair(annotation.arguments[0], annotation.arguments[2]),
+        std::pair(annotation.arguments[2], annotation.arguments[1]),
+        std::pair(annotation.arguments[0], annotation.arguments[1])})
+    if (mlir::failed(
+            validateTileElementCount(function, annotation, rows, columns)))
+      return mlir::failure();
+  return mlir::success();
 }
 
 } // namespace
@@ -118,15 +188,64 @@ decodeAnnotation(cir::FuncOp function) {
         result->arguments.push_back(integer.getInt());
       }
     }
-
-    if (*kind == IntrinsicKind::BlockId &&
-        (result->arguments[0] < 0 || result->arguments[0] > 2)) {
-      function.emitError() << "annotation '" << name
-                           << "' requires an axis from 0 to 2";
-      return mlir::failure();
-    }
   }
+  if (result && mlir::failed(validateAnnotationValues(function, *result)))
+    return mlir::failure();
   return result;
+}
+
+mlir::LogicalResult validateIntrinsic(cir::FuncOp function,
+                                      const IntrinsicAnnotation &annotation) {
+  cir::FuncType actual = function.getFunctionType();
+  if (annotation.kind == IntrinsicKind::Kernel) {
+    if (!actual.isVarArg() && actual.hasVoidReturn())
+      return mlir::success();
+    function.emitError("kernel intrinsic must be non-variadic and return void");
+    return mlir::failure();
+  }
+
+  mlir::MLIRContext *context = function.getContext();
+  mlir::Type s32 = cir::IntType::get(context, 32, true);
+  mlir::Type f16 = cir::FP16Type::get(context);
+  mlir::Type f32 = cir::SingleType::get(context);
+  mlir::Type result = cir::VoidType::get(context);
+  llvm::SmallVector<mlir::Type, 4> inputs;
+  auto vector = [](mlir::Type element, int64_t rows, int64_t columns) {
+    return cir::VectorType::get(element, static_cast<uint64_t>(rows * columns));
+  };
+
+  switch (annotation.kind) {
+  case IntrinsicKind::Kernel:
+    llvm_unreachable("handled above");
+  case IntrinsicKind::BlockId:
+    result = s32;
+    break;
+  case IntrinsicKind::Zero:
+    result = vector(f32, annotation.arguments[0], annotation.arguments[1]);
+    break;
+  case IntrinsicKind::Load:
+    inputs = {cir::PointerType::get(f16), s32, s32};
+    result = vector(f16, annotation.arguments[0], annotation.arguments[1]);
+    break;
+  case IntrinsicKind::Mma:
+    inputs = {vector(f16, annotation.arguments[0], annotation.arguments[2]),
+              vector(f16, annotation.arguments[2], annotation.arguments[1]),
+              vector(f32, annotation.arguments[0], annotation.arguments[1])};
+    result = vector(f32, annotation.arguments[0], annotation.arguments[1]);
+    break;
+  case IntrinsicKind::Store:
+    inputs = {cir::PointerType::get(f32),
+              vector(f32, annotation.arguments[0], annotation.arguments[1]),
+              s32, s32};
+    break;
+  }
+
+  cir::FuncType expected = cir::FuncType::get(inputs, result);
+  if (actual == expected)
+    return mlir::success();
+  function.emitError() << "intrinsic '" << getAnnotationName(annotation.kind)
+                       << "' requires type " << expected << ", got " << actual;
+  return mlir::failure();
 }
 
 mlir::LogicalResult validateAnnotations(mlir::ModuleOp module,
@@ -134,6 +253,8 @@ mlir::LogicalResult validateAnnotations(mlir::ModuleOp module,
   mlir::WalkResult result = module.walk([&](cir::FuncOp function) {
     auto annotation = decodeAnnotation(function);
     if (mlir::failed(annotation))
+      return mlir::WalkResult::interrupt();
+    if (*annotation && mlir::failed(validateIntrinsic(function, **annotation)))
       return mlir::WalkResult::interrupt();
     if (!*annotation || !output)
       return mlir::WalkResult::advance();

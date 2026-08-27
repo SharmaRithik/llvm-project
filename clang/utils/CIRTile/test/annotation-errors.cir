@@ -5,6 +5,10 @@
 // RUN: not cir-tile-translate %t/type.cir 2>&1 | FileCheck %s --check-prefix=TYPE
 // RUN: not cir-tile-translate %t/duplicate.cir 2>&1 | FileCheck %s --check-prefix=DUPLICATE
 // RUN: not cir-tile-translate %t/axis.cir 2>&1 | FileCheck %s --check-prefix=AXIS
+// RUN: not cir-tile-translate %t/dimension.cir 2>&1 | FileCheck %s --check-prefix=DIMENSION
+// RUN: not cir-tile-translate %t/range.cir 2>&1 | FileCheck %s --check-prefix=RANGE
+// RUN: not cir-tile-translate %t/divisible.cir 2>&1 | FileCheck %s --check-prefix=DIVISIBLE
+// RUN: not cir-tile-translate %t/size.cir 2>&1 | FileCheck %s --check-prefix=SIZE
 
 //--- version.cir
 module {
@@ -41,3 +45,27 @@ module {
   cir.func private @bad() [#cir.annotation<"cir_tile.v1.bid", [3 : i32]>]
 }
 // AXIS: annotation 'cir_tile.v1.bid' requires an axis from 0 to 2
+
+//--- dimension.cir
+module {
+  cir.func private @bad() [#cir.annotation<"cir_tile.v1.zero", [32 : i32, 24 : i32]>]
+}
+// DIMENSION: annotation 'cir_tile.v1.zero' requires positive power-of-two dimensions that fit in 32 bits
+
+//--- range.cir
+module {
+  cir.func private @bad() [#cir.annotation<"cir_tile.v1.zero", [2147483648 : i64, 1 : i32]>]
+}
+// RANGE: annotation 'cir_tile.v1.zero' requires positive power-of-two dimensions that fit in 32 bits
+
+//--- divisible.cir
+module {
+  cir.func private @bad() [#cir.annotation<"cir_tile.v1.load", [32 : i32, 16 : i32, 16 : i32, 64 : i32]>]
+}
+// DIVISIBLE: annotation 'cir_tile.v1.load' requires tensor dimensions divisible by tile dimensions
+
+//--- size.cir
+module {
+  cir.func private @bad() [#cir.annotation<"cir_tile.v1.zero", [8192 : i32, 4096 : i32]>]
+}
+// SIZE: annotation 'cir_tile.v1.zero' produces a tile larger than the CUDA Tile limit of 16777216 elements
