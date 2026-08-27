@@ -95,6 +95,11 @@ struct LoopInterchangePlan {
   DomainInterchangePlan domain;
 };
 
+struct LoopDomainPair {
+  cir::LoopDomain &outer;
+  cir::LoopDomain &inner;
+};
+
 static bool isProfitableInterchange(const cir::TwoLevelLoopNest &nest,
                                     const cir::LoopMemoryAnalysis &memory) {
   if (memory.accesses.empty())
@@ -162,8 +167,9 @@ scoreBandCandidateLocality(const cir::ThreeLevelLoopBand &band,
   return locality;
 }
 
+template <typename LoopNest>
 static std::optional<CanonicalUpperPlan>
-matchCanonicalUpperTriangle(cir::TwoLevelLoopNest &nest) {
+matchCanonicalUpperTriangle(LoopNest &nest) {
   if (nest.outer.comparison.getKind() != cir::CmpOpKind::lt ||
       nest.inner.comparison.getKind() != cir::CmpOpKind::lt ||
       !isConstantOne(nest.outer.initial) || !isConstantZero(nest.inner.initial))
@@ -197,7 +203,7 @@ matchCanonicalUpperTriangle(cir::TwoLevelLoopNest &nest) {
     return std::nullopt;
 
   auto oldOuterInitial =
-      nest.outer.initial.getSource().getDefiningOp<cir::ConstantOp>();
+      nest.outer.initial.getSource().template getDefiningOp<cir::ConstantOp>();
   Operation *oldInnerBound =
       nest.inner.conditionRHS.getSource().getDefiningOp();
   if (!oldOuterInitial || !oldInnerBound)
@@ -206,8 +212,9 @@ matchCanonicalUpperTriangle(cir::TwoLevelLoopNest &nest) {
                             oldInnerBound};
 }
 
+template <typename LoopNest>
 static std::optional<CanonicalLowerPlan>
-matchCanonicalLowerTriangle(cir::TwoLevelLoopNest &nest) {
+matchCanonicalLowerTriangle(LoopNest &nest) {
   if (nest.outer.comparison.getKind() != cir::CmpOpKind::lt ||
       nest.inner.comparison.getKind() != cir::CmpOpKind::lt ||
       !isConstantZero(nest.outer.initial) ||
@@ -273,8 +280,9 @@ static cir::IntAttr getMultipliedConstant(const cir::LoopDomainExpr &expression,
   return {};
 }
 
+template <typename LoopNest>
 static std::optional<AffineOffsetPlan>
-matchAffineOffsetUpperTriangle(cir::TwoLevelLoopNest &nest) {
+matchAffineOffsetUpperTriangle(LoopNest &nest) {
   if (nest.outer.comparison.getKind() != cir::CmpOpKind::lt ||
       nest.inner.comparison.getKind() != cir::CmpOpKind::lt ||
       !isConstantZero(nest.outer.initial) ||
@@ -311,8 +319,8 @@ matchAffineOffsetUpperTriangle(cir::TwoLevelLoopNest &nest) {
   return AffineOffsetPlan{extent, outerOffset};
 }
 
-static std::optional<ScaledUpperPlan>
-matchScaledUpperTriangle(cir::TwoLevelLoopNest &nest) {
+template <typename LoopNest>
+static std::optional<ScaledUpperPlan> matchScaledUpperTriangle(LoopNest &nest) {
   if (nest.outer.comparison.getKind() != cir::CmpOpKind::lt ||
       nest.inner.comparison.getKind() != cir::CmpOpKind::lt ||
       !isConstantOne(nest.outer.initial) ||
@@ -362,7 +370,7 @@ matchScaledUpperTriangle(cir::TwoLevelLoopNest &nest) {
     return std::nullopt;
 
   auto oldOuterInitial =
-      nest.outer.initial.getSource().getDefiningOp<cir::ConstantOp>();
+      nest.outer.initial.getSource().template getDefiningOp<cir::ConstantOp>();
   if (!oldOuterInitial)
     return std::nullopt;
   auto newOuterBound = cir::IntAttr::get(type, newOuterBoundValue);
@@ -386,8 +394,9 @@ static bool isInductionProduct(const cir::LoopDomainExpr &expression,
           rhs->getInduction() == lhsInduction);
 }
 
+template <typename LoopNest>
 static std::optional<ProductBoundPlan>
-matchProductBoundTriangle(cir::TwoLevelLoopNest &nest) {
+matchProductBoundTriangle(LoopNest &nest) {
   if (nest.outer.comparison.getKind() != cir::CmpOpKind::lt ||
       nest.inner.comparison.getKind() != cir::CmpOpKind::lt ||
       !isConstantOne(nest.outer.initial) ||
@@ -475,8 +484,8 @@ static bool isInvariantRectangularValue(const cir::LoopDomainExpr &expression,
           isInvariantSymbol(expression, outerLoop));
 }
 
-static std::optional<RectangularPlan>
-matchRectangularDomain(cir::TwoLevelLoopNest &nest) {
+template <typename LoopNest>
+static std::optional<RectangularPlan> matchRectangularDomain(LoopNest &nest) {
   if (nest.outer.comparison.getKind() != cir::CmpOpKind::lt ||
       nest.inner.comparison.getKind() != cir::CmpOpKind::lt ||
       !isInvariantRectangularValue(nest.outer.initial, nest.outer.loop) ||
@@ -501,8 +510,9 @@ matchRectangularDomain(cir::TwoLevelLoopNest &nest) {
   return RectangularPlan{};
 }
 
+template <typename LoopNest>
 static std::optional<DomainInterchangePlan>
-matchLoopInterchangeDomain(cir::TwoLevelLoopNest &nest) {
+matchLoopInterchangeDomain(LoopNest &nest) {
   if (auto plan = matchCanonicalUpperTriangle(nest))
     return DomainInterchangePlan(std::move(*plan));
   if (auto plan = matchCanonicalLowerTriangle(nest))
@@ -516,6 +526,32 @@ matchLoopInterchangeDomain(cir::TwoLevelLoopNest &nest) {
   if (auto plan = matchRectangularDomain(nest))
     return DomainInterchangePlan(std::move(*plan));
   return std::nullopt;
+}
+
+template <typename LoopNest>
+static std::optional<DomainInterchangePlan>
+matchBandInterchangeDomain(LoopNest &nest) {
+  if (std::optional<DomainInterchangePlan> plan =
+          matchLoopInterchangeDomain(nest))
+    return plan;
+  if (nest.outer.comparison.getKind() != cir::CmpOpKind::lt ||
+      nest.inner.comparison.getKind() != cir::CmpOpKind::lt ||
+      nest.outer.conditionLHS.getKind() !=
+          cir::LoopDomainExpr::Kind::Induction ||
+      nest.outer.conditionLHS.getInduction() != nest.outer.induction ||
+      nest.inner.conditionLHS.getKind() !=
+          cir::LoopDomainExpr::Kind::Induction ||
+      nest.inner.conditionLHS.getInduction() != nest.inner.induction ||
+      nest.inner.initial.dependsOn(nest.outer.induction) ||
+      nest.inner.conditionRHS.dependsOn(nest.outer.induction) ||
+      nest.outer.stepLoad.getResult().getType() !=
+          nest.inner.stepLoad.getResult().getType() ||
+      nest.outer.initial.getSource().getType() !=
+          nest.outer.stepLoad.getResult().getType() ||
+      nest.inner.initial.getSource().getType() !=
+          nest.inner.stepLoad.getResult().getType())
+    return std::nullopt;
+  return DomainInterchangePlan(RectangularPlan{});
 }
 
 static bool
@@ -652,9 +688,10 @@ static void eraseDeadDomainExpression(const cir::LoopDomainExpr &expression) {
     eraseDeadDomainExpression(*expression.getRHS());
 }
 
-static void applyLoopInterchangePlan(cir::TwoLevelLoopNest &nest,
-                                     const LoopNestRewritePlan &structure,
-                                     const CanonicalUpperPlan &plan) {
+template <typename InterchangeStructure>
+static void applyLoopInterchangeDomain(cir::TwoLevelLoopNest &nest,
+                                       const CanonicalUpperPlan &plan,
+                                       InterchangeStructure interchange) {
   cir::IntAttr bound = plan.bound;
   auto boundType = cast<cir::IntType>(bound.getType());
 
@@ -668,7 +705,7 @@ static void applyLoopInterchangePlan(cir::TwoLevelLoopNest &nest,
   if (plan.oldInnerBound->use_empty())
     plan.oldInnerBound->erase();
 
-  interchangeLoopStructure(nest, structure);
+  interchange();
   builder.setInsertionPoint(nest.outer.initialization);
   auto newInnerLoad =
       cast<cir::LoadOp>(builder.clone(*nest.inner.stepLoad.getOperation()));
@@ -683,12 +720,15 @@ static void applyLoopInterchangePlan(cir::TwoLevelLoopNest &nest,
     plan.oldOuterInitial->erase();
 }
 
-static void applyLoopInterchangePlan(cir::TwoLevelLoopNest &nest,
-                                     const LoopNestRewritePlan &structure,
-                                     const CanonicalLowerPlan &plan) {
-  nest.inner.initialization->setOperand(cir::StoreOp::odsIndex_value,
-                                        nest.outer.initial.getSource());
-
+template <typename InterchangeStructure>
+static void applyLoopInterchangeDomain(cir::TwoLevelLoopNest &nest,
+                                       const CanonicalLowerPlan &plan,
+                                       InterchangeStructure interchange,
+                                       bool cloneOuterInitial = false) {
+  Operation *oldOuterInitial = nest.outer.initial.getSource().getDefiningOp();
+  if (!cloneOuterInitial)
+    nest.inner.initialization->setOperand(cir::StoreOp::odsIndex_value,
+                                          nest.outer.initial.getSource());
   OpBuilder builder(nest.outer.loop.getContext());
   builder.setInsertionPoint(nest.outer.comparison);
   auto newInnerBound =
@@ -697,16 +737,25 @@ static void applyLoopInterchangePlan(cir::TwoLevelLoopNest &nest,
   nest.outer.comparison->setOperand(cir::CmpOp::odsIndex_rhs, newInnerBound);
   nest.outer.comparison.setKind(cir::CmpOpKind::le);
 
-  interchangeLoopStructure(nest, structure);
+  interchange();
+  if (cloneOuterInitial) {
+    builder.setInsertionPoint(nest.inner.initialization);
+    auto newOuterInitial =
+        cast<cir::ConstantOp>(builder.clone(*oldOuterInitial));
+    newOuterInitial->setLoc(nest.inner.initialization.getLoc());
+    nest.inner.initialization->setOperand(cir::StoreOp::odsIndex_value,
+                                          newOuterInitial);
+  }
   if (plan.oldInnerInitial->use_empty())
     plan.oldInnerInitial->erase();
   if (plan.oldOuterBound->use_empty())
     plan.oldOuterBound->erase();
 }
 
-static void applyLoopInterchangePlan(cir::TwoLevelLoopNest &nest,
-                                     const LoopNestRewritePlan &structure,
-                                     const AffineOffsetPlan &plan) {
+template <typename InterchangeStructure>
+static void applyLoopInterchangeDomain(cir::TwoLevelLoopNest &nest,
+                                       const AffineOffsetPlan &plan,
+                                       InterchangeStructure interchange) {
   cir::IntAttr extent = plan.extent;
   cir::IntAttr offset = plan.offset;
   auto type = cast<cir::IntType>(extent.getType());
@@ -720,7 +769,7 @@ static void applyLoopInterchangePlan(cir::TwoLevelLoopNest &nest,
   nest.inner.comparison->setOperand(cir::CmpOp::odsIndex_rhs, newOuterBound);
   eraseDeadDomainExpression(nest.inner.conditionRHS);
 
-  interchangeLoopStructure(nest, structure);
+  interchange();
   builder.setInsertionPoint(nest.outer.initialization);
   Location location = nest.outer.initialization.getLoc();
   auto newOuterValue =
@@ -740,9 +789,10 @@ static void applyLoopInterchangePlan(cir::TwoLevelLoopNest &nest,
                                         newInnerInitial);
 }
 
-static void applyLoopInterchangePlan(cir::TwoLevelLoopNest &nest,
-                                     const LoopNestRewritePlan &structure,
-                                     const ScaledUpperPlan &plan) {
+template <typename InterchangeStructure>
+static void applyLoopInterchangeDomain(cir::TwoLevelLoopNest &nest,
+                                       const ScaledUpperPlan &plan,
+                                       InterchangeStructure interchange) {
   auto type = cast<cir::IntType>(plan.newOuterBound.getType());
 
   OpBuilder builder(nest.outer.loop.getContext());
@@ -752,7 +802,7 @@ static void applyLoopInterchangePlan(cir::TwoLevelLoopNest &nest,
   nest.inner.comparison->setOperand(cir::CmpOp::odsIndex_rhs, newOuterBound);
   eraseDeadDomainExpression(nest.inner.conditionRHS);
 
-  interchangeLoopStructure(nest, structure);
+  interchange();
   builder.setInsertionPoint(nest.outer.initialization);
   Location location = nest.outer.initialization.getLoc();
   auto newOuterValue =
@@ -770,9 +820,10 @@ static void applyLoopInterchangePlan(cir::TwoLevelLoopNest &nest,
     plan.oldOuterInitial->erase();
 }
 
-static void applyLoopInterchangePlan(cir::TwoLevelLoopNest &nest,
-                                     const LoopNestRewritePlan &structure,
-                                     const ProductBoundPlan &plan) {
+template <typename InterchangeStructure>
+static void applyLoopInterchangeDomain(cir::TwoLevelLoopNest &nest,
+                                       const ProductBoundPlan &plan,
+                                       InterchangeStructure interchange) {
   cir::IntAttr extent = plan.extent;
   auto type = cast<cir::IntType>(extent.getType());
 
@@ -780,7 +831,7 @@ static void applyLoopInterchangePlan(cir::TwoLevelLoopNest &nest,
                                     plan.innerInduction);
   eraseDeadDomainExpression(nest.inner.conditionLHS);
 
-  interchangeLoopStructure(nest, structure);
+  interchange();
   OpBuilder builder(nest.outer.loop.getContext());
   builder.setInsertionPoint(nest.outer.comparison);
   Location location = nest.outer.comparison.getLoc();
@@ -808,19 +859,36 @@ static void applyLoopInterchangePlan(cir::TwoLevelLoopNest &nest,
     plan.oldOuterBound->erase();
 }
 
-static void applyLoopInterchangePlan(cir::TwoLevelLoopNest &nest,
-                                     const LoopNestRewritePlan &structure,
-                                     const RectangularPlan &) {
-  interchangeLoopStructure(nest, structure);
+template <typename InterchangeStructure>
+static void applyLoopInterchangeDomain(cir::TwoLevelLoopNest &,
+                                       const RectangularPlan &,
+                                       InterchangeStructure interchange) {
+  interchange();
 }
 
 static void applyLoopInterchangePlan(cir::TwoLevelLoopNest &nest,
                                      const LoopInterchangePlan &plan) {
+  auto interchange = [&] { interchangeLoopStructure(nest, plan.structure); };
   std::visit(
       [&](const auto &domain) {
-        applyLoopInterchangePlan(nest, plan.structure, domain);
+        applyLoopInterchangeDomain(nest, domain, interchange);
       },
       plan.domain);
+}
+
+template <typename Domain, typename InterchangeStructure>
+static void applyBandInterchangeDomain(cir::TwoLevelLoopNest &nest,
+                                       const Domain &domain,
+                                       InterchangeStructure interchange) {
+  applyLoopInterchangeDomain(nest, domain, interchange);
+}
+
+template <typename InterchangeStructure>
+static void applyBandInterchangeDomain(cir::TwoLevelLoopNest &nest,
+                                       const CanonicalLowerPlan &domain,
+                                       InterchangeStructure interchange) {
+  applyLoopInterchangeDomain(nest, domain, interchange,
+                             /*cloneOuterInitial=*/true);
 }
 
 struct BandRewritePhase {
@@ -966,11 +1034,13 @@ matchBandRewrite(cir::ThreeLevelLoopBand &band,
   SmallVector<cir::ScopeOp, 2> innerSetups;
   SmallVector<SmallVector<Operation *, 8>, 2> innerSetupOperations;
   bool hasInlineInnerSetup = false;
-  for (cir::LoopDomain &inner : band.innerCandidates) {
-    if (inner.initial.dependsOn(band.outer.induction) ||
-        inner.conditionLHS.dependsOn(band.outer.induction) ||
-        inner.conditionRHS.dependsOn(band.outer.induction) ||
-        !areBandDomainSymbolsInvariant(inner.initial, anchorLoop) ||
+  for (auto [index, inner] : llvm::enumerate(band.innerCandidates)) {
+    if (localities[index].isProfitable()) {
+      LoopDomainPair nest{band.outer, inner};
+      if (!matchBandInterchangeDomain(nest))
+        return std::nullopt;
+    }
+    if (!areBandDomainSymbolsInvariant(inner.initial, anchorLoop) ||
         !areBandDomainSymbolsInvariant(inner.conditionLHS, anchorLoop) ||
         !areBandDomainSymbolsInvariant(inner.conditionRHS, anchorLoop) ||
         !inner.loop.getBody().hasOneBlock())
@@ -1066,9 +1136,9 @@ static void eraseOtherPhases(BandRewritePlan &plan, BandRewritePhase &kept,
   }
 }
 
-static void interchangeClonedBand(BandRewritePlan &plan,
-                                  BandRewritePhase &phase,
-                                  const IRMapping &mapping) {
+static void interchangeClonedBandStructure(BandRewritePlan &plan,
+                                           BandRewritePhase &phase,
+                                           const IRMapping &mapping) {
   auto outerLoop =
       cast<cir::ForOp>(mapping.lookup(plan.outerLoop.getOperation()));
   auto innerLoop =
@@ -1099,15 +1169,49 @@ static void interchangeClonedBand(BandRewritePlan &plan,
   outerLoop->moveBefore(innerBody.getTerminator());
 }
 
-static void applyBandRewrite(BandRewritePlan &plan) {
+static bool interchangeClonedBand(BandRewritePlan &plan,
+                                  BandRewritePhase &phase,
+                                  const IRMapping &mapping) {
+  auto outerLoop =
+      cast<cir::ForOp>(mapping.lookup(plan.outerLoop.getOperation()));
+  auto innerLoop =
+      cast<cir::ForOp>(mapping.lookup(phase.innerLoop.getOperation()));
+  FailureOr<cir::LoopDomain> outer = cir::analyzeLoopDomain(outerLoop);
+  if (failed(outer))
+    return false;
+  FailureOr<cir::LoopDomain> inner =
+      cir::analyzeLoopDomain(innerLoop, {outer->induction});
+  if (failed(inner))
+    return false;
+
+  cir::TwoLevelLoopNest nest{std::move(*outer), std::move(*inner)};
+  std::optional<DomainInterchangePlan> domain =
+      matchBandInterchangeDomain(nest);
+  if (!domain)
+    return false;
+  auto interchange = [&] {
+    interchangeClonedBandStructure(plan, phase, mapping);
+  };
+  std::visit(
+      [&](const auto &candidate) {
+        applyBandInterchangeDomain(nest, candidate, interchange);
+      },
+      *domain);
+
+  return true;
+}
+
+static unsigned applyBandRewrite(BandRewritePlan &plan) {
+  unsigned interchanged = 0;
   for (BandRewritePhase &phase : plan.phases) {
     IRMapping mapping;
     cloneBandSetup(plan, mapping);
     eraseOtherPhases(plan, phase, mapping);
-    if (phase.interchange)
-      interchangeClonedBand(plan, phase, mapping);
+    if (phase.interchange && interchangeClonedBand(plan, phase, mapping))
+      ++interchanged;
   }
   plan.outerSetup->erase();
+  return interchanged;
 }
 
 struct CIRLoopInterchangePass
@@ -1170,11 +1274,7 @@ struct CIRLoopInterchangePass
           std::optional<BandRewritePlan> plan =
               matchBandRewrite(*band, localities);
           if (plan) {
-            unsigned nestedPhases =
-                llvm::count_if(plan->phases, [](const BandRewritePhase &phase) {
-                  return phase.interchange;
-                });
-            applyBandRewrite(*plan);
+            unsigned nestedPhases = applyBandRewrite(*plan);
             changed = true;
             if (emitAnalysisRemarks) {
               std::string message;

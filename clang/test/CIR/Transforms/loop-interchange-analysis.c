@@ -833,8 +833,12 @@ void rejected_volatile(void) {
 // INTERCHANGE: [[DISTRIBUTIONK:%[0-9]+]] = cir.alloca "k"
 
 // INTERCHANGE-LABEL: cir.func dso_local @band_outer_dependent_domain()
-// INTERCHANGE: [[DEPENDENTJ:%[0-9]+]] = cir.alloca "j"
-// INTERCHANGE-NOT: cir.alloca "j"
+// INTERCHANGE: [[DEPENDENTINITJ:%[0-9]+]] = cir.alloca "j"
+// INTERCHANGE: cir.for : cond {
+// INTERCHANGE: [[DEPENDENTK:%[0-9]+]] = cir.alloca "k"
+// INTERCHANGE: cir.for : cond {
+// INTERCHANGE: } body {
+// INTERCHANGE: [[DEPENDENTUPDATEJ:%[0-9]+]] = cir.alloca "j"
 
 // INTERCHANGE-LABEL: cir.func dso_local @band_mixed_locality_phases()
 // INTERCHANGE: [[MIXEDINITJ:%[0-9]+]] = cir.alloca "j"
