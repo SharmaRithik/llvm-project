@@ -805,13 +805,28 @@ void rejected_volatile(void) {
 // INTERCHANGE-NEXT: cir.store{{.*}} [[SHIFTOUTERZERO]], [[SHIFTOUTERI]]
 // INTERCHANGE-NEXT: cir.for : cond {
 
+// INTERCHANGE-LABEL: cir.func dso_local @band_distribution_dependence()
+// INTERCHANGE: [[DISTRIBUTIONJ:%[0-9]+]] = cir.alloca "j"
+// INTERCHANGE-NOT: cir.alloca "j"
+// INTERCHANGE: [[DISTRIBUTIONK:%[0-9]+]] = cir.alloca "k"
+
 // INTERCHANGE-LABEL: cir.func dso_local @band_outer_dependent_domain()
 // INTERCHANGE: [[DEPENDENTJ:%[0-9]+]] = cir.alloca "j"
 // INTERCHANGE-NOT: cir.alloca "j"
 
 // INTERCHANGE-LABEL: cir.func dso_local @band_mixed_locality_phases()
-// INTERCHANGE: [[MIXEDJ:%[0-9]+]] = cir.alloca "j"
-// INTERCHANGE-NOT: cir.alloca "j"
+// INTERCHANGE: [[MIXEDINITJ:%[0-9]+]] = cir.alloca "j"
+// INTERCHANGE: cir.for : cond {
+// INTERCHANGE: [[MIXEDK:%[0-9]+]] = cir.alloca "k"
+// INTERCHANGE: cir.for : cond {
+// INTERCHANGE: } body {
+// INTERCHANGE: [[MIXEDUPDATEJ:%[0-9]+]] = cir.alloca "j"
+// INTERCHANGE: cir.for : cond {
+// INTERCHANGE: [[MIXEDCOPYJ:%[0-9]+]] = cir.alloca "j"
+// INTERCHANGE: cir.for : cond {
+// INTERCHANGE: } body {
+// INTERCHANGE: [[MIXEDCOPYK:%[0-9]+]] = cir.alloca "k"
+// INTERCHANGE: cir.for : cond {
 
 // INTERCHANGE-LABEL: cir.func dso_local @already_contiguous()
 // INTERCHANGE: [[CONTIGI:%[0-9]+]] = cir.alloca "i"

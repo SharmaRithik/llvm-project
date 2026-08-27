@@ -828,8 +828,7 @@ struct BandRewritePhase {
   cir::ForOp innerLoop;
   SmallVector<Operation *, 8> operations;
   SmallVector<Operation *, 8> innerSetupOperations;
-
-  bool isNested() const { return innerLoop != nullptr; }
+  bool interchange = false;
 };
 
 struct BandRewritePlan {
@@ -933,9 +932,11 @@ static bool hasPhaseLocalSSAUses(Block &iteration,
 }
 
 static std::optional<BandRewritePlan>
-matchBandRewrite(cir::ThreeLevelLoopBand &band) {
+matchBandRewrite(cir::ThreeLevelLoopBand &band,
+                 ArrayRef<InterchangeLocality> localities) {
   cir::ForOp anchorLoop = band.anchor.loop;
-  if (!areBandDomainSymbolsInvariant(band.outer.initial, anchorLoop) ||
+  if (localities.size() != band.innerCandidates.size() ||
+      !areBandDomainSymbolsInvariant(band.outer.initial, anchorLoop) ||
       !areBandDomainSymbolsInvariant(band.outer.conditionLHS, anchorLoop) ||
       !areBandDomainSymbolsInvariant(band.outer.conditionRHS, anchorLoop))
     return std::nullopt;
@@ -1009,6 +1010,7 @@ matchBandRewrite(cir::ThreeLevelLoopBand &band) {
   if (hasInlineInnerSetup) {
     BandRewritePhase phase;
     phase.innerLoop = band.innerCandidates.front().loop;
+    phase.interchange = localities.front().isProfitable();
     phase.operations.append(innerSetupOperations.front());
     phase.operations.push_back(phase.innerLoop.getOperation());
     phase.innerSetupOperations = std::move(innerSetupOperations.front());
@@ -1026,6 +1028,7 @@ matchBandRewrite(cir::ThreeLevelLoopBand &band) {
       BandRewritePhase phase;
       phase.innerSetup = innerSetups[innerIndex];
       phase.innerLoop = band.innerCandidates[innerIndex].loop;
+      phase.interchange = localities[innerIndex].isProfitable();
       phase.operations.push_back(&operation);
       phase.innerSetupOperations = std::move(innerSetupOperations[innerIndex]);
       phases.push_back(std::move(phase));
@@ -1101,7 +1104,7 @@ static void applyBandRewrite(BandRewritePlan &plan) {
     IRMapping mapping;
     cloneBandSetup(plan, mapping);
     eraseOtherPhases(plan, phase, mapping);
-    if (phase.isNested())
+    if (phase.interchange)
       interchangeClonedBand(plan, phase, mapping);
   }
   plan.outerSetup->erase();
@@ -1158,15 +1161,19 @@ struct CIRLoopInterchangePass
           loop.emitRemark(os.str());
         }
 
-        bool allProfitable =
+        bool anyProfitable =
             !localities.empty() &&
-            llvm::all_of(localities, [](const InterchangeLocality &locality) {
+            llvm::any_of(localities, [](const InterchangeLocality &locality) {
               return locality.isProfitable();
             });
-        if (bandMemory.isSafe() && allProfitable) {
-          std::optional<BandRewritePlan> plan = matchBandRewrite(*band);
+        if (bandMemory.isSafe() && anyProfitable) {
+          std::optional<BandRewritePlan> plan =
+              matchBandRewrite(*band, localities);
           if (plan) {
-            unsigned nestedPhases = band->innerCandidates.size();
+            unsigned nestedPhases =
+                llvm::count_if(plan->phases, [](const BandRewritePhase &phase) {
+                  return phase.interchange;
+                });
             applyBandRewrite(*plan);
             changed = true;
             if (emitAnalysisRemarks) {
