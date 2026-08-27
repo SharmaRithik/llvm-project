@@ -9,12 +9,13 @@ add_llvm_tool(cir-tile-translate
 target_link_libraries(cir-tile-translate
   PRIVATE
   CIRRegisterAllDialects
-  CIRTileAnnotation
+  CIRTileSupport
   CudaTileDialect
   MLIRCIR
   MLIRIR
   MLIRLLVMDialect
   MLIRParser
+  MLIRSupport
 )
 
 llvm_update_compile_flags(cir-tile-translate)

@@ -1,0 +1,20 @@
+// RUN: cir-tile-translate %s | FileCheck %s
+// RUN: cir-tile-translate %s -o %t && FileCheck %s --input-file=%t
+
+!s32i = !cir.int<s, 32>
+
+module {
+  cir.func private @bid_x() -> (!s32i) [#cir.annotation<"cir_tile.v1.bid", [0 : i32]>]
+  cir.func private @bid_y() -> (!s32i) [#cir.annotation<"cir_tile.v1.bid", [1 : i32]>]
+
+  cir.func @kernel(%arg0: !cir.ptr<!cir.f16>, %arg1: !cir.ptr<!cir.float>) [#cir.annotation<"cir_tile.v1.kernel">] {
+    %0 = cir.call @bid_x() : () -> (!s32i)
+    %1 = cir.call @bid_y() : () -> (!s32i)
+    cir.return
+  }
+}
+
+// CHECK: cuda_tile.module @cir_module attributes {producer = "clang-cir"}
+// CHECK: entry @kernel(%arg0: tile<ptr<f16>>, %arg1: tile<ptr<f32>>)
+// CHECK: %[[X:.*]], %[[Y:.*]], %[[Z:.*]] = get_tile_block_id : tile<i32>
+// CHECK-NEXT: return

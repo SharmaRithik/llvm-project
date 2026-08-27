@@ -1,0 +1,21 @@
+// RUN: split-file %s %t
+// RUN: not cir-tile-translate %t/missing.cir 2>&1 | FileCheck %s --check-prefix=MISSING
+// RUN: not cir-tile-translate %t/unsupported.cir 2>&1 | FileCheck %s --check-prefix=UNSUPPORTED
+
+//--- missing.cir
+module {
+  cir.func @ordinary() {
+    cir.return
+  }
+}
+// MISSING: contains no cir_tile.v1.kernel function
+
+//--- unsupported.cir
+module {
+  cir.func private @zero() [#cir.annotation<"cir_tile.v1.zero", [32 : i32, 32 : i32]>]
+  cir.func @kernel() [#cir.annotation<"cir_tile.v1.kernel">] {
+    cir.call @zero() : () -> ()
+    cir.return
+  }
+}
+// UNSUPPORTED: lowering for annotation 'cir_tile.v1.zero' is not implemented
