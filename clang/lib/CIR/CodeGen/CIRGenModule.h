@@ -859,6 +859,10 @@ public:
   /// carrying the verified identity for bool with a referenced bool value
   bool hasBoolFindParams(const clang::FunctionDecl *funcDecl);
 
+  /// The ranges::find call operator analog of hasBoolFindParams, the same
+  /// iterator pair and referenced bool plus a std::identity projection
+  bool hasBoolRangesFindParams(const clang::FunctionDecl *funcDecl);
+
   /// Whether the record is an instantiation of its primary class
   /// template rather than of a partial or explicit specialization.
   static bool isPrimaryTemplateInstantiation(

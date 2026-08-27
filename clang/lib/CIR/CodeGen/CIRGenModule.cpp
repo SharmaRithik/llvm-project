@@ -4251,13 +4251,14 @@ static std::optional<ElemEqPredicateShape> elemEqPredicateShape(
   return ElemEqPredicateShape{closure, elemTy, other};
 }
 
-// Whether `funcDecl` is a standard find over two bit iterators carrying
-// the verified identity for bool, searching a referenced bool value. The
-// value form has no lambda to prove, the parameter types carry the whole
-// fact.
-bool CIRGenModule::hasBoolFindParams(const FunctionDecl *funcDecl) {
-  if (funcDecl->getNumParams() != 3)
-    return false;
+// The leading parameter shape shared by the bool find forms, parameters
+// zero and one are the same standard bit iterator record carrying the
+// verified identity for bool and parameter two is a non volatile
+// reference to bool. The value forms have no lambda to prove, these
+// parameter types carry the whole fact.
+static bool hasBoolIteratorPairAndValue(CIRGenModule &cgm,
+                                        const FunctionDecl *funcDecl) {
+  clang::ASTContext &astContext = funcDecl->getASTContext();
   clang::QualType iteratorTy = funcDecl->getParamDecl(0)->getType();
   clang::QualType lastTy = funcDecl->getParamDecl(1)->getType();
   if (iteratorTy.isVolatileQualified() || lastTy.isVolatileQualified() ||
@@ -4267,11 +4268,11 @@ bool CIRGenModule::hasBoolFindParams(const FunctionDecl *funcDecl) {
   lastTy = lastTy.getCanonicalType().getUnqualifiedType();
   if (iteratorTy != lastTy)
     return false;
-  auto structTy = mlir::dyn_cast<cir::StructType>(convertType(iteratorTy));
+  auto structTy = mlir::dyn_cast<cir::StructType>(cgm.convertType(iteratorTy));
   cir::StdTypeInfoAttr info =
       structTy ? structTy.getStdTypeInfo() : cir::StdTypeInfoAttr();
   if (!info || info.getKind() != cir::StdTypeKind::StdBitIterator ||
-      info.getElement() != convertType(astContext.BoolTy))
+      info.getElement() != cgm.convertType(astContext.BoolTy))
     return false;
   clang::QualType valueTy = funcDecl->getParamDecl(2)->getType();
   if (!valueTy->isReferenceType())
@@ -4280,6 +4281,17 @@ bool CIRGenModule::hasBoolFindParams(const FunctionDecl *funcDecl) {
   if (valueTy.isVolatileQualified())
     return false;
   return valueTy.getCanonicalType().getUnqualifiedType() == astContext.BoolTy;
+}
+
+bool CIRGenModule::hasBoolFindParams(const FunctionDecl *funcDecl) {
+  return funcDecl->getNumParams() == 3 &&
+         hasBoolIteratorPairAndValue(*this, funcDecl);
+}
+
+bool CIRGenModule::hasBoolRangesFindParams(const FunctionDecl *funcDecl) {
+  return funcDecl->getNumParams() == 4 &&
+         hasBoolIteratorPairAndValue(*this, funcDecl) &&
+         isStdIdentityProjection(funcDecl->getParamDecl(3));
 }
 
 static std::optional<BoolEqPredicateShape>
