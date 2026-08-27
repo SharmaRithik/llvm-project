@@ -1,0 +1,84 @@
+// RUN: cir-opt --cir-lib-opt %s | FileCheck %s
+
+!u32i = !cir.int<u, 32>
+!u64i = !cir.int<u, 64>
+!u8i = !cir.int<u, 8>
+!biter = !cir.struct<class "bit_iterator" {data !cir.ptr<!u64i>, data !u32i}, std_type_info = #cir.std_type_info<"std::bit_iterator", !cir.bool, roles {bit_offset = array<i32: 1>, word_pointer = array<i32: 0>}>>
+!bpair = !cir.struct<class "BitPair" {data !cir.struct<class "bit_iterator" {data !cir.ptr<!u64i>, data !u32i}, std_type_info = #cir.std_type_info<"std::bit_iterator", !cir.bool, roles {bit_offset = array<i32: 1>, word_pointer = array<i32: 0>}>>, data !cir.struct<class "bit_iterator" {data !cir.ptr<!u64i>, data !u32i}, std_type_info = #cir.std_type_info<"std::bit_iterator", !cir.bool, roles {bit_offset = array<i32: 1>, word_pointer = array<i32: 0>}>>}>
+!bytepair = !cir.struct<class "BytePair" {data !cir.ptr<!u8i>, data !cir.ptr<!u8i>}>
+!pred_closure = !cir.struct<class "PredClosure" {data !u8i}>
+
+module attributes {cir.triple = "x86_64-unknown-linux-gnu",
+                   cir.int_type_width = 32 : i32,
+                   cir.size_type_width = 64 : i32} {
+  cir.func private @_ZSt8mismatchB(!biter, !biter, !biter) -> !bpair func_info<#cir.func_identity<"std::mismatch">>
+  cir.func private @_ZSt8mismatchB4(!biter, !biter, !biter, !biter) -> !bpair func_info<#cir.func_identity<"std::mismatch">>
+  cir.func private @_ZSt8mismatchBP(!biter, !biter, !biter, !pred_closure) -> !bpair func_info<#cir.func_identity<"std::mismatch">>
+
+  cir.func @transforms_three_arg(%first1: !biter, %last1: !biter, %first2: !biter) -> !bpair {
+    %0 = cir.std.mismatch(%first1 : !biter, %last1 : !biter, %first2 : !biter, @_ZSt8mismatchB) -> !bpair
+    cir.return %0 : !bpair
+  }
+
+  cir.func @transforms_bounded(%first1: !biter, %last1: !biter, %first2: !biter, %last2: !biter) -> !bpair {
+    %0 = cir.std.mismatch_bounded(%first1 : !biter, %last1 : !biter, %first2 : !biter, %last2 : !biter, @_ZSt8mismatchB4) -> !bpair
+    cir.return %0 : !bpair
+  }
+
+  cir.func @keeps_predicate_form(%first1: !biter, %last1: !biter, %first2: !biter, %pred: !pred_closure) -> !bpair {
+    %0 = cir.std.mismatch_pred(%first1 : !biter, %last1 : !biter, %first2 : !biter, %pred : !pred_closure, @_ZSt8mismatchBP) -> !bpair
+    cir.return %0 : !bpair
+  }
+
+  cir.func private @_ZSt8mismatchC(!cir.ptr<!u8i>, !cir.ptr<!u8i>, !cir.ptr<!u8i>) -> !bytepair func_info<#cir.func_identity<"std::mismatch">>
+
+  cir.func @keeps_non_bit_iterators(%first1: !cir.ptr<!u8i>, %last1: !cir.ptr<!u8i>, %first2: !cir.ptr<!u8i>) -> !bytepair {
+    %0 = cir.std.mismatch(%first1 : !cir.ptr<!u8i>, %last1 : !cir.ptr<!u8i>, %first2 : !cir.ptr<!u8i>, @_ZSt8mismatchC) -> !bytepair
+    cir.return %0 : !bytepair
+  }
+
+  cir.func @keeps_no_builtin_marked_call(%first1: !biter, %last1: !biter, %first2: !biter) -> !bpair {
+    %0 = cir.std.mismatch(%first1 : !biter, %last1 : !biter, %first2 : !biter, @_ZSt8mismatchB) -> !bpair {nobuiltin}
+    cir.return %0 : !bpair
+  }
+}
+
+// The scan versions on the two start offsets comparing equal, the fast
+// arm xors aligned word pairs behind the group guard and the ctz names
+// the first differing bit, the other arm calls the original function.
+// CHECK-LABEL: cir.func @transforms_three_arg
+// CHECK: %[[PHASE:.*]] = cir.cmp eq %{{.*}}, %{{.*}} : !u32i
+// CHECK: cir.ternary(%[[PHASE]], true {
+// CHECK: cir.alloca "mismatch_bit_current1"
+// CHECK: cir.alloca "mismatch_bit_current2"
+// CHECK: cir.while {
+// CHECK: cir.ptr_diff
+// CHECK: cir.cmp ge
+// CHECK: } do {
+// CHECK: cir.while {
+// CHECK: cir.ctz
+// CHECK: }, false {
+// CHECK: cir.call @_ZSt8mismatchB(
+// CHECK-NOT: cir.std.mismatch
+
+// The bounded form selects the shorter range's end before the scan.
+// CHECK-LABEL: cir.func @transforms_bounded
+// CHECK: cir.ptr_diff
+// CHECK: cir.select
+// CHECK: cir.ctz
+// CHECK: cir.call @_ZSt8mismatchB4(
+// CHECK-NOT: cir.std.mismatch_bounded
+
+// Predicate semantics stay with the library.
+// CHECK-LABEL: cir.func @keeps_predicate_form
+// CHECK: cir.std.mismatch_pred
+// CHECK-NOT: cir.ctz
+
+// A byte range takes the memcmp loop path rather than the bit scan.
+// CHECK-LABEL: cir.func @keeps_non_bit_iterators
+// CHECK-NOT: cir.ctz
+
+// The recorded no builtin state blocks the rewrite.
+// CHECK-LABEL: cir.func @keeps_no_builtin_marked_call
+// CHECK: cir.std.mismatch
+// CHECK-NOT: cir.ctz
