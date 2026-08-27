@@ -36,6 +36,7 @@ struct RecordSubobject {
 struct UnderlyingObject {
   mlir::Value value;
   llvm::SmallVector<RecordSubobject, 2> path;
+  mlir::Operation *identifiedObject = nullptr;
 };
 
 } // namespace
@@ -120,6 +121,94 @@ cir::resolveCIRPointerArgument(mlir::Value value) {
   return argument;
 }
 
+static bool buildGlobalViewRecordPath(
+    cir::GlobalOp target, mlir::ArrayAttr indices, mlir::Type viewType,
+    llvm::SmallVectorImpl<RecordSubobject> *path = nullptr) {
+  mlir::Type currentType = target.getSymType();
+  if (indices) {
+    for (mlir::Attribute indexAttribute : indices) {
+      auto index = mlir::dyn_cast<mlir::IntegerAttr>(indexAttribute);
+      auto record = mlir::dyn_cast<cir::StructType>(currentType);
+      if (!index || index.getValue().isNegative() || !record)
+        return false;
+
+      uint64_t position = index.getValue().getZExtValue();
+      if (position >= record.getNumElements() ||
+          record.getMemberKinds()[position] != cir::RecordMemberKind::Data)
+        return false;
+      if (path)
+        path->push_back(RecordSubobject{record, position});
+      currentType = record.getElementType(position);
+    }
+  }
+
+  auto pointerType = mlir::dyn_cast<cir::PointerType>(viewType);
+  if (!pointerType)
+    return false;
+  mlir::Type pointeeType = pointerType.getPointee();
+
+  while (currentType != pointeeType) {
+    if (auto array = mlir::dyn_cast<cir::ArrayType>(currentType)) {
+      if (!array.getSize())
+        return false;
+      currentType = array.getElementType();
+      continue;
+    }
+
+    auto record = mlir::dyn_cast<cir::StructType>(currentType);
+    if (!record || !record.getNumElements() ||
+        record.getMemberKinds().front() != cir::RecordMemberKind::Data)
+      return false;
+    if (path)
+      path->push_back(RecordSubobject{record, 0});
+    currentType = record.getElementType(0);
+  }
+  return true;
+}
+
+mlir::FailureOr<cir::CIRGlobalPointerAlias>
+cir::resolveCIRConstantGlobalPointer(mlir::Value value) {
+  auto load = value.getDefiningOp<cir::LoadOp>();
+  if (!load || load.getIsVolatile() || load.getMemOrder())
+    return mlir::failure();
+
+  auto address = load.getAddr().getDefiningOp<cir::GetGlobalOp>();
+  if (!address || address.getTls())
+    return mlir::failure();
+
+  auto source = mlir::SymbolTable::lookupNearestSymbolFrom<cir::GlobalOp>(
+      address.getOperation(), address.getNameAttr());
+  if (!source || !source.getConstant() || !source.getDsoLocal() ||
+      source.getAliasee() || cir::isInterposableLinkage(source.getLinkage()) ||
+      source.getSymType() != load.getType())
+    return mlir::failure();
+
+  std::optional<mlir::Attribute> initializer = source.getInitialValue();
+  if (!initializer)
+    return mlir::failure();
+  auto view = mlir::dyn_cast<cir::GlobalViewAttr>(*initializer);
+  if (!view || view.getType() != load.getType())
+    return mlir::failure();
+
+  auto target = mlir::SymbolTable::lookupNearestSymbolFrom<cir::GlobalOp>(
+      source.getOperation(), view.getSymbol());
+  if (!target || !target.getDsoLocal() || target.getAliasee() ||
+      cir::isInterposableLinkage(target.getLinkage()) ||
+      !buildGlobalViewRecordPath(target, view.getIndices(), view.getType()))
+    return mlir::failure();
+
+  return cir::CIRGlobalPointerAlias{target.getOperation(), view.getIndices()};
+}
+
+static void appendGlobalViewPath(cir::GlobalOp target, mlir::ArrayAttr indices,
+                                 mlir::Type viewType,
+                                 UnderlyingObject &object) {
+  llvm::SmallVector<RecordSubobject, 2> path;
+  if (!buildGlobalViewRecordPath(target, indices, viewType, &path))
+    llvm_unreachable("invalid global view path");
+  llvm::append_range(object.path, llvm::reverse(path));
+}
+
 static mlir::Operation *getIdentifiedObject(mlir::Value value,
                                             bool &mayAliasOtherGlobal) {
   mayAliasOtherGlobal = false;
@@ -144,7 +233,7 @@ static mlir::Operation *getIdentifiedObject(mlir::Value value,
 static UnderlyingObject getUnderlyingObject(mlir::Value val) {
   LDBG() << "Getting underlying object for: " << val;
 
-  UnderlyingObject object{val, {}};
+  UnderlyingObject object{val, {}, nullptr};
 
   for (unsigned depth = 0; depth < MaxLookupDepth; ++depth) {
     mlir::Operation *defOp = val.getDefiningOp();
@@ -170,13 +259,23 @@ static UnderlyingObject getUnderlyingObject(mlir::Value val) {
     if (auto load = mlir::dyn_cast<cir::LoadOp>(defOp)) {
       mlir::FailureOr<mlir::BlockArgument> argument =
           cir::resolveCIRPointerArgument(load.getResult());
-      if (mlir::failed(argument)) {
+      if (mlir::succeeded(argument)) {
+        LDBG() << "Walking through canonical argument slot";
+        val = *argument;
+        continue;
+      }
+
+      mlir::FailureOr<cir::CIRGlobalPointerAlias> alias =
+          cir::resolveCIRConstantGlobalPointer(load.getResult());
+      if (mlir::failed(alias)) {
         LDBG() << "Noncanonical pointer slot load";
         break;
       }
-      LDBG() << "Walking through canonical argument slot";
-      val = *argument;
-      continue;
+      auto target = mlir::cast<cir::GlobalOp>(alias->target);
+      appendGlobalViewPath(target, alias->indices, load.getType(), object);
+      object.identifiedObject = alias->target;
+      LDBG() << "Resolved constant global pointer alias";
+      break;
     }
 
     // Pointer stride: only strip through when we can prove the access stays
@@ -326,24 +425,28 @@ CIRBasicAliasAnalysis::classifyObjects(mlir::Value lhs, mlir::Value rhs) {
     return classifySameObject();
   }
 
-  auto lhsGlobal = lhsObj.getDefiningOp<cir::GetGlobalOp>();
-  auto rhsGlobal = rhsObj.getDefiningOp<cir::GetGlobalOp>();
-  if (lhsGlobal && rhsGlobal &&
-      lhsGlobal.getNameAttr() == rhsGlobal.getNameAttr()) {
-    LDBG() << "Same global object";
+  bool lhsMayAliasOtherGlobal;
+  bool rhsMayAliasOtherGlobal;
+  mlir::Operation *lhsObject = lhsUnderlying.identifiedObject;
+  mlir::Operation *rhsObject = rhsUnderlying.identifiedObject;
+  if (lhsObject)
+    lhsMayAliasOtherGlobal = false;
+  else
+    lhsObject = getIdentifiedObject(lhsObj, lhsMayAliasOtherGlobal);
+  if (rhsObject)
+    rhsMayAliasOtherGlobal = false;
+  else
+    rhsObject = getIdentifiedObject(rhsObj, rhsMayAliasOtherGlobal);
+  if (lhsObject && lhsObject == rhsObject) {
+    LDBG() << "Same identified object";
     return classifySameObject();
   }
 
-  bool lhsMayAliasOtherGlobal;
-  bool rhsMayAliasOtherGlobal;
-  mlir::Operation *lhsObject =
-      getIdentifiedObject(lhsObj, lhsMayAliasOtherGlobal);
-  mlir::Operation *rhsObject =
-      getIdentifiedObject(rhsObj, rhsMayAliasOtherGlobal);
   bool lhsNoAliasArgument = isNoAliasFunctionArgument(lhsObj);
   bool rhsNoAliasArgument = isNoAliasFunctionArgument(rhsObj);
   if ((lhsObject || lhsNoAliasArgument) && (rhsObject || rhsNoAliasArgument)) {
-    if (lhsGlobal && rhsGlobal &&
+    if (mlir::isa_and_nonnull<cir::GlobalOp>(lhsObject) &&
+        mlir::isa_and_nonnull<cir::GlobalOp>(rhsObject) &&
         (lhsMayAliasOtherGlobal || rhsMayAliasOtherGlobal)) {
       LDBG() << "Global object may resolve to another global";
       return ObjectRelation::Unknown;

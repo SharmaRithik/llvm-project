@@ -536,3 +536,77 @@ cir.func @bounded_argument_provenance(
       {test.ptr = "global"}
   cir.return
 }
+
+
+// -----
+
+// CHECK-LABEL: Testing : "constant_global_pointer_aliases"
+// CHECK-DAG: first_a#0 <-> first_b#0: MustAlias
+// CHECK-DAG: first_a#0 <-> second#0: NoAlias
+// CHECK-DAG: first_a#0 <-> direct_first#0: MustAlias
+// CHECK-DAG: second#0 <-> direct_first#0: NoAlias
+// CHECK-DAG: first_a#0 <-> mutable#0: MayAlias
+
+!s32i = !cir.int<s, 32>
+!rec_AliasRecord = !cir.struct<"AliasRecord" {data !s32i, data !s32i}>
+cir.global external dso_local @alias_record = #cir.zero : !rec_AliasRecord
+cir.global constant external dso_local @alias_first =
+    #cir.global_view<@alias_record> : !cir.ptr<!s32i>
+cir.global constant external dso_local @alias_second =
+    #cir.global_view<@alias_record, [1 : i32]> : !cir.ptr<!s32i>
+cir.global external dso_local @alias_mutable =
+    #cir.global_view<@alias_record, [0 : i32]> : !cir.ptr<!s32i>
+cir.func @constant_global_pointer_aliases() {
+  %first_slot_a = cir.get_global @alias_first
+      : !cir.ptr<!cir.ptr<!s32i>>
+  %first_a = cir.load %first_slot_a
+      : !cir.ptr<!cir.ptr<!s32i>>, !cir.ptr<!s32i>
+      {test.ptr = "first_a"}
+  %first_slot_b = cir.get_global @alias_first
+      : !cir.ptr<!cir.ptr<!s32i>>
+  %first_b = cir.load %first_slot_b
+      : !cir.ptr<!cir.ptr<!s32i>>, !cir.ptr<!s32i>
+      {test.ptr = "first_b"}
+  %second_slot = cir.get_global @alias_second
+      : !cir.ptr<!cir.ptr<!s32i>>
+  %second = cir.load %second_slot
+      : !cir.ptr<!cir.ptr<!s32i>>, !cir.ptr<!s32i>
+      {test.ptr = "second"}
+  %direct_root = cir.get_global @alias_record : !cir.ptr<!rec_AliasRecord>
+  %direct_first = cir.get_member %direct_root[0]
+      {name = "first", test.ptr = "direct_first"}
+      : !cir.ptr<!rec_AliasRecord> -> !cir.ptr<!s32i>
+  %mutable_slot = cir.get_global @alias_mutable
+      : !cir.ptr<!cir.ptr<!s32i>>
+  %mutable = cir.load %mutable_slot
+      : !cir.ptr<!cir.ptr<!s32i>>, !cir.ptr<!s32i>
+      {test.ptr = "mutable"}
+  cir.return
+}
+
+// -----
+
+// CHECK-LABEL: Testing : "union_global_pointer_aliases"
+// CHECK-DAG: first#0 <-> second#0: MayAlias
+
+!s32i = !cir.int<s, 32>
+!u32i = !cir.int<u, 32>
+!rec_AliasUnion = !cir.union<"AliasUnion" {data !s32i, data !u32i}>
+cir.global external dso_local @alias_union = #cir.zero : !rec_AliasUnion
+cir.global constant external dso_local @alias_union_first =
+    #cir.global_view<@alias_union, [0 : i32]> : !cir.ptr<!s32i>
+cir.global constant external dso_local @alias_union_second =
+    #cir.global_view<@alias_union, [1 : i32]> : !cir.ptr<!u32i>
+cir.func @union_global_pointer_aliases() {
+  %first_slot = cir.get_global @alias_union_first
+      : !cir.ptr<!cir.ptr<!s32i>>
+  %first = cir.load %first_slot
+      : !cir.ptr<!cir.ptr<!s32i>>, !cir.ptr<!s32i>
+      {test.ptr = "first"}
+  %second_slot = cir.get_global @alias_union_second
+      : !cir.ptr<!cir.ptr<!u32i>>
+  %second = cir.load %second_slot
+      : !cir.ptr<!cir.ptr<!u32i>>, !cir.ptr<!u32i>
+      {test.ptr = "second"}
+  cir.return
+}

@@ -16,10 +16,16 @@
 #define CLANG_CIR_DIALECT_ANALYSIS_CIRALIASANALYSIS_H
 
 #include "mlir/Analysis/AliasAnalysis.h"
+#include "mlir/IR/BuiltinAttributes.h"
 #include "mlir/IR/Value.h"
 #include "mlir/Support/LogicalResult.h"
 
 namespace cir {
+
+struct CIRGlobalPointerAlias {
+  mlir::Operation *target;
+  mlir::ArrayAttr indices;
+};
 
 /// Register all CIR alias analysis implementations with `aa`.
 ///
@@ -34,6 +40,9 @@ void registerCIRAliasAnalyses(mlir::AliasAnalysis &aa);
 /// Function argument resolution through canonical CIR stack slots
 mlir::FailureOr<mlir::BlockArgument>
 resolveCIRPointerArgument(mlir::Value value);
+
+mlir::FailureOr<CIRGlobalPointerAlias>
+resolveCIRConstantGlobalPointer(mlir::Value value);
 
 } // namespace cir
 
