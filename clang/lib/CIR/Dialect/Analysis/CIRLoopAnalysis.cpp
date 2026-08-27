@@ -369,20 +369,35 @@ static bool hasIdenticalSubscripts(const LoopMemoryAccess &lhs,
   return true;
 }
 
+static bool hasCommonInductionSubscript(const LoopMemoryAccess &lhs,
+                                        const LoopMemoryAccess &rhs,
+                                        cir::AllocaOp induction) {
+  if (lhs.subscripts.size() != rhs.subscripts.size())
+    return false;
+  for (auto [lhsSubscript, rhsSubscript] :
+       llvm::zip(lhs.subscripts, rhs.subscripts))
+    if (lhsSubscript.getKind() == LoopDomainExpr::Kind::Induction &&
+        rhsSubscript.getKind() == LoopDomainExpr::Kind::Induction &&
+        lhsSubscript.getInduction() == induction &&
+        rhsSubscript.getInduction() == induction)
+      return true;
+
+  return false;
+}
+
 static bool isInjectiveOverInductions(const LoopMemoryAccess &access,
                                       ArrayRef<cir::AllocaOp> inductions) {
-  if (access.subscripts.size() != inductions.size())
-    return false;
-
   SmallVector<cir::AllocaOp, 3> found;
   for (const LoopDomainExpr &subscript : access.subscripts) {
-    if (subscript.getKind() != LoopDomainExpr::Kind::Induction)
-      return false;
-    cir::AllocaOp induction = subscript.getInduction();
-    if (!llvm::is_contained(inductions, induction) ||
-        llvm::is_contained(found, induction))
-      return false;
-    found.push_back(induction);
+    for (cir::AllocaOp induction : inductions) {
+      if (!subscript.dependsOn(induction))
+        continue;
+      if (subscript.getKind() != LoopDomainExpr::Kind::Induction ||
+          subscript.getInduction() != induction ||
+          llvm::is_contained(found, induction))
+        return false;
+      found.push_back(induction);
+    }
   }
   return found.size() == inductions.size();
 }
@@ -440,7 +455,12 @@ static FailureOr<LoopElementRecurrence> analyzeOrderedElementRecurrence(
 
   FailureOr<LoopMemoryAccess> target =
       analyzeMemoryAccess(store, store.getAddr(), true, inductions);
-  if (failed(target) || !isInjectiveOverInductions(*target, laneInductions))
+  if (failed(target) ||
+      llvm::any_of(target->subscripts,
+                   [&](const LoopDomainExpr &subscript) {
+                     return subscript.dependsOn(recurrenceInduction);
+                   }) ||
+      !isInjectiveOverInductions(*target, laneInductions))
     return failure();
 
   for (cir::LoadOp load : match.loads) {
@@ -478,10 +498,8 @@ analyzeLoopElementRecurrences(const ThreeLevelLoopBand &band,
 
   SmallVector<cir::AllocaOp, 3> inductions = {
       band.anchor.induction, band.outer.induction, inner.induction};
-  SmallVector<cir::AllocaOp, 2> innerRecurrenceLanes = {band.anchor.induction,
-                                                        band.outer.induction};
-  SmallVector<cir::AllocaOp, 2> outerRecurrenceLanes = {band.anchor.induction,
-                                                        inner.induction};
+  SmallVector<cir::AllocaOp, 1> innerRecurrenceLanes = {band.outer.induction};
+  SmallVector<cir::AllocaOp, 1> outerRecurrenceLanes = {inner.induction};
 
   innerLoop.getBody().walk([&](cir::StoreOp store) {
     FailureOr<LoopElementRecurrence> recurrence =
@@ -574,8 +592,7 @@ static bool isBandWriteMapSafe(const LoopMemoryAccess &access,
     return isInjectiveOverInductions(access, inductions);
   }
 
-  SmallVector<cir::AllocaOp, 2> inductions = {band.anchor.induction,
-                                              band.outer.induction};
+  SmallVector<cir::AllocaOp, 1> inductions = {band.outer.induction};
   return isInjectiveOverInductions(access, inductions);
 }
 
@@ -619,10 +636,7 @@ static bool areBandAccessesIndependent(const LoopMemoryAccess &lhs,
   if (hasIdenticalSubscripts(lhs, rhs))
     return true;
 
-  SmallVector<cir::AllocaOp, 2> outerInductions = {band.anchor.induction,
-                                                   band.outer.induction};
-  if (isInjectiveOverInductions(lhs, outerInductions) &&
-      isInjectiveOverInductions(rhs, outerInductions))
+  if (hasCommonInductionSubscript(lhs, rhs, band.outer.induction))
     return true;
 
   if (lhs.subscripts.size() != rhs.subscripts.size())

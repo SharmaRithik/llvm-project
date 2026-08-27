@@ -362,6 +362,26 @@ void anchored_distinct_inner(void) {
         B[i][j] += B[k][j];
 }
 
+// CHECK-DAG: recognized anchored loop band in @band_unindexed_anchor_statement {{.*}} band memory safe candidate 0 locality improved 2 regressed 0 profitable
+void band_unindexed_anchor_statement(void) {
+  for (int epoch = 0; epoch < N; ++epoch)
+    for (int i = 0; i < N; ++i) {
+      X[i] = Y[i];
+      for (int j = 0; j < N; ++j)
+        B[j][i] = A[j][i];
+    }
+}
+
+// CHECK-DAG: recognized anchored loop band in @band_noninjective_statement {{.*}} band memory potential dependence
+void band_noninjective_statement(void) {
+  for (int epoch = 0; epoch < N; ++epoch)
+    for (int i = 0; i < N; ++i) {
+      X[0] = Y[i];
+      for (int j = 0; j < N; ++j)
+        B[j][i] = A[j][i];
+    }
+}
+
 // CHECK-DAG: recognized anchored loop band in @band_distribution_dependence {{.*}} band memory potential dependence
 void band_distribution_dependence(void) {
   for (int i = 0; i < N; ++i)
