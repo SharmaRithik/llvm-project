@@ -1905,14 +1905,16 @@ template <typename OpT>
 static bool
 rewriteFindBitToWordScan(OpT findOp,
                          mlir::Pass::Statistic &numFindBitToWordScan) {
-  static_assert(std::is_same_v<OpT, StdFindOp> ||
-                std::is_same_v<OpT, StdFindIfOp> ||
-                std::is_same_v<OpT, StdFindIfNotOp> ||
-                std::is_same_v<OpT, StdRangesFindIfOp> ||
-                std::is_same_v<OpT, StdRangesFindIfNotOp>);
-  // The value form has no predicate, its sought bool arrives behind the
-  // pattern reference and the cir.bool_params marker carries the proof.
-  constexpr bool valueForm = std::is_same_v<OpT, StdFindOp>;
+  static_assert(
+      std::is_same_v<OpT, StdFindOp> || std::is_same_v<OpT, StdRangesFindOp> ||
+      std::is_same_v<OpT, StdFindIfOp> || std::is_same_v<OpT, StdFindIfNotOp> ||
+      std::is_same_v<OpT, StdRangesFindIfOp> ||
+      std::is_same_v<OpT, StdRangesFindIfNotOp>);
+  // The value forms have no predicate, their sought bool arrives behind
+  // the pattern reference and the cir.bool_params marker carries the
+  // proof, for ranges::find including that the projection is identity.
+  constexpr bool valueForm =
+      std::is_same_v<OpT, StdFindOp> || std::is_same_v<OpT, StdRangesFindOp>;
 
   // The loop state needs a function allocation scope
   cir::FuncOp enclosing = findOp->template getParentOfType<cir::FuncOp>();
@@ -2373,9 +2375,12 @@ void LibOptPass::runOnOperation() {
   getOperation()->walk([&](mlir::Operation *op) {
     llvm::TypeSwitch<mlir::Operation *>(op)
         .Case<StdFindOp, StdRangesFindOp, StdRangesFindRangeOp>([&](auto find) {
-          if constexpr (std::is_same_v<decltype(find), StdFindOp>) {
+          if constexpr (std::is_same_v<decltype(find), StdFindOp> ||
+                        std::is_same_v<decltype(find), StdRangesFindOp>) {
             if (rewriteFindBitToWordScan(find, numFindBitToWordScan))
               return;
+          }
+          if constexpr (std::is_same_v<decltype(find), StdFindOp>) {
             if (rewriteFindDequeToBlockWalk(find, symbolTables,
                                             numFindDequeToMemchr,
                                             numFindDequeToWmemchr))

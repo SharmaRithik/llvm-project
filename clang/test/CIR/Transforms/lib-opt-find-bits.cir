@@ -82,6 +82,18 @@ module attributes {cir.triple = "x86_64-unknown-linux-gnu",
     cir.return %0 : !biter
   }
 
+  cir.func private @_ZNKSt3__16ranges9__find_fncl(!cir.ptr<!cpo>, !biter, !biter, !cir.ptr<!cir.bool>, !identity) -> !biter func_info<#cir.func_identity<"std::ranges::find">>
+
+  cir.func @transforms_ranges_value_form(%this: !cir.ptr<!cpo>, %first: !biter, %last: !biter, %value: !cir.ptr<!cir.bool>, %proj: !identity) -> !biter {
+    %0 = cir.std.ranges.find(%this : !cir.ptr<!cpo>, %first : !biter, %last : !biter, %value : !cir.ptr<!cir.bool>, %proj : !identity, @_ZNKSt3__16ranges9__find_fncl) -> !biter {cir.bool_params}
+    cir.return %0 : !biter
+  }
+
+  cir.func @keeps_ranges_value_without_bool_params(%this: !cir.ptr<!cpo>, %first: !biter, %last: !biter, %value: !cir.ptr<!cir.bool>, %proj: !identity) -> !biter {
+    %0 = cir.std.ranges.find(%this : !cir.ptr<!cpo>, %first : !biter, %last : !biter, %value : !cir.ptr<!cir.bool>, %proj : !identity, @_ZNKSt3__16ranges9__find_fncl) -> !biter
+    cir.return %0 : !biter
+  }
+
 }
 
 // A marked constant sought find_if becomes the masked word loop.
@@ -161,4 +173,15 @@ module attributes {cir.triple = "x86_64-unknown-linux-gnu",
 
 // CHECK-LABEL: cir.func @keeps_non_bool_pattern
 // CHECK: cir.std.find
+// CHECK-NOT: cir.ctz
+
+// The ranges value form takes the same scan when the call carries the
+// marker, and the sought bool loads from the value reference.
+// CHECK-LABEL: cir.func @transforms_ranges_value_form
+// CHECK: cir.load %arg3 : !cir.ptr<!cir.bool>, !cir.bool
+// CHECK: cir.ctz
+// CHECK-NOT: cir.std.ranges.find
+
+// CHECK-LABEL: cir.func @keeps_ranges_value_without_bool_params
+// CHECK: cir.std.ranges.find
 // CHECK-NOT: cir.ctz
