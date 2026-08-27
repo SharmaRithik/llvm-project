@@ -30,6 +30,8 @@ struct RecordArrays {
   double second[N][N];
 };
 static struct RecordArrays RecordData;
+static double (*const RecordAliasSource)[N] = RecordData.first;
+static double (*const RecordAliasTarget)[N] = RecordData.second;
 
 // CHECK-DAG: recognized loop nest in @tri_upper outer init constant condition induction lt constant inner init constant condition induction lt induction memory safe
 void tri_upper(void) {
@@ -43,6 +45,13 @@ void record_field_access(void) {
   for (int i = 0; i < N; ++i)
     for (int j = 0; j < N; ++j)
       RecordData.second[j][i] = RecordData.first[j][i];
+}
+
+// CHECK-DAG: recognized loop nest in @global_pointer_alias_access {{.*}} memory safe profitability profitable
+void global_pointer_alias_access(void) {
+  for (int i = 0; i < N; ++i)
+    for (int j = 0; j < N; ++j)
+      RecordAliasTarget[j][i] = RecordAliasSource[j][i];
 }
 
 // CHECK-DAG: recognized loop nest in @tri_fill outer init constant condition induction lt constant inner init constant condition induction lt induction memory safe
@@ -513,6 +522,17 @@ void rejected_volatile(void) {
 // INTERCHANGE-NEXT: [[ICOND:%[0-9]+]] = cir.load{{.*}} [[I]]
 // INTERCHANGE-NEXT: [[IBOUND:%[0-9]+]] = cir.const #cir.int<128>
 // INTERCHANGE-NEXT: [[ICMP:%[0-9]+]] = cir.cmp lt [[ICOND]], [[IBOUND]]
+
+// INTERCHANGE-LABEL: cir.func dso_local @global_pointer_alias_access()
+// INTERCHANGE: [[GLOBALALIASI:%[0-9]+]] = cir.alloca "i"
+// INTERCHANGE-NEXT: [[GLOBALALIASIZERO:%[0-9]+]] = cir.const #cir.int<0>
+// INTERCHANGE-NEXT: [[GLOBALALIASJ:%[0-9]+]] = cir.alloca "j"
+// INTERCHANGE-NEXT: [[GLOBALALIASJZERO:%[0-9]+]] = cir.const #cir.int<0>
+// INTERCHANGE-NEXT: cir.store{{.*}} [[GLOBALALIASJZERO]], [[GLOBALALIASJ]]
+// INTERCHANGE-NEXT: cir.for : cond {
+// INTERCHANGE: } body {
+// INTERCHANGE: cir.store{{.*}} [[GLOBALALIASIZERO]], [[GLOBALALIASI]]
+// INTERCHANGE-NEXT: cir.for : cond {
 
 // INTERCHANGE-LABEL: cir.func dso_local @tri_fill()
 // INTERCHANGE: [[FILLI:%[0-9]+]] = cir.alloca "i"

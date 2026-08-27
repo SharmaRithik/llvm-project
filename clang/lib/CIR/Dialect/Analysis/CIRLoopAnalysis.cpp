@@ -317,7 +317,8 @@ static bool isSupportedMemoryBase(Value value) {
   if (auto getGlobal = root.getDefiningOp<cir::GetGlobalOp>())
     return !getGlobal.getTls();
 
-  return succeeded(resolveCIRPointerArgument(root));
+  return succeeded(resolveCIRPointerArgument(root)) ||
+         succeeded(resolveCIRConstantGlobalPointer(root));
 }
 
 static FailureOr<LoopMemoryAccess>
@@ -761,6 +762,7 @@ LoopBandMemoryAnalysis analyzeLoopBandMemory(const ThreeLevelLoopBand &band,
                          return load.getAddr() == induction.getAddr();
                        }) ||
           succeeded(resolveCIRPointerArgument(load.getResult())) ||
+          succeeded(resolveCIRConstantGlobalPointer(load.getResult())) ||
           isInvariantLoad(load, anchorLoop))
         return WalkResult::advance();
 
@@ -923,7 +925,8 @@ LoopMemoryAnalysis analyzeLoopMemory(const TwoLevelLoopNest &nest,
       if (load.getAddr() == outerInductionAddress ||
           load.getAddr() == innerInductionAddress)
         return WalkResult::advance();
-      if (succeeded(resolveCIRPointerArgument(load.getResult())))
+      if (succeeded(resolveCIRPointerArgument(load.getResult())) ||
+          succeeded(resolveCIRConstantGlobalPointer(load.getResult())))
         return WalkResult::advance();
       if (isInvariantLoad(load, nest.outer.loop))
         return WalkResult::advance();
