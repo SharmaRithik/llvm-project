@@ -73,7 +73,7 @@ module {
 // CHECK-NEXT: %{{.*}} = store_view_tko weak %[[ACC3]], %[[C_VIEW]][%[[M]], %[[N]]]
 // CHECK-NEXT: return
 
-// BYTECODE: cuda_tile.module @kernels attributes {producer = "clang-cir"}
+// BYTECODE: cuda_tile.module @kernels
 // BYTECODE-LABEL: entry @matmul(
 // BYTECODE-COUNT-3: make_tensor_view
 // BYTECODE: load_view_tko weak

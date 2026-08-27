@@ -81,9 +81,8 @@ int main(int argc, char **argv) {
     if (!converted)
       return 1;
     if (emitBytecode) {
-      if (mlir::failed(mlir::cuda_tile::writeBytecode(
-              output->os(), *converted,
-              mlir::cuda_tile::BytecodeVersion::kCurrentVersion)))
+      if (mlir::failed(
+              mlir::cuda_tile::writeBytecode(output->os(), *converted)))
         return 1;
     } else {
       converted->print(output->os());
