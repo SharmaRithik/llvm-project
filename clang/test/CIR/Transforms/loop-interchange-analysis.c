@@ -318,6 +318,18 @@ void anchored_multiple_phases(void) {
     }
 }
 
+// CHECK-DAG: recognized anchored loop band in @anchored_predecessor_phases {{.*}} floating recurrences 2 band memory safe candidate 0 locality improved 3 regressed 0 profitable candidate 1 locality unknown
+// CHECK-DAG: distributed and interchanged 1 nested loop phase
+void anchored_predecessor_phases(void) {
+  for (int epoch = 0; epoch < N; ++epoch)
+    for (int i = 1; i < N; ++i) {
+      for (int j = 1; j < N; ++j)
+        B[j][i] = B[j - 1][i] + A[j][i];
+      for (int j = 1; j < N; ++j)
+        C[j][i] = C[j][i - 1] + A[j][i];
+    }
+}
+
 // CHECK-DAG: recognized anchored loop band in @anchored_fadd_recurrence {{.*}} floating recurrences 1 band memory safe
 void anchored_fadd_recurrence(void) {
   for (int i = 0; i < N; ++i)
@@ -787,6 +799,16 @@ void rejected_volatile(void) {
 // INTERCHANGE-NEXT: [[PHASE2J:%[0-9]+]] = cir.alloca "j"
 // INTERCHANGE: cir.store{{.*}}, [[PHASE2J]]
 // INTERCHANGE-NEXT: cir.for : cond {
+
+// INTERCHANGE-LABEL: cir.func dso_local @anchored_predecessor_phases()
+// INTERCHANGE: [[PREDECESSORJ:%[0-9]+]] = cir.alloca "j"
+// INTERCHANGE: cir.for : cond {
+// INTERCHANGE: } body {
+// INTERCHANGE: [[PREDECESSORINNERI:%[0-9]+]] = cir.alloca "i"
+// INTERCHANGE: cir.for : cond {
+// INTERCHANGE: [[PREDECESSOROUTERI:%[0-9]+]] = cir.alloca "i"
+// INTERCHANGE: cir.for : cond {
+// INTERCHANGE: [[PREDECESSORINNERJ:%[0-9]+]] = cir.alloca "j"
 
 // INTERCHANGE-LABEL: cir.func dso_local @outer_carried_recurrence()
 // INTERCHANGE: [[OUTERCARRIEDI:%[0-9]+]] = cir.alloca "i"

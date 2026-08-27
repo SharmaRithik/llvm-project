@@ -369,6 +369,47 @@ static bool hasIdenticalSubscripts(const LoopMemoryAccess &lhs,
   return true;
 }
 
+static bool isConstantOne(const LoopDomainExpr &expression) {
+  if (expression.getKind() != LoopDomainExpr::Kind::Constant)
+    return false;
+  auto constant = expression.getSource().getDefiningOp<cir::ConstantOp>();
+  auto value =
+      constant ? dyn_cast<cir::IntAttr>(constant.getValue()) : cir::IntAttr{};
+  auto type = value ? dyn_cast<cir::IntType>(value.getType()) : cir::IntType{};
+  return type && type.isSigned() && value.getValue().isOne();
+}
+
+static bool hasOrderedPredecessorSubscripts(const LoopMemoryAccess &source,
+                                            const LoopMemoryAccess &target,
+                                            cir::AllocaOp induction) {
+  if (source.subscripts.size() != target.subscripts.size())
+    return false;
+
+  bool foundPredecessor = false;
+  for (auto [sourceSubscript, targetSubscript] :
+       llvm::zip(source.subscripts, target.subscripts)) {
+    if (sourceSubscript.isStructurallyEqual(targetSubscript)) {
+      if (sourceSubscript.dependsOn(induction))
+        return false;
+      continue;
+    }
+    if (foundPredecessor ||
+        targetSubscript.getKind() != LoopDomainExpr::Kind::Induction ||
+        targetSubscript.getInduction() != induction ||
+        sourceSubscript.getKind() != LoopDomainExpr::Kind::Sub ||
+        sourceSubscript.getLHS()->getKind() !=
+            LoopDomainExpr::Kind::Induction ||
+        sourceSubscript.getLHS()->getInduction() != induction ||
+        !isConstantOne(*sourceSubscript.getRHS()))
+      return false;
+    auto subtraction = sourceSubscript.getSource().getDefiningOp<cir::SubOp>();
+    if (!subtraction || !subtraction.getNoSignedWrap())
+      return false;
+    foundPredecessor = true;
+  }
+  return foundPredecessor;
+}
+
 static bool hasCommonInductionSubscript(const LoopMemoryAccess &lhs,
                                         const LoopMemoryAccess &rhs,
                                         cir::AllocaOp induction) {
@@ -455,13 +496,12 @@ static FailureOr<LoopElementRecurrence> analyzeOrderedElementRecurrence(
 
   FailureOr<LoopMemoryAccess> target =
       analyzeMemoryAccess(store, store.getAddr(), true, inductions);
-  if (failed(target) ||
-      llvm::any_of(target->subscripts,
-                   [&](const LoopDomainExpr &subscript) {
-                     return subscript.dependsOn(recurrenceInduction);
-                   }) ||
-      !isInjectiveOverInductions(*target, laneInductions))
+  if (failed(target) || !isInjectiveOverInductions(*target, laneInductions))
     return failure();
+  bool invariantTarget =
+      llvm::none_of(target->subscripts, [&](const LoopDomainExpr &subscript) {
+        return subscript.dependsOn(recurrenceInduction);
+      });
 
   for (cir::LoadOp load : match.loads) {
     if (load.getIsVolatile() || load.getMemOrder() ||
@@ -471,8 +511,10 @@ static FailureOr<LoopElementRecurrence> analyzeOrderedElementRecurrence(
         analyzeMemoryAccess(load, load.getAddr(), false, inductions);
     if (failed(loaded) ||
         !aliasAnalysis.alias(loaded->base.pointer, target->base.pointer)
-             .isMust() ||
-        !hasIdenticalSubscripts(*loaded, *target))
+             .isMust())
+      continue;
+    if ((!invariantTarget || !hasIdenticalSubscripts(*loaded, *target)) &&
+        !hasOrderedPredecessorSubscripts(*loaded, *target, recurrenceInduction))
       continue;
 
     SmallVector<cir::AllocaOp, 2> lanes(laneInductions.begin(),
@@ -580,6 +622,20 @@ static bool isRecurrenceStore(Operation *operation,
                       });
 }
 
+static bool
+isRecurrenceAccessPair(const LoopMemoryAccess &lhs, const LoopMemoryAccess &rhs,
+                       ArrayRef<LoopElementRecurrence> recurrences) {
+  return llvm::any_of(
+      recurrences, [&](const LoopElementRecurrence &recurrence) {
+        cir::LoadOp recurrenceLoad = recurrence.load;
+        cir::StoreOp recurrenceStore = recurrence.store;
+        Operation *load = recurrenceLoad.getOperation();
+        Operation *store = recurrenceStore.getOperation();
+        return (lhs.operation == load && rhs.operation == store) ||
+               (lhs.operation == store && rhs.operation == load);
+      });
+}
+
 static bool isBandWriteMapSafe(const LoopMemoryAccess &access,
                                const ThreeLevelLoopBand &band,
                                ArrayRef<LoopElementRecurrence> recurrences) {
@@ -622,10 +678,10 @@ static bool isPositiveOffsetFromAnchor(const LoopDomain &inner,
          addition && addition.getNoSignedWrap() && increment.getNoSignedWrap();
 }
 
-static bool areBandAccessesIndependent(const LoopMemoryAccess &lhs,
-                                       const LoopMemoryAccess &rhs,
-                                       const ThreeLevelLoopBand &band,
-                                       AliasAnalysis &aliasAnalysis) {
+static bool areBandAccessesIndependent(
+    const LoopMemoryAccess &lhs, const LoopMemoryAccess &rhs,
+    const ThreeLevelLoopBand &band, ArrayRef<LoopElementRecurrence> recurrences,
+    AliasAnalysis &aliasAnalysis) {
   if (!lhs.isWrite && !rhs.isWrite)
     return true;
   AliasResult alias = aliasAnalysis.alias(lhs.base.pointer, rhs.base.pointer);
@@ -636,6 +692,8 @@ static bool areBandAccessesIndependent(const LoopMemoryAccess &lhs,
   if (hasIdenticalSubscripts(lhs, rhs))
     return true;
 
+  if (isRecurrenceAccessPair(lhs, rhs, recurrences))
+    return true;
   if (hasCommonInductionSubscript(lhs, rhs, band.outer.induction))
     return true;
 
@@ -777,7 +835,8 @@ LoopBandMemoryAnalysis analyzeLoopBandMemory(const ThreeLevelLoopBand &band,
 
   for (auto lhs = accesses.begin(), end = accesses.end(); lhs != end; ++lhs)
     for (auto rhs = std::next(lhs); rhs != end; ++rhs)
-      if (!areBandAccessesIndependent(*lhs, *rhs, band, aliasAnalysis))
+      if (!areBandAccessesIndependent(*lhs, *rhs, band, recurrences,
+                                      aliasAnalysis))
         return LoopBandMemoryAnalysis{LoopMemoryLegality::PotentialDependence,
                                       std::move(accesses),
                                       std::move(recurrences)};
