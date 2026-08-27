@@ -10,6 +10,7 @@ target_link_libraries(cir-tile-translate
   PRIVATE
   CIRRegisterAllDialects
   CIRTileSupport
+  CudaTileBytecodeWriter
   CudaTileDialect
   MLIRCIR
   MLIRIR

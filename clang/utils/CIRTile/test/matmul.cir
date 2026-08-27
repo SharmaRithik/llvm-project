@@ -1,6 +1,9 @@
 // RUN: cir-tile-translate %s -o %t
 // RUN: FileCheck %s --input-file=%t
 // RUN: cuda-tile-opt %t -o /dev/null
+// RUN: cir-tile-translate --emit-bytecode %s -o %t.bc
+// RUN: cuda-tile-translate -cudatilebc-to-mlir -no-implicit-module %t.bc -o %t.roundtrip
+// RUN: FileCheck %s --check-prefix=BYTECODE --input-file=%t.roundtrip
 
 !s32i = !cir.int<s, 32>
 
@@ -69,3 +72,21 @@ module {
 // CHECK-NEXT: %[[ACC3:[A-Za-z0-9_]+]] = mmaf %[[A3]], %[[B3]], %[[ACC2]]
 // CHECK-NEXT: %{{.*}} = store_view_tko weak %[[ACC3]], %[[C_VIEW]][%[[M]], %[[N]]]
 // CHECK-NEXT: return
+
+// BYTECODE: cuda_tile.module @kernels attributes {producer = "clang-cir"}
+// BYTECODE-LABEL: entry @matmul(
+// BYTECODE-COUNT-3: make_tensor_view
+// BYTECODE: load_view_tko weak
+// BYTECODE: load_view_tko weak
+// BYTECODE-NEXT: {{.*}} = mmaf
+// BYTECODE: load_view_tko weak
+// BYTECODE: load_view_tko weak
+// BYTECODE-NEXT: {{.*}} = mmaf
+// BYTECODE: load_view_tko weak
+// BYTECODE: load_view_tko weak
+// BYTECODE-NEXT: {{.*}} = mmaf
+// BYTECODE: load_view_tko weak
+// BYTECODE: load_view_tko weak
+// BYTECODE-NEXT: {{.*}} = mmaf
+// BYTECODE: store_view_tko weak
+// BYTECODE-NEXT: return

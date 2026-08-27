@@ -1,6 +1,6 @@
 // RUN: split-file %s %t
 // RUN: not cir-tile-translate %t/missing.cir 2>&1 | FileCheck %s --check-prefix=MISSING
-// RUN: not cir-tile-translate %t/unsupported.cir 2>&1 | FileCheck %s --check-prefix=UNSUPPORTED
+// RUN: not cir-tile-translate %t/unsupported.cir 2>&1 | FileCheck %s --check-prefix=LOWERING
 
 //--- missing.cir
 module {
@@ -17,4 +17,4 @@ module {
     cir.return
   }
 }
-// UNSUPPORTED: lowering for annotation 'cir_tile.v1.kernel' is not implemented
+// LOWERING: lowering for annotation 'cir_tile.v1.kernel' is not implemented

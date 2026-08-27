@@ -1,5 +1,6 @@
 //===- cir-tile-translate.cpp - CIR to CUDA Tile tool --------------------===//
 
+#include "cuda_tile/Bytecode/Writer/BytecodeWriter.h"
 #include "cuda_tile/Dialect/CudaTile/IR/Dialect.h"
 #include "mlir/Dialect/LLVMIR/LLVMDialect.h"
 #include "mlir/IR/DialectRegistry.h"
@@ -29,10 +30,19 @@ static llvm::cl::opt<bool>
     printAnnotations("print-annotations",
                      llvm::cl::desc("Print decoded CIR Tile annotations"));
 
+static llvm::cl::opt<bool>
+    emitBytecode("emit-bytecode", llvm::cl::desc("Emit CUDA Tile IR bytecode"));
+
 int main(int argc, char **argv) {
   llvm::InitLLVM initLLVM(argc, argv);
   llvm::cl::ParseCommandLineOptions(argc, argv,
                                     "CIR to CUDA Tile translator\n");
+
+  if (printAnnotations && emitBytecode) {
+    llvm::errs() << "error: --print-annotations and --emit-bytecode cannot be "
+                    "used together\n";
+    return 1;
+  }
 
   mlir::DialectRegistry registry;
   cir::registerAllDialects(registry);
@@ -70,8 +80,15 @@ int main(int argc, char **argv) {
     auto converted = clang::CIRTile::convertToCudaTile(*module);
     if (!converted)
       return 1;
-    converted->print(output->os());
-    output->os() << '\n';
+    if (emitBytecode) {
+      if (mlir::failed(mlir::cuda_tile::writeBytecode(
+              output->os(), *converted,
+              mlir::cuda_tile::BytecodeVersion::kCurrentVersion)))
+        return 1;
+    } else {
+      converted->print(output->os());
+      output->os() << '\n';
+    }
   }
 
   output->keep();

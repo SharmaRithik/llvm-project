@@ -5,6 +5,9 @@ project(CIR_TILE_INTEGRATION)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
+option(CIR_TILE_ENABLE_TESTING "Enable CIR Tile integration tests"
+       ${LLVM_INCLUDE_TESTS})
+
 if(NOT TARGET MLIRCIR)
   message(FATAL_ERROR "CIR Tile integration requires MLIRCIR")
 endif()
@@ -23,3 +26,7 @@ include_directories(${CMAKE_CURRENT_SOURCE_DIR}/include)
 
 add_subdirectory(lib)
 add_subdirectory(tools)
+
+if(CIR_TILE_ENABLE_TESTING)
+  add_subdirectory(test)
+endif()
