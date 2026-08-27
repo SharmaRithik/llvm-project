@@ -45,8 +45,12 @@ private:
                            const IntrinsicAnnotation &annotation);
   mlir::LogicalResult materializeViews(mlir::Block &sourceBlock);
   mlir::LogicalResult convertConstant(cir::ConstantOp constant);
+  mlir::LogicalResult convertZero(cir::CallOp call,
+                                  const IntrinsicAnnotation &annotation);
   mlir::LogicalResult convertLoad(cir::CallOp call, cir::FuncOp callee,
                                   const IntrinsicAnnotation &annotation);
+  mlir::LogicalResult convertMma(cir::CallOp call,
+                                 const IntrinsicAnnotation &annotation);
   mlir::LogicalResult convertStore(cir::CallOp call, cir::FuncOp callee,
                                    const IntrinsicAnnotation &annotation);
   mlir::LogicalResult convertKernel(cir::FuncOp kernel);
@@ -220,6 +224,24 @@ mlir::LogicalResult Converter::convertConstant(cir::ConstantOp constant) {
 }
 
 mlir::LogicalResult
+Converter::convertZero(cir::CallOp call,
+                       const IntrinsicAnnotation &annotation) {
+  if (!call.getArgs().empty() || call.getNumResults() != 1) {
+    call.emitError("CIR Tile zero call must have no arguments and one result");
+    return mlir::failure();
+  }
+
+  auto tileType = mlir::cuda_tile::TileType::get(
+      {annotation.arguments[0], annotation.arguments[1]}, builder.getF32Type());
+  auto value = mlir::DenseFPElementsAttr::get(
+      tileType, builder.getF32FloatAttr(0.0).getValue());
+  auto zero = mlir::cuda_tile::ConstantOp::create(builder, call.getLoc(),
+                                                  tileType, value);
+  values[call.getResult()] = zero.getResult();
+  return mlir::success();
+}
+
+mlir::LogicalResult
 Converter::convertLoad(cir::CallOp call, cir::FuncOp callee,
                        const IntrinsicAnnotation &annotation) {
   if (call.getArgs().size() != 3 || call.getNumResults() != 1) {
@@ -247,6 +269,30 @@ Converter::convertLoad(cir::CallOp call, cir::FuncOp callee,
       mlir::cuda_tile::MemoryScopeAttr(), *view, indices, mlir::Value(),
       mlir::cuda_tile::OptimizationHintsAttr());
   values[call.getResult()] = load.getTile();
+  return mlir::success();
+}
+
+mlir::LogicalResult
+Converter::convertMma(cir::CallOp call, const IntrinsicAnnotation &annotation) {
+  if (call.getArgs().size() != 3 || call.getNumResults() != 1) {
+    call.emitError(
+        "CIR Tile MMA call must have three arguments and one result");
+    return mlir::failure();
+  }
+
+  llvm::SmallVector<mlir::Value, 3> operands;
+  for (mlir::Value source : call.getArgs()) {
+    auto target = lookupValue(source, *call);
+    if (mlir::failed(target))
+      return mlir::failure();
+    operands.push_back(*target);
+  }
+  auto resultType = mlir::cuda_tile::TileType::get(
+      {annotation.arguments[0], annotation.arguments[1]}, builder.getF32Type());
+  auto mma = mlir::cuda_tile::MmaFOp::create(builder, call.getLoc(), resultType,
+                                             operands[0], operands[1],
+                                             operands[2], false);
+  values[call.getResult()] = mma.getResult();
   return mlir::success();
 }
 
@@ -287,8 +333,12 @@ mlir::LogicalResult Converter::convertCall(cir::CallOp call) {
   cir::FuncOp callee = annotatedCallee->first;
   const IntrinsicAnnotation &annotation = annotatedCallee->second;
 
+  if (annotation.kind == IntrinsicKind::Zero)
+    return convertZero(call, annotation);
   if (annotation.kind == IntrinsicKind::Load)
     return convertLoad(call, callee, annotation);
+  if (annotation.kind == IntrinsicKind::Mma)
+    return convertMma(call, annotation);
   if (annotation.kind == IntrinsicKind::Store)
     return convertStore(call, callee, annotation);
   if (annotation.kind != IntrinsicKind::BlockId) {

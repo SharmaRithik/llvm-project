@@ -1,0 +1,71 @@
+// RUN: cir-tile-translate %s -o %t
+// RUN: FileCheck %s --input-file=%t
+// RUN: cuda-tile-opt %t -o /dev/null
+
+!s32i = !cir.int<s, 32>
+
+module {
+  cir.func private @bid_x() -> (!s32i) [#cir.annotation<"cir_tile.v1.bid", [0 : i32]>]
+  cir.func private @bid_y() -> (!s32i) [#cir.annotation<"cir_tile.v1.bid", [1 : i32]>]
+  cir.func private @zero() -> (!cir.vector<1024 x !cir.float>) [#cir.annotation<"cir_tile.v1.zero", [32 : i32, 32 : i32]>]
+  cir.func private @load_a(%arg0: !cir.ptr<!cir.f16>, %arg1: !s32i, %arg2: !s32i) -> (!cir.vector<512 x !cir.f16>) [#cir.annotation<"cir_tile.v1.load", [32 : i32, 16 : i32, 64 : i32, 64 : i32]>]
+  cir.func private @load_b(%arg0: !cir.ptr<!cir.f16>, %arg1: !s32i, %arg2: !s32i) -> (!cir.vector<512 x !cir.f16>) [#cir.annotation<"cir_tile.v1.load", [16 : i32, 32 : i32, 64 : i32, 64 : i32]>]
+  cir.func private @mma(%arg0: !cir.vector<512 x !cir.f16>, %arg1: !cir.vector<512 x !cir.f16>, %arg2: !cir.vector<1024 x !cir.float>) -> (!cir.vector<1024 x !cir.float>) [#cir.annotation<"cir_tile.v1.mma", [32 : i32, 32 : i32, 16 : i32]>]
+  cir.func private @store(%arg0: !cir.ptr<!cir.float>, %arg1: !cir.vector<1024 x !cir.float>, %arg2: !s32i, %arg3: !s32i) [#cir.annotation<"cir_tile.v1.store", [32 : i32, 32 : i32, 64 : i32, 64 : i32]>]
+
+  cir.func @matmul(%arg0: !cir.ptr<!cir.f16>, %arg1: !cir.ptr<!cir.f16>, %arg2: !cir.ptr<!cir.float>) [#cir.annotation<"cir_tile.v1.kernel">] {
+    %0 = cir.call @bid_x() : () -> (!s32i)
+    %1 = cir.call @bid_y() : () -> (!s32i)
+    %2 = cir.call @zero() : () -> (!cir.vector<1024 x !cir.float>)
+    %3 = cir.const #cir.int<0> : !s32i
+    %4 = cir.call @load_a(%arg0, %0, %3) : (!cir.ptr<!cir.f16>, !s32i, !s32i) -> (!cir.vector<512 x !cir.f16>)
+    %5 = cir.const #cir.int<0> : !s32i
+    %6 = cir.call @load_b(%arg1, %5, %1) : (!cir.ptr<!cir.f16>, !s32i, !s32i) -> (!cir.vector<512 x !cir.f16>)
+    %7 = cir.call @mma(%4, %6, %2) : (!cir.vector<512 x !cir.f16>, !cir.vector<512 x !cir.f16>, !cir.vector<1024 x !cir.float>) -> (!cir.vector<1024 x !cir.float>)
+    %8 = cir.const #cir.int<1> : !s32i
+    %9 = cir.call @load_a(%arg0, %0, %8) : (!cir.ptr<!cir.f16>, !s32i, !s32i) -> (!cir.vector<512 x !cir.f16>)
+    %10 = cir.const #cir.int<1> : !s32i
+    %11 = cir.call @load_b(%arg1, %10, %1) : (!cir.ptr<!cir.f16>, !s32i, !s32i) -> (!cir.vector<512 x !cir.f16>)
+    %12 = cir.call @mma(%9, %11, %7) : (!cir.vector<512 x !cir.f16>, !cir.vector<512 x !cir.f16>, !cir.vector<1024 x !cir.float>) -> (!cir.vector<1024 x !cir.float>)
+    %13 = cir.const #cir.int<2> : !s32i
+    %14 = cir.call @load_a(%arg0, %0, %13) : (!cir.ptr<!cir.f16>, !s32i, !s32i) -> (!cir.vector<512 x !cir.f16>)
+    %15 = cir.const #cir.int<2> : !s32i
+    %16 = cir.call @load_b(%arg1, %15, %1) : (!cir.ptr<!cir.f16>, !s32i, !s32i) -> (!cir.vector<512 x !cir.f16>)
+    %17 = cir.call @mma(%14, %16, %12) : (!cir.vector<512 x !cir.f16>, !cir.vector<512 x !cir.f16>, !cir.vector<1024 x !cir.float>) -> (!cir.vector<1024 x !cir.float>)
+    %18 = cir.const #cir.int<3> : !s32i
+    %19 = cir.call @load_a(%arg0, %0, %18) : (!cir.ptr<!cir.f16>, !s32i, !s32i) -> (!cir.vector<512 x !cir.f16>)
+    %20 = cir.const #cir.int<3> : !s32i
+    %21 = cir.call @load_b(%arg1, %20, %1) : (!cir.ptr<!cir.f16>, !s32i, !s32i) -> (!cir.vector<512 x !cir.f16>)
+    %22 = cir.call @mma(%19, %21, %17) : (!cir.vector<512 x !cir.f16>, !cir.vector<512 x !cir.f16>, !cir.vector<1024 x !cir.float>) -> (!cir.vector<1024 x !cir.float>)
+    cir.call @store(%arg2, %22, %0, %1) : (!cir.ptr<!cir.float>, !cir.vector<1024 x !cir.float>, !s32i, !s32i) -> ()
+    cir.return
+  }
+}
+
+// CHECK: cuda_tile.module @cir_module attributes {producer = "clang-cir"}
+// CHECK-LABEL: entry @matmul(
+// CHECK-SAME: tile<ptr<f16>>
+// CHECK-SAME: tile<ptr<f16>>
+// CHECK-SAME: tile<ptr<f32>>
+// CHECK: %[[A_TENSOR:[A-Za-z0-9_]+]] = make_tensor_view {{.*}} : tensor_view<64x64xf16, strides=[64,1]>
+// CHECK-NEXT: %[[A_VIEW:[A-Za-z0-9_]+]] = make_partition_view %[[A_TENSOR]] : partition_view<tile=(32x16), tensor_view<64x64xf16, strides=[64,1]>>
+// CHECK-NEXT: %[[B_TENSOR:[A-Za-z0-9_]+]] = make_tensor_view {{.*}} : tensor_view<64x64xf16, strides=[64,1]>
+// CHECK-NEXT: %[[B_VIEW:[A-Za-z0-9_]+]] = make_partition_view %[[B_TENSOR]] : partition_view<tile=(16x32), tensor_view<64x64xf16, strides=[64,1]>>
+// CHECK-NEXT: %[[C_TENSOR:[A-Za-z0-9_]+]] = make_tensor_view {{.*}} : tensor_view<64x64xf32, strides=[64,1]>
+// CHECK-NEXT: %[[C_VIEW:[A-Za-z0-9_]+]] = make_partition_view %[[C_TENSOR]] : partition_view<tile=(32x32), tensor_view<64x64xf32, strides=[64,1]>>
+// CHECK-NEXT: %[[M:[A-Za-z0-9_]+]], %[[N:[A-Za-z0-9_]+]], %{{.*}} = get_tile_block_id : tile<i32>
+// CHECK-NEXT: %[[ZERO:[A-Za-z0-9_]+]] = constant <f32: 0.000000e+00> : tile<32x32xf32>
+// CHECK: %[[A0:[A-Za-z0-9_]+]], %{{.*}} = load_view_tko weak %[[A_VIEW]]
+// CHECK: %[[B0:[A-Za-z0-9_]+]], %{{.*}} = load_view_tko weak %[[B_VIEW]]
+// CHECK-NEXT: %[[ACC0:[A-Za-z0-9_]+]] = mmaf %[[A0]], %[[B0]], %[[ZERO]]
+// CHECK: %[[A1:[A-Za-z0-9_]+]], %{{.*}} = load_view_tko weak %[[A_VIEW]]
+// CHECK: %[[B1:[A-Za-z0-9_]+]], %{{.*}} = load_view_tko weak %[[B_VIEW]]
+// CHECK-NEXT: %[[ACC1:[A-Za-z0-9_]+]] = mmaf %[[A1]], %[[B1]], %[[ACC0]]
+// CHECK: %[[A2:[A-Za-z0-9_]+]], %{{.*}} = load_view_tko weak %[[A_VIEW]]
+// CHECK: %[[B2:[A-Za-z0-9_]+]], %{{.*}} = load_view_tko weak %[[B_VIEW]]
+// CHECK-NEXT: %[[ACC2:[A-Za-z0-9_]+]] = mmaf %[[A2]], %[[B2]], %[[ACC1]]
+// CHECK: %[[A3:[A-Za-z0-9_]+]], %{{.*}} = load_view_tko weak %[[A_VIEW]]
+// CHECK: %[[B3:[A-Za-z0-9_]+]], %{{.*}} = load_view_tko weak %[[B_VIEW]]
+// CHECK-NEXT: %[[ACC3:[A-Za-z0-9_]+]] = mmaf %[[A3]], %[[B3]], %[[ACC2]]
+// CHECK-NEXT: %{{.*}} = store_view_tko weak %[[ACC3]], %[[C_VIEW]][%[[M]], %[[N]]]
+// CHECK-NEXT: return
