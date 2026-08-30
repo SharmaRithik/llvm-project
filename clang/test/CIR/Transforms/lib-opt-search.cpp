@@ -24,9 +24,18 @@ template <class Pointer> struct __wrap_iter {
 }
 
 #ifndef MEMMEM_RECURSION
-// CIRGen lowers the dynamic initializer to a function before LibOpt.
+// At LibOpt time a dynamic initializer is still a cir.global region, and
+// LoweringPrepare outlines it into this function afterwards, carrying
+// whatever LibOpt left there. The narrow rewrite needs no allocas, so it
+// runs inside the region and the memmem arrives here.
 // CIR-LABEL: cir.func internal private @__cxx_global_var_init
 // CIR: cir.libc.memmem(%{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}) : !cir.ptr<!void>, !u64i, !cir.ptr<!void>, !u64i
+// The wide candidate loop does need allocas, which have no home in a
+// global region, so the wide initializer at the bottom of this file
+// declines and its call survives into the outlined function.
+// CIR-LABEL: cir.func internal private @__cxx_global_var_init.1
+// CIR: cir.call @_ZSt6searchIPiS0_ET_S1_S1_T0_S2_
+// CIR-NOT: cir.libc.wmemchr
 unsigned char *search_hit(unsigned char *first1, unsigned char *last1,
                           unsigned char *first2, unsigned char *last2) {
   return std::search(first1, last1, first2, last2);
@@ -127,9 +136,24 @@ unsigned char *search_unmarked(unsigned char *first1, unsigned char *last1,
 int *search_int(int *first1, int *last1, int *first2, int *last2) {
   return std::search(first1, last1, first2, last2);
 }
+// The recorded wchar width int rewrites into a candidate loop. wmemchr
+// proposes whole element candidates, so no byte level match can start
+// inside an element, and one memcmp verifies each candidate.
 // CIR-LABEL: cir.func{{.*}} @_Z10search_intPiS_S_S_
-// CIR: cir.call @_ZSt6searchIPiS0_ET_S1_S1_T0_S2_
-// CIR-NOT: cir.libc.memmem
+// CIR: cir.alloca "search_scan_off"
+// CIR: cir.alloca "search_result"
+// CIR: cir.while {
+// CIR: %[[CAND:[0-9]+]] = cir.libc.wmemchr(%{{[0-9]+}}, %{{[0-9]+}}, %{{[0-9]+}}) : !cir.ptr<!s32i>, !s32i, !u64i
+// CIR: cir.libc.memcmp
+// CIR: cir.store %[[CAND]], %{{[0-9]+}}
+// CIR: cir.ptr_diff %[[CAND]], %{{[0-9]+}} : !cir.ptr<!s32i> -> !u64i
+// CIR-NOT: cir.call @_ZSt6searchIPiS0_ET_S1_S1_T0_S2_
+
+int global_int_haystack[4];
+int global_int_needle[2];
+int *global_int_search =
+    std::search(global_int_haystack, global_int_haystack + 4,
+                global_int_needle, global_int_needle + 2);
 // LLVM-LABEL: define internal void @_GLOBAL__sub_I_lib_opt_search.cpp
 // LLVM: call ptr @memmem(ptr noundef nonnull @global_haystack, i64 noundef 4, ptr noundef nonnull @global_needle, i64 noundef 2)
 
