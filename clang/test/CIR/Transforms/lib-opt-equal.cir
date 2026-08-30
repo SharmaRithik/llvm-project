@@ -548,3 +548,106 @@ module attributes {cir.triple = "x86_64-unknown-linux-gnu",
 // CHECK: cir.std.equal_pred
 // CHECK-NOT: cir.libc.memcmp
 }
+
+// -----
+
+!s16i = !cir.int<s, 16>
+!s32i = !cir.int<s, 32>
+
+module attributes {cir.triple = "x86_64-unknown-linux-gnu",
+                   cir.int_type_width = 32 : i32,
+                   cir.size_type_width = 64 : i32,
+                   cir.wchar_type_width = 32 : i32} {
+  cir.func private @_ZSt5equalWide(!cir.ptr<!s32i>, !cir.ptr<!s32i>, !cir.ptr<!s32i>) -> !cir.bool func_info<#cir.func_identity<"std::equal">>
+  cir.func private @_ZSt5equalShort(!cir.ptr<!s16i>, !cir.ptr<!s16i>, !cir.ptr<!s16i>) -> !cir.bool func_info<#cir.func_identity<"std::equal">>
+
+  cir.func @rewrites_wide(%first1: !cir.ptr<!s32i>, %last1: !cir.ptr<!s32i>, %first2: !cir.ptr<!s32i>) -> !cir.bool {
+    %0 = cir.std.equal(%first1 : !cir.ptr<!s32i>, %last1 : !cir.ptr<!s32i>, %first2 : !cir.ptr<!s32i>, @_ZSt5equalWide) -> !cir.bool {cir.wide_char_params}
+    cir.return %0 : !cir.bool
+  }
+// The pointer difference counts elements while memcmp counts bytes, so the
+// wide length is the element count scaled by the element size.
+// CHECK-LABEL: cir.func @rewrites_wide
+// CHECK: %[[WLEN:.*]] = cir.ptr_diff %{{.*}}, %{{.*}} : !cir.ptr<!s32i> -> !u64i
+// CHECK: %[[WSIZE:.*]] = cir.const #cir.int<4> : !u64i
+// CHECK: %[[WBYTES:.*]] = cir.mul %[[WLEN]], %[[WSIZE]] : !u64i
+// CHECK: cir.libc.memcmp(%{{.*}}, %{{.*}}, %[[WBYTES]])
+// CHECK-NOT: cir.std.equal
+
+  cir.func @keeps_wide_marker_on_wrong_width(%first1: !cir.ptr<!s16i>, %last1: !cir.ptr<!s16i>, %first2: !cir.ptr<!s16i>) -> !cir.bool {
+    %0 = cir.std.equal(%first1 : !cir.ptr<!s16i>, %last1 : !cir.ptr<!s16i>, %first2 : !cir.ptr<!s16i>, @_ZSt5equalShort) -> !cir.bool {cir.wide_char_params}
+    cir.return %0 : !cir.bool
+  }
+// The wide marker still has to agree with the recorded wchar width.
+// CHECK-LABEL: @keeps_wide_marker_on_wrong_width
+// CHECK: cir.std.equal
+// CHECK-NOT: cir.libc.memcmp
+
+  cir.func @keeps_wide_unmarked(%first1: !cir.ptr<!s32i>, %last1: !cir.ptr<!s32i>, %first2: !cir.ptr<!s32i>) -> !cir.bool {
+    %0 = cir.std.equal(%first1 : !cir.ptr<!s32i>, %last1 : !cir.ptr<!s32i>, %first2 : !cir.ptr<!s32i>, @_ZSt5equalWide) -> !cir.bool
+    cir.return %0 : !cir.bool
+  }
+// CHECK-LABEL: @keeps_wide_unmarked
+// CHECK: cir.std.equal
+// CHECK-NOT: cir.libc.memcmp
+
+  cir.func @keeps_narrow_marker_on_wide_element(%first1: !cir.ptr<!s32i>, %last1: !cir.ptr<!s32i>, %first2: !cir.ptr<!s32i>) -> !cir.bool {
+    %0 = cir.std.equal(%first1 : !cir.ptr<!s32i>, %last1 : !cir.ptr<!s32i>, %first2 : !cir.ptr<!s32i>, @_ZSt5equalWide) -> !cir.bool {cir.narrow_char_params}
+    cir.return %0 : !cir.bool
+  }
+// CHECK-LABEL: @keeps_narrow_marker_on_wide_element
+// CHECK: cir.std.equal
+// CHECK-NOT: cir.libc.memcmp
+}
+
+// -----
+
+!s32i = !cir.int<s, 32>
+
+// Without the recorded wchar width the wide marker licenses nothing.
+module attributes {cir.triple = "x86_64-unknown-linux-gnu",
+                   cir.int_type_width = 32 : i32,
+                   cir.size_type_width = 64 : i32} {
+  cir.func private @_ZSt5equalWide(!cir.ptr<!s32i>, !cir.ptr<!s32i>, !cir.ptr<!s32i>) -> !cir.bool func_info<#cir.func_identity<"std::equal">>
+
+  cir.func @keeps_wide_without_recorded_width(%first1: !cir.ptr<!s32i>, %last1: !cir.ptr<!s32i>, %first2: !cir.ptr<!s32i>) -> !cir.bool {
+    %0 = cir.std.equal(%first1 : !cir.ptr<!s32i>, %last1 : !cir.ptr<!s32i>, %first2 : !cir.ptr<!s32i>, @_ZSt5equalWide) -> !cir.bool {cir.wide_char_params}
+    cir.return %0 : !cir.bool
+  }
+// CHECK-LABEL: @keeps_wide_without_recorded_width
+// CHECK: cir.std.equal
+// CHECK-NOT: cir.libc.memcmp
+}
+
+// -----
+
+!s32i = !cir.int<s, 32>
+!wide_pred_closure = !cir.struct<class "WidePredClosure" {}>
+
+module attributes {cir.triple = "x86_64-unknown-linux-gnu",
+                   cir.int_type_width = 32 : i32,
+                   cir.size_type_width = 64 : i32,
+                   cir.wchar_type_width = 32 : i32} {
+  cir.func private @_ZSt5equalWideP(!cir.ptr<!s32i>, !cir.ptr<!s32i>, !cir.ptr<!s32i>, !wide_pred_closure) -> !cir.bool func_info<#cir.func_identity<"std::equal">>
+
+  cir.func @transforms_wide_pred(%first1: !cir.ptr<!s32i>, %last1: !cir.ptr<!s32i>, %first2: !cir.ptr<!s32i>, %pred: !wide_pred_closure) -> !cir.bool {
+    %0 = cir.std.equal_pred(%first1 : !cir.ptr<!s32i>, %last1 : !cir.ptr<!s32i>, %first2 : !cir.ptr<!s32i>, %pred : !wide_pred_closure, @_ZSt5equalWideP) -> !cir.bool {cir.elem_eq_binary_pred, cir.wide_char_params}
+    cir.return %0 : !cir.bool
+  }
+// The proven equality lambda and the wide width fact together license the
+// bytewise rewrite, mirroring the wide predicate mismatch.
+// CHECK-LABEL: @transforms_wide_pred
+// CHECK: %[[WPSIZE:.*]] = cir.const #cir.int<4> : !u64i
+// CHECK: cir.mul %{{.*}}, %[[WPSIZE]] : !u64i
+// CHECK: cir.libc.memcmp
+// CHECK-NOT: cir.std.equal_pred
+
+  cir.func @keeps_wide_pred_without_wide_marker(%first1: !cir.ptr<!s32i>, %last1: !cir.ptr<!s32i>, %first2: !cir.ptr<!s32i>, %pred: !wide_pred_closure) -> !cir.bool {
+    %0 = cir.std.equal_pred(%first1 : !cir.ptr<!s32i>, %last1 : !cir.ptr<!s32i>, %first2 : !cir.ptr<!s32i>, %pred : !wide_pred_closure, @_ZSt5equalWideP) -> !cir.bool {cir.elem_eq_binary_pred}
+    cir.return %0 : !cir.bool
+  }
+// The lambda proof alone says nothing about the element width.
+// CHECK-LABEL: @keeps_wide_pred_without_wide_marker
+// CHECK: cir.std.equal_pred
+// CHECK-NOT: cir.libc.memcmp
+}
