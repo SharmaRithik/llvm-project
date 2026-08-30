@@ -53,8 +53,14 @@
 
 // CIR-LABEL: cir.func dso_local @_Z14unmarked_equalPcS_Ph
 // CIR: cir.call @_ZSt5equalIPcPhEbT_S2_T0_
+// The recorded wchar width admits plain int elements, and the memcmp
+// length scales from elements to bytes.
 // CIR-LABEL: cir.func dso_local @_Z9int_equalPiS_S_
-// CIR: cir.call @_ZSt5equalIPiS0_EbT_S1_T0_
+// CIR: %[[INT_LEN:[0-9]+]] = cir.ptr_diff %{{[0-9]+}}, %{{[0-9]+}} : !cir.ptr<!s32i> -> !u64i
+// CIR-NEXT: %[[INT_SIZE:[0-9]+]] = cir.const #cir.int<4> : !u64i
+// CIR-NEXT: %[[INT_BYTES:[0-9]+]] = cir.mul %[[INT_LEN]], %[[INT_SIZE]] : !u64i
+// CIR-NEXT: cir.libc.memcmp(%{{[0-9]+}}, %{{[0-9]+}}, %[[INT_BYTES]])
+// CIR-NOT: cir.call @_ZSt5equalIPiS0_EbT_S1_T0_
 // CIR-LABEL: cir.func dso_local @_Z14volatile_equalPVhS0_S0_
 // CIR: cir.call @_ZSt5equalIPVhS1_EbT_S2_T0_
 // CIR-LABEL: cir.func dso_local @memcmp

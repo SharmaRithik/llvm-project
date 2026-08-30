@@ -1552,18 +1552,19 @@ static void rewriteEqualToMemcmp(OpT equalOp,
   if (!env)
     return;
 
-  // Only the CIRGen fact licenses the rewrite because an enum or atomic
-  // element also lowers to a byte wide integer and a closure of the right
+  // Only the CIRGen facts license the rewrite because an enum or atomic
+  // element also lowers to the same integer and a closure of the right
   // shape can compute anything. The predicate form accepts only its own
   // marker since the proof covers the lambda body, and because the four
   // iterator overload raises as the predicate form when its iterators are
   // wrapper records, carrying last2 in the predicate operand and the
   // iterator marker on the call. Rewriting that shape would read only one
-  // range's length.
-  if (!equalOp->template getAttrOfType<mlir::UnitAttr>(
-          predOp ? cir::CIRDialect::getElemEqBinaryPredAttrName()
-                 : cir::CIRDialect::getNarrowCharParamsAttrName()))
-    return;
+  // range's length. The character markers are checked against the element
+  // type once it is known below.
+  if constexpr (predOp)
+    if (!equalOp->template getAttrOfType<mlir::UnitAttr>(
+            cir::CIRDialect::getElemEqBinaryPredAttrName()))
+      return;
 
   // The introduced operation uses the recorded int and size_t widths which
   // its verifier checks against the result and length.
@@ -1597,11 +1598,27 @@ static void rewriteEqualToMemcmp(OpT equalOp,
       secondPtrTy.getAddrSpace() ||
       firstPtrTy.getPointee() != secondPtrTy.getPointee())
     return;
-  // BitInt belongs to a separate type family and the rewrite is licensed only
-  // for fundamental eight bit characters.
+  // BitInt belongs to a separate type family, and the byte length
+  // scaling below needs an exact byte width.
   auto elementTy = mlir::dyn_cast<cir::IntType>(firstPtrTy.getPointee());
-  if (!elementTy || elementTy.isBitInt() || elementTy.getWidth() != 8)
+  if (!elementTy || elementTy.isBitInt() || elementTy.getWidth() % 8)
     return;
+
+  const bool wide = elementTy.getWidth() != 8;
+  if (wide) {
+    // CIRGen marks only elements of the recorded wchar_t width, and the
+    // re check here defends against hand written IR whose marker lies
+    // about the element.
+    std::optional<unsigned> wcharWidth = cir::getRecordedIntegerWidth(
+        env->moduleOp, cir::CIRDialect::getWCharTypeWidthAttrName());
+    if (!wcharWidth || *wcharWidth != elementTy.getWidth() ||
+        !equalOp->template getAttrOfType<mlir::UnitAttr>(
+            cir::CIRDialect::getWideCharParamsAttrName()))
+      return;
+  } else if (!predOp && !equalOp->template getAttrOfType<mlir::UnitAttr>(
+                            cir::CIRDialect::getNarrowCharParamsAttrName())) {
+    return;
+  }
 
   mlir::Location loc = equalOp.getLoc();
   builder.setInsertionPointAfter(equalOp);
@@ -1632,6 +1649,13 @@ static void rewriteEqualToMemcmp(OpT equalOp,
                 builder.createBitcast(loc, first2, builder.getVoidPtrTy());
             mlir::Value len = cir::PtrDiffOp::create(
                 builder, loc, builder.getUIntNTy(*sizeWidth), last1, first1);
+            // The pointer difference counts elements while memcmp counts
+            // bytes, so the wide path scales by the element size.
+            if (wide)
+              len = builder.createMul(
+                  loc, len,
+                  builder.getUnsignedInt(loc, elementTy.getWidth() / 8,
+                                         *sizeWidth));
             builder.createYield(
                 loc, emitMemCmpIsEqual(builder, loc, lhs, rhs, len,
                                        builder.getSIntNTy(*intWidth)));
