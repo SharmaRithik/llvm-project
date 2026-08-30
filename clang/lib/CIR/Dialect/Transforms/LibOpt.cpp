@@ -851,6 +851,283 @@ rewriteFindLikeToMemchr(OpT findOp, mlir::SymbolTableCollection &symbolTables,
     ++numFindLikeToMemchr;
 }
 
+// The candidate loop behind the wide search rewrite. wmemchr finds the
+// next haystack element equal to the needle's first element among the
+// remaining candidate starts, one memcmp verifies the whole needle
+// there, and a failed candidate resumes one element later. Nothing here
+// looks at bytes inside an element, so the misaligned byte match a
+// bytewise memmem would surface cannot arise.
+static mlir::Value emitWmemchrCandidateLoop(
+    CIRBaseBuilderTy &builder, mlir::Location loc, mlir::Value first1,
+    mlir::Value first2, mlir::Value haystackLen, mlir::Value needleLen,
+    mlir::Value needleBytes, cir::PointerType haystackIterTy,
+    cir::IntType elemTy, cir::IntType callElemTy, cir::PointerType callIterTy,
+    cir::IntType intTy, unsigned sizeWidth, mlir::Value scanAddr,
+    mlir::Value resultAddr) {
+  // Only offsets leaving room for the whole needle start a candidate, and
+  // this arm runs with 1 <= needleLen < haystackLen, so the subtraction
+  // cannot wrap and the count stays positive. A first element hit past
+  // the last candidate cannot begin a full match, so wmemchr never scans
+  // it, which also keeps every memcmp read in bounds.
+  mlir::Value candidates =
+      builder.createAdd(loc, builder.createSub(loc, haystackLen, needleLen),
+                        builder.getUnsignedInt(loc, 1, sizeWidth));
+  mlir::Value sought = builder.createLoad(loc, first2);
+  if (callElemTy != elemTy)
+    sought = builder.createIntCast(sought, callElemTy);
+  mlir::Value needleVoid =
+      builder.createBitcast(loc, first2, builder.getVoidPtrTy());
+  builder.createWhile(
+      loc,
+      [&](mlir::OpBuilder &, mlir::Location l) {
+        mlir::Value off = builder.createLoad(l, scanAddr);
+        mlir::Value more =
+            builder.createCompare(l, cir::CmpOpKind::lt, off, candidates);
+        mlir::Value keepScanning =
+            cir::TernaryOp::create(
+                builder, l, more,
+                [&](mlir::OpBuilder &, mlir::Location ll) {
+                  mlir::Value scanPtr = cir::PtrStrideOp::create(
+                      builder, ll, haystackIterTy, first1, off);
+                  mlir::Value src = scanPtr;
+                  if (callIterTy != haystackIterTy)
+                    src = builder.createBitcast(ll, scanPtr, callIterTy);
+                  mlir::Value remaining =
+                      builder.createSub(ll, candidates, off);
+                  mlir::Value cand = cir::WMemChrOp::create(builder, ll, src,
+                                                            sought, remaining);
+                  if (callIterTy != haystackIterTy)
+                    cand = builder.createBitcast(ll, cand, haystackIterTy);
+                  mlir::Value verdict =
+                      cir::TernaryOp::create(
+                          builder, ll, builder.createPtrIsNull(cand),
+                          [&](mlir::OpBuilder &, mlir::Location lm) {
+                            builder.createYield(
+                                lm, builder.getBool(false, lm).getResult());
+                          },
+                          [&](mlir::OpBuilder &, mlir::Location lm) {
+                            mlir::Value candVoid = builder.createBitcast(
+                                lm, cand, builder.getVoidPtrTy());
+                            mlir::Value equal = emitMemCmpIsEqual(
+                                builder, lm, candVoid, needleVoid, needleBytes,
+                                intTy);
+                            mlir::Value next =
+                                cir::TernaryOp::create(
+                                    builder, lm, equal,
+                                    [&](mlir::OpBuilder &, mlir::Location lh) {
+                                      builder.createStore(lh, cand, resultAddr);
+                                      builder.createYield(
+                                          lh, builder.getBool(false, lh)
+                                                  .getResult());
+                                    },
+                                    [&](mlir::OpBuilder &, mlir::Location lh) {
+                                      mlir::Value candOff =
+                                          cir::PtrDiffOp::create(
+                                              builder, lh,
+                                              builder.getUIntNTy(sizeWidth),
+                                              cand, first1);
+                                      builder.createStore(
+                                          lh,
+                                          builder.createAdd(
+                                              lh, candOff,
+                                              builder.getUnsignedInt(
+                                                  lh, 1, sizeWidth)),
+                                          scanAddr);
+                                      builder.createYield(
+                                          lh, builder.getBool(true, lh)
+                                                  .getResult());
+                                    })
+                                    .getResult();
+                            builder.createYield(lm, next);
+                          })
+                          .getResult();
+                  builder.createYield(ll, verdict);
+                },
+                [&](mlir::OpBuilder &, mlir::Location ll) {
+                  builder.createYield(ll,
+                                      builder.getBool(false, ll).getResult());
+                })
+                .getResult();
+        builder.createCondition(keepScanning);
+      },
+      [&](mlir::OpBuilder &, mlir::Location l) { builder.createYield(l); });
+  return builder.createLoad(loc, resultAddr);
+}
+
+// Rewrites the four iterator form of std::search over licensed wide
+// elements. One bytewise memmem is out here for two reasons, a byte level
+// match can start inside an element, and on the library benchmark the
+// candidate filtering that would repair it lost the common no match shape
+// to the vectorized element loop. Instead wmemchr proposes candidates,
+// which sit on element boundaries by construction, and one memcmp
+// verifies each. That is the library's own two phase algorithm with both
+// phases delegated to the C routines, so the asymptotics match the loop
+// this call replaces.
+static bool
+rewriteSearchWideToWmemchr(StdSearchOp searchOp,
+                           mlir::SymbolTableCollection &symbolTables,
+                           mlir::Pass::Statistic &numSearchWideToWmemchr) {
+  cir::RecordType haystackWrapperTy;
+  cir::RecordType needleWrapperTy;
+  cir::PointerType haystackIterTy = unwrapContiguousIterator(
+      searchOp.getFirst1().getType(), haystackWrapperTy);
+  cir::PointerType needleIterTy =
+      unwrapContiguousIterator(searchOp.getFirst2().getType(), needleWrapperTy);
+  if (!haystackIterTy || !needleIterTy ||
+      static_cast<bool>(haystackWrapperTy) !=
+          static_cast<bool>(needleWrapperTy) ||
+      haystackIterTy.getAddrSpace() || needleIterTy.getAddrSpace())
+    return false;
+
+  auto elemTy = mlir::dyn_cast<cir::IntType>(haystackIterTy.getPointee());
+  auto needleElemTy = mlir::dyn_cast<cir::IntType>(needleIterTy.getPointee());
+  if (!elemTy || elemTy.isBitInt() || elemTy.getWidth() % 8 ||
+      elemTy.getWidth() == 8 || needleElemTy != elemTy)
+    return false;
+
+  std::optional<LibCallEnv> env =
+      checkLibCallEnv(searchOp, "wmemchr", llvm::LibFunc_wmemchr);
+  if (!env)
+    return false;
+  // The loop keeps its scan position and its result in allocas, which have
+  // no home in a global initializer region.
+  if (!env->enclosing)
+    return false;
+  // Verification spends one memcmp per candidate, so both routines have
+  // to be admitted.
+  if (!checkLibCallEnv(searchOp, "memcmp", llvm::LibFunc_memcmp))
+    return false;
+
+  if (!searchOp->getAttrOfType<mlir::UnitAttr>(
+          cir::CIRDialect::getWideCharParamsAttrName()))
+    return false;
+
+  // resolveMemchrWidths also re proves the element against the recorded
+  // wchar width, the defense against hand written IR with a lying marker.
+  unsigned patternWidth, sizeWidth;
+  if (!resolveMemchrWidths(env->moduleOp, env->triple, /*wide=*/true, elemTy,
+                           patternWidth, sizeWidth))
+    return false;
+  std::optional<unsigned> intWidth = cir::getRecordedIntegerWidth(
+      env->moduleOp, cir::CIRDialect::getIntTypeWidthAttrName());
+  if (!intWidth)
+    return false;
+
+  CIRBaseBuilderTy builder(*searchOp.getContext());
+  auto sizeTy = builder.getUIntNTy(sizeWidth);
+  auto intTy = builder.getSIntNTy(*intWidth);
+  cir::IntType callElemTy;
+  cir::PointerType callIterTy;
+  if (!resolveMemchrCallTypes(builder, env->moduleOp, symbolTables,
+                              /*wide=*/true, "wmemchr", patternWidth, sizeWidth,
+                              elemTy, haystackIterTy, callElemTy, callIterTy))
+    return false;
+  if (!sharesLibCallSymbol(
+          env->moduleOp, symbolTables, "memcmp",
+          cir::FuncType::get(
+              {builder.getVoidPtrTy(), builder.getVoidPtrTy(), sizeTy}, intTy)))
+    return false;
+
+  mlir::Location loc = searchOp.getLoc();
+  builder.setInsertionPointAfter(searchOp);
+  mlir::Value first1 = searchOp.getFirst1();
+  mlir::Value last1 = searchOp.getLast1();
+  mlir::Value first2 = searchOp.getFirst2();
+  mlir::Value last2 = searchOp.getLast2();
+  if (haystackWrapperTy) {
+    first1 = cir::ExtractMemberOp::create(builder, loc, first1, 0);
+    last1 = cir::ExtractMemberOp::create(builder, loc, last1, 0);
+    first2 = cir::ExtractMemberOp::create(builder, loc, first2, 0);
+    last2 = cir::ExtractMemberOp::create(builder, loc, last2, 0);
+  }
+
+  mlir::Value scanAddr =
+      builder.createAlloca(loc, builder.getPointerTo(sizeTy), "search_scan_off",
+                           builder.getAlignmentAttr(sizeWidth / 8));
+  builder.createStore(loc, builder.getUnsignedInt(loc, 0, sizeWidth), scanAddr);
+  // The result starts as the not found value, a null wmemchr return just
+  // stops the loop.
+  mlir::Value resultAddr = builder.createAlloca(
+      loc, builder.getPointerTo(haystackIterTy), "search_result",
+      builder.getAlignmentAttr(sizeWidth / 8));
+  builder.createStore(loc, last1, resultAddr);
+  mlir::Value elementSize =
+      builder.getUnsignedInt(loc, elemTy.getWidth() / 8, sizeWidth);
+
+  // The C++ empty needle rule returns first1.
+  mlir::Value needleIsEmpty =
+      builder.createCompare(loc, cir::CmpOpKind::eq, first2, last2);
+  mlir::Value result =
+      cir::TernaryOp::create(
+          builder, loc, needleIsEmpty,
+          [&](mlir::OpBuilder &, mlir::Location) {
+            builder.createYield(loc, first1);
+          },
+          [&](mlir::OpBuilder &, mlir::Location) {
+            // The differences count elements, memcmp lengths scale to
+            // bytes at the call.
+            mlir::Value haystackLen =
+                cir::PtrDiffOp::create(builder, loc, sizeTy, last1, first1);
+            mlir::Value needleLen =
+                cir::PtrDiffOp::create(builder, loc, sizeTy, last2, first2);
+            mlir::Value needleBytes =
+                builder.createMul(loc, needleLen, elementSize);
+            // The C++ short haystack rule returns last1, and behind it the
+            // candidate arithmetic below cannot wrap.
+            mlir::Value needleIsLonger = builder.createCompare(
+                loc, cir::CmpOpKind::gt, needleLen, haystackLen);
+            mlir::Value nonEmptyResult =
+                cir::TernaryOp::create(
+                    builder, loc, needleIsLonger,
+                    [&](mlir::OpBuilder &, mlir::Location) {
+                      builder.createYield(loc, last1);
+                    },
+                    [&](mlir::OpBuilder &, mlir::Location) {
+                      // Equal lengths admit one candidate, decided by one
+                      // memcmp with no scan.
+                      mlir::Value sameLength = builder.createCompare(
+                          loc, cir::CmpOpKind::eq, needleLen, haystackLen);
+                      mlir::Value guarded =
+                          cir::TernaryOp::create(
+                              builder, loc, sameLength,
+                              [&](mlir::OpBuilder &, mlir::Location) {
+                                mlir::Value lhs = builder.createBitcast(
+                                    loc, first1, builder.getVoidPtrTy());
+                                mlir::Value rhs = builder.createBitcast(
+                                    loc, first2, builder.getVoidPtrTy());
+                                mlir::Value equal = emitMemCmpIsEqual(
+                                    builder, loc, lhs, rhs, needleBytes, intTy);
+                                builder.createYield(
+                                    loc, builder.createSelect(loc, equal,
+                                                              first1, last1));
+                              },
+                              [&](mlir::OpBuilder &, mlir::Location) {
+                                builder.createYield(
+                                    loc,
+                                    emitWmemchrCandidateLoop(
+                                        builder, loc, first1, first2,
+                                        haystackLen, needleLen, needleBytes,
+                                        haystackIterTy, elemTy, callElemTy,
+                                        callIterTy, intTy, sizeWidth, scanAddr,
+                                        resultAddr));
+                              })
+                              .getResult();
+                      builder.createYield(loc, guarded);
+                    })
+                    .getResult();
+            builder.createYield(loc, nonEmptyResult);
+          })
+          .getResult();
+
+  if (haystackWrapperTy)
+    result = cir::InsertMemberOp::create(builder, loc, searchOp.getFirst1(),
+                                         /*index=*/0, result);
+  searchOp.getResult().replaceAllUsesWith(result);
+  searchOp.erase();
+  ++numSearchWideToWmemchr;
+  return true;
+}
+
 // Rewrites the four iterator form of std::search over licensed bytes.
 static void
 rewriteSearchToMemmem(StdSearchOp searchOp,
@@ -872,8 +1149,8 @@ rewriteSearchToMemmem(StdSearchOp searchOp,
   auto haystackElemTy =
       mlir::dyn_cast<cir::IntType>(haystackIterTy.getPointee());
   auto needleElemTy = mlir::dyn_cast<cir::IntType>(needleIterTy.getPointee());
-  if (!haystackElemTy || haystackElemTy.getWidth() != 8 ||
-      needleElemTy != haystackElemTy)
+  if (!haystackElemTy || haystackElemTy.isBitInt() ||
+      haystackElemTy.getWidth() != 8 || needleElemTy != haystackElemTy)
     return;
 
   constexpr llvm::StringLiteral libcallName = "memmem";
@@ -2932,8 +3209,10 @@ void LibOptPass::runOnOperation() {
           }
         })
         .Case<StdSearchOp>([&](auto search) {
-          rewriteSearchToMemmem(search, symbolTables, numSearchToMemmem,
-                                numSearchEqualLengthToMemcmp);
+          if (!rewriteSearchWideToWmemchr(search, symbolTables,
+                                          numSearchWideToWmemchr))
+            rewriteSearchToMemmem(search, symbolTables, numSearchToMemmem,
+                                  numSearchEqualLengthToMemcmp);
         })
         .Case<StdEqualOp, StdEqualPredOp>([&](auto equal) {
           if (rewriteDequeCompareToBlockWalk(equal, symbolTables,

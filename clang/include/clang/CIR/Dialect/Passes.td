@@ -246,6 +246,8 @@ def LibOpt : Pass<"cir-lib-opt"> {
               "Number of search rewrites that also emitted the equal length memcmp arm, a subset of search-to-memmem">,
     Statistic<"numSearchToMemmem", "search-to-memmem",
               "Number of std search operations rewritten to memmem">,
+    Statistic<"numSearchWideToWmemchr", "search-wide-to-wmemchr",
+              "Number of wide element std search operations rewritten to a wmemchr candidate loop">,
     Statistic<"numEqualToMemcmp", "equal-to-memcmp",
               "Number of std equal operations rewritten to memcmp">,
     Statistic<"numMismatchToMemcmpLoop", "mismatch-to-memcmp-loop",

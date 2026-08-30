@@ -701,3 +701,213 @@ module attributes {cir.triple = "x86_64-unknown-linux-gnu",
 // CHECK: cir.insert_member
 // CHECK-NOT: cir.std.search
 }
+
+// -----
+
+!s16i = !cir.int<s, 16>
+!s32i = !cir.int<s, 32>
+!bi8 = !cir.int<u, 8, bitint>
+!wideiter = !cir.struct<class "std::__1::__wrap_iter<int *>" {data !cir.ptr<!s32i>}>
+
+module attributes {cir.triple = "x86_64-unknown-linux-gnu",
+                   cir.int_type_width = 32 : i32,
+                   cir.size_type_width = 64 : i32,
+                   cir.wchar_type_width = 32 : i32} {
+  cir.func private @search_ints(!cir.ptr<!s32i>, !cir.ptr<!s32i>, !cir.ptr<!s32i>, !cir.ptr<!s32i>) -> !cir.ptr<!s32i> func_info<#cir.func_identity<"std::search">>
+  cir.func private @search_shorts(!cir.ptr<!s16i>, !cir.ptr<!s16i>, !cir.ptr<!s16i>, !cir.ptr<!s16i>) -> !cir.ptr<!s16i> func_info<#cir.func_identity<"std::search">>
+  cir.func private @search_bitints(!cir.ptr<!bi8>, !cir.ptr<!bi8>, !cir.ptr<!bi8>, !cir.ptr<!bi8>) -> !cir.ptr<!bi8> func_info<#cir.func_identity<"std::search">>
+
+  cir.func @transforms_wide(%first1: !cir.ptr<!s32i>, %last1: !cir.ptr<!s32i>, %first2: !cir.ptr<!s32i>, %last2: !cir.ptr<!s32i>) -> !cir.ptr<!s32i> {
+    %0 = cir.std.search(%first1 : !cir.ptr<!s32i>, %last1 : !cir.ptr<!s32i>, %first2 : !cir.ptr<!s32i>, %last2 : !cir.ptr<!s32i>, @search_ints) -> !cir.ptr<!s32i> {cir.wide_char_params}
+    cir.return %0 : !cir.ptr<!s32i>
+  }
+// wmemchr proposes whole element candidates among the offsets that leave
+// room for the needle, one memcmp verifies each, and a failed candidate
+// resumes one element later. The memcmp length is the element count
+// scaled to bytes.
+// CHECK-LABEL: cir.func @transforms_wide
+// CHECK-SAME: (%[[FIRST1:.*]]: !cir.ptr<!s32i>, %[[LAST1:.*]]: !cir.ptr<!s32i>, %[[FIRST2:.*]]: !cir.ptr<!s32i>, %[[LAST2:.*]]: !cir.ptr<!s32i>)
+// CHECK-NOT: cir.std.search
+// CHECK: %[[SCAN:.*]] = cir.alloca "search_scan_off"
+// CHECK: %[[RES:.*]] = cir.alloca "search_result"
+// CHECK: %[[ESIZE:.*]] = cir.const #cir.int<4> : !u64i
+// CHECK: %[[HAYLEN:.*]] = cir.ptr_diff %[[LAST1]], %[[FIRST1]] : !cir.ptr<!s32i> -> !u64i
+// CHECK: %[[NEEDLELEN:.*]] = cir.ptr_diff %[[LAST2]], %[[FIRST2]] : !cir.ptr<!s32i> -> !u64i
+// CHECK: %[[NEEDLEBYTES:.*]] = cir.mul %[[NEEDLELEN]], %[[ESIZE]] : !u64i
+// CHECK: cir.libc.memcmp(%{{.*}}, %{{.*}}, %[[NEEDLEBYTES]])
+// CHECK: %[[SUB:.*]] = cir.sub %[[HAYLEN]], %[[NEEDLELEN]] : !u64i
+// CHECK: %[[CANDS:.*]] = cir.add %[[SUB]], %{{.*}} : !u64i
+// CHECK: %[[SOUGHT:.*]] = cir.load %[[FIRST2]] : !cir.ptr<!s32i>, !s32i
+// CHECK: cir.while {
+// CHECK: %[[OFF:.*]] = cir.load %[[SCAN]]
+// CHECK: cir.cmp lt %[[OFF]], %[[CANDS]] : !u64i
+// CHECK: %[[SCANPTR:.*]] = cir.ptr_stride %[[FIRST1]], %[[OFF]] : (!cir.ptr<!s32i>, !u64i) -> !cir.ptr<!s32i>
+// CHECK: %[[CAND:.*]] = cir.libc.wmemchr(%[[SCANPTR]], %[[SOUGHT]], %{{.*}}) : !cir.ptr<!s32i>, !s32i, !u64i
+// CHECK: cir.libc.memcmp(%{{.*}}, %{{.*}}, %[[NEEDLEBYTES]])
+// CHECK: cir.store %[[CAND]], %[[RES]]
+// CHECK: cir.ptr_diff %[[CAND]], %[[FIRST1]] : !cir.ptr<!s32i> -> !u64i
+// CHECK: cir.load %[[RES]]
+// CHECK-NOT: cir.std.search
+
+  cir.func @keeps_wide_marker_on_wrong_width(%first1: !cir.ptr<!s16i>, %last1: !cir.ptr<!s16i>, %first2: !cir.ptr<!s16i>, %last2: !cir.ptr<!s16i>) -> !cir.ptr<!s16i> {
+    %0 = cir.std.search(%first1 : !cir.ptr<!s16i>, %last1 : !cir.ptr<!s16i>, %first2 : !cir.ptr<!s16i>, %last2 : !cir.ptr<!s16i>, @search_shorts) -> !cir.ptr<!s16i> {cir.wide_char_params}
+    cir.return %0 : !cir.ptr<!s16i>
+  }
+// A short element disagrees with the recorded wchar width, so the wide
+// marker buys nothing.
+// CHECK-LABEL: @keeps_wide_marker_on_wrong_width
+// CHECK: cir.std.search
+// CHECK-NOT: cir.libc.wmemchr
+
+  cir.func @keeps_wide_unmarked(%first1: !cir.ptr<!s32i>, %last1: !cir.ptr<!s32i>, %first2: !cir.ptr<!s32i>, %last2: !cir.ptr<!s32i>) -> !cir.ptr<!s32i> {
+    %0 = cir.std.search(%first1 : !cir.ptr<!s32i>, %last1 : !cir.ptr<!s32i>, %first2 : !cir.ptr<!s32i>, %last2 : !cir.ptr<!s32i>, @search_ints) -> !cir.ptr<!s32i>
+    cir.return %0 : !cir.ptr<!s32i>
+  }
+// CHECK-LABEL: @keeps_wide_unmarked
+// CHECK: cir.std.search
+// CHECK-NOT: cir.libc.wmemchr
+
+  cir.func @keeps_narrow_marker_on_wide_element(%first1: !cir.ptr<!s32i>, %last1: !cir.ptr<!s32i>, %first2: !cir.ptr<!s32i>, %last2: !cir.ptr<!s32i>) -> !cir.ptr<!s32i> {
+    %0 = cir.std.search(%first1 : !cir.ptr<!s32i>, %last1 : !cir.ptr<!s32i>, %first2 : !cir.ptr<!s32i>, %last2 : !cir.ptr<!s32i>, @search_ints) -> !cir.ptr<!s32i> {cir.narrow_char_params}
+    cir.return %0 : !cir.ptr<!s32i>
+  }
+// CHECK-LABEL: @keeps_narrow_marker_on_wide_element
+// CHECK: cir.std.search
+// CHECK-NOT: cir.libc.wmemchr
+// CHECK-NOT: cir.libc.memmem
+
+  cir.func @keeps_bitint_element(%first1: !cir.ptr<!bi8>, %last1: !cir.ptr<!bi8>, %first2: !cir.ptr<!bi8>, %last2: !cir.ptr<!bi8>) -> !cir.ptr<!bi8> {
+    %0 = cir.std.search(%first1 : !cir.ptr<!bi8>, %last1 : !cir.ptr<!bi8>, %first2 : !cir.ptr<!bi8>, %last2 : !cir.ptr<!bi8>, @search_bitints) -> !cir.ptr<!bi8> {cir.narrow_char_params}
+    cir.return %0 : !cir.ptr<!bi8>
+  }
+// BitInt belongs to a separate type family, so a forged marker on it
+// rewrites nothing.
+// CHECK-LABEL: @keeps_bitint_element
+// CHECK: cir.std.search
+// CHECK-NOT: cir.libc.memmem
+// CHECK-NOT: cir.libc.wmemchr
+
+  cir.func @keeps_wide_without_wmemchr(%first1: !cir.ptr<!s32i>, %last1: !cir.ptr<!s32i>, %first2: !cir.ptr<!s32i>, %last2: !cir.ptr<!s32i>) -> !cir.ptr<!s32i> attributes {nobuiltins = ["wmemchr"]} {
+    %0 = cir.std.search(%first1 : !cir.ptr<!s32i>, %last1 : !cir.ptr<!s32i>, %first2 : !cir.ptr<!s32i>, %last2 : !cir.ptr<!s32i>, @search_ints) -> !cir.ptr<!s32i> {cir.wide_char_params}
+    cir.return %0 : !cir.ptr<!s32i>
+  }
+// CHECK-LABEL: @keeps_wide_without_wmemchr
+// CHECK: cir.std.search
+// CHECK-NOT: cir.libc.wmemchr
+
+  cir.func @keeps_wide_without_memcmp(%first1: !cir.ptr<!s32i>, %last1: !cir.ptr<!s32i>, %first2: !cir.ptr<!s32i>, %last2: !cir.ptr<!s32i>) -> !cir.ptr<!s32i> attributes {nobuiltins = ["memcmp"]} {
+    %0 = cir.std.search(%first1 : !cir.ptr<!s32i>, %last1 : !cir.ptr<!s32i>, %first2 : !cir.ptr<!s32i>, %last2 : !cir.ptr<!s32i>, @search_ints) -> !cir.ptr<!s32i> {cir.wide_char_params}
+    cir.return %0 : !cir.ptr<!s32i>
+  }
+// Every candidate is verified by one memcmp, so its absence declines the
+// whole rewrite.
+// CHECK-LABEL: @keeps_wide_without_memcmp
+// CHECK: cir.std.search
+// CHECK-NOT: cir.libc.wmemchr
+
+  cir.func private @search_wrapped_ints(!wideiter, !wideiter, !wideiter, !wideiter) -> !wideiter func_info<#cir.func_identity<"std::search">>
+
+  cir.func @transforms_wide_wrapped(%first1: !wideiter, %last1: !wideiter, %first2: !wideiter, %last2: !wideiter) -> !wideiter {
+    %0 = cir.std.search(%first1 : !wideiter, %last1 : !wideiter, %first2 : !wideiter, %last2 : !wideiter, @search_wrapped_ints) -> !wideiter {cir.wide_char_params}
+    cir.return %0 : !wideiter
+  }
+// The single member wrapper unwraps for the loop and the result record is
+// rebuilt around the found pointer.
+// CHECK-LABEL: cir.func @transforms_wide_wrapped
+// CHECK: cir.extract_member %{{.*}}[0] : !rec_std3A3A__13A3A__wrap_iter3Cint_2A3E -> !cir.ptr<!s32i>
+// CHECK: cir.libc.wmemchr
+// CHECK: cir.insert_member %{{.*}}[0], %{{.*}} : !rec_std3A3A__13A3A__wrap_iter3Cint_2A3E, !cir.ptr<!s32i>
+// CHECK-NOT: cir.std.search
+
+  cir.func @keeps_wide_half_wrapped(%first1: !wideiter, %last1: !wideiter, %first2: !cir.ptr<!s32i>, %last2: !cir.ptr<!s32i>) -> !wideiter {
+    %0 = cir.std.search(%first1 : !wideiter, %last1 : !wideiter, %first2 : !cir.ptr<!s32i>, %last2 : !cir.ptr<!s32i>, @search_wrapped_ints) -> !wideiter {cir.wide_char_params}
+    cir.return %0 : !wideiter
+  }
+// CHECK-LABEL: @keeps_wide_half_wrapped
+// CHECK: cir.std.search
+// CHECK-NOT: cir.libc.wmemchr
+}
+
+// -----
+
+!s32i = !cir.int<s, 32>
+
+// Without the recorded wchar width the wide marker licenses nothing.
+module attributes {cir.triple = "x86_64-unknown-linux-gnu",
+                   cir.int_type_width = 32 : i32,
+                   cir.size_type_width = 64 : i32} {
+  cir.func private @search_ints(!cir.ptr<!s32i>, !cir.ptr<!s32i>, !cir.ptr<!s32i>, !cir.ptr<!s32i>) -> !cir.ptr<!s32i> func_info<#cir.func_identity<"std::search">>
+
+  cir.func @keeps_wide_without_recorded_width(%first1: !cir.ptr<!s32i>, %last1: !cir.ptr<!s32i>, %first2: !cir.ptr<!s32i>, %last2: !cir.ptr<!s32i>) -> !cir.ptr<!s32i> {
+    %0 = cir.std.search(%first1 : !cir.ptr<!s32i>, %last1 : !cir.ptr<!s32i>, %first2 : !cir.ptr<!s32i>, %last2 : !cir.ptr<!s32i>, @search_ints) -> !cir.ptr<!s32i> {cir.wide_char_params}
+    cir.return %0 : !cir.ptr<!s32i>
+  }
+// CHECK-LABEL: @keeps_wide_without_recorded_width
+// CHECK: cir.std.search
+// CHECK-NOT: cir.libc.wmemchr
+}
+
+// -----
+
+!s32i = !cir.int<s, 32>
+!s64i = !cir.int<s, 64>
+
+module attributes {cir.triple = "x86_64-unknown-linux-gnu",
+                   cir.int_type_width = 32 : i32,
+                   cir.size_type_width = 64 : i32,
+                   cir.wchar_type_width = 32 : i32} {
+  cir.func private @search_ints(!cir.ptr<!s32i>, !cir.ptr<!s32i>, !cir.ptr<!s32i>, !cir.ptr<!s32i>) -> !cir.ptr<!s32i> func_info<#cir.func_identity<"std::search">>
+  cir.global "private" internal @wide_storage = #cir.zero : !cir.array<!s32i x 4>
+  cir.global "private" internal @wide_pattern = #cir.zero : !cir.array<!s32i x 2>
+
+  cir.global external @global_wide_hit = ctor : !cir.ptr<!s32i> {
+    %0 = cir.get_global @wide_storage : !cir.ptr<!cir.array<!s32i x 4>>
+    %1 = cir.cast array_to_ptrdecay %0 : !cir.ptr<!cir.array<!s32i x 4>> -> !cir.ptr<!s32i>
+    %2 = cir.const #cir.int<4> : !s64i
+    %3 = cir.ptr_stride %1, %2 : (!cir.ptr<!s32i>, !s64i) -> !cir.ptr<!s32i>
+    %4 = cir.get_global @wide_pattern : !cir.ptr<!cir.array<!s32i x 2>>
+    %5 = cir.cast array_to_ptrdecay %4 : !cir.ptr<!cir.array<!s32i x 2>> -> !cir.ptr<!s32i>
+    %6 = cir.const #cir.int<2> : !s64i
+    %7 = cir.ptr_stride %5, %6 : (!cir.ptr<!s32i>, !s64i) -> !cir.ptr<!s32i>
+    %8 = cir.std.search(%1 : !cir.ptr<!s32i>, %3 : !cir.ptr<!s32i>, %5 : !cir.ptr<!s32i>, %7 : !cir.ptr<!s32i>, @search_ints) -> !cir.ptr<!s32i> {cir.wide_char_params}
+    %9 = cir.get_global @global_wide_hit : !cir.ptr<!cir.ptr<!s32i>>
+    cir.store %8, %9 : !cir.ptr<!s32i>, !cir.ptr<!cir.ptr<!s32i>>
+  }
+// The loop's allocas have no home in a global initializer region, so the
+// wide form stays and lowers back to the call.
+// CHECK-LABEL: cir.global external @global_wide_hit = ctor
+// CHECK: cir.std.search
+// CHECK-NOT: cir.libc.wmemchr
+}
+
+// -----
+
+// A module that already declares wmemchr with the other signedness makes
+// the candidate loop adopt that signature and cast at the call boundary.
+!u32i = !cir.int<u, 32>
+!s32i = !cir.int<s, 32>
+!u64i = !cir.int<u, 64>
+
+module attributes {cir.triple = "x86_64-unknown-linux-gnu",
+                   cir.int_type_width = 32 : i32,
+                   cir.size_type_width = 64 : i32,
+                   cir.wchar_type_width = 32 : i32} {
+  cir.func private @wmemchr(!cir.ptr<!u32i>, !u32i, !u64i) -> !cir.ptr<!u32i>
+  cir.func private @search_ints(!cir.ptr<!s32i>, !cir.ptr<!s32i>, !cir.ptr<!s32i>, !cir.ptr<!s32i>) -> !cir.ptr<!s32i> func_info<#cir.func_identity<"std::search">>
+
+  cir.func @transforms_flipped_signedness(%first1: !cir.ptr<!s32i>, %last1: !cir.ptr<!s32i>, %first2: !cir.ptr<!s32i>, %last2: !cir.ptr<!s32i>) -> !cir.ptr<!s32i> {
+    %0 = cir.std.search(%first1 : !cir.ptr<!s32i>, %last1 : !cir.ptr<!s32i>, %first2 : !cir.ptr<!s32i>, %last2 : !cir.ptr<!s32i>, @search_ints) -> !cir.ptr<!s32i> {cir.wide_char_params}
+    cir.return %0 : !cir.ptr<!s32i>
+  }
+// The null compare and the offset difference both run on the pointer cast
+// back to the element type.
+// CHECK-LABEL: cir.func @transforms_flipped_signedness
+// CHECK: %[[FSOUGHT:.*]] = cir.cast integral %{{.*}} : !s32i -> !u32i
+// CHECK: %[[FSRC:.*]] = cir.cast bitcast %{{.*}} : !cir.ptr<!s32i> -> !cir.ptr<!u32i>
+// CHECK: %[[FCAND:.*]] = cir.libc.wmemchr(%[[FSRC]], %[[FSOUGHT]], %{{.*}}) : !cir.ptr<!u32i>, !u32i, !u64i
+// CHECK: %[[FBACK:.*]] = cir.cast bitcast %[[FCAND]] : !cir.ptr<!u32i> -> !cir.ptr<!s32i>
+// CHECK: %[[FNULL:.*]] = cir.const #cir.ptr<null> : !cir.ptr<!s32i>
+// CHECK: cir.cmp eq %[[FBACK]], %[[FNULL]] : !cir.ptr<!s32i>
+// CHECK: cir.ptr_diff %[[FBACK]], %{{.*}} : !cir.ptr<!s32i> -> !u64i
+// CHECK-NOT: cir.std.search
+}

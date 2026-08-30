@@ -41,7 +41,13 @@ unsigned char *rewritten_search(unsigned char *first1, unsigned char *last1,
   return std::search(first1, last1, first2, last2);
 }
 
-int *declined_search(int *first1, int *last1, int *first2, int *last2) {
+short *declined_search(short *first1, short *last1, short *first2,
+                       short *last2) {
+  return std::search(first1, last1, first2, last2);
+}
+
+int *rewritten_wide_search(int *first1, int *last1, int *first2,
+                           int *last2) {
   return std::search(first1, last1, first2, last2);
 }
 
@@ -111,7 +117,8 @@ mismatch_bounded_pred_four(char *first1, char *last1, char *first2,
 // STATS-NEXT: (S) 2 raised-std-mismatch-bounded
 // STATS-NEXT: (S) 4 raised-std-mismatch-bounded-pred
 // STATS-NEXT: (S) 3 raised-std-mismatch-pred
-// STATS: (S) 2 raised-std-search
+// STATS: (S) 3 raised-std-search
 // STATS: LibOpt
 // STATS: (S) 1 search-equal-length-to-memcmp
 // STATS: (S) 1 search-to-memmem
+// STATS: (S) 1 search-wide-to-wmemchr
