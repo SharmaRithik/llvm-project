@@ -373,12 +373,15 @@ void CIRGenModule::constructAttributeList(
       if (attrOnCallSite) {
         std::optional<cir::KnownFuncKind> kind = getKnownFuncKind(func);
         bool narrowSearch = false;
+        bool wideSearch = false;
         if (kind == cir::KnownFuncKind::StdSearch) {
           // This makes the four iterator overload explicit instead of relying
-          // on the marker helper. Wider elements are unsound for memmem since a
-          // byte level match can start inside an element and produce a
-          // misaligned false positive.
+          // on the marker helper. A byte level match can start inside a wider
+          // element and produce a misaligned false positive, so the wide
+          // marker licenses only a rewrite that filters candidates to element
+          // boundaries.
           narrowSearch = func->getNumParams() == 4 && hasNarrowCharParams(func);
+          wideSearch = func->getNumParams() == 4 && hasWideCharParams(func);
         }
         if (((kind == cir::KnownFuncKind::StdFind ||
               kind == cir::KnownFuncKind::StdEqual ||
@@ -394,6 +397,7 @@ void CIRGenModule::constructAttributeList(
                    ((kind == cir::KnownFuncKind::StdEqual ||
                      kind == cir::KnownFuncKind::StdMismatch) &&
                     hasWideCharCompareParams(func)) ||
+                   wideSearch ||
                    (kind == cir::KnownFuncKind::StdRangesFind &&
                     hasWideCharRangesFindParams(func))) {
           // memcmp equality needs only a padding free element, so the

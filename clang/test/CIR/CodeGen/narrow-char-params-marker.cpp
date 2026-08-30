@@ -849,9 +849,13 @@ char *search_wrapped(std::span_iter<char *> first1,
 int *search_int(int *first1, int *last1, int *first2, int *last2) {
   return std::search(first1, last1, first2, last2);
 }
+// The wchar width int gets the wide marker, not the narrow one. The
+// attribute dictionary prints alphabetically, so the narrow check sits
+// between the call and the wide marker where the narrow name would land.
 // CHECK-LABEL: cir.func{{.*}} @_Z10search_intPiS_S_S_
-// CHECK: cir.call @_ZNSt3__16searchIPiS1_EET_S2_S2_T0_S3_
+// CHECK: cir.call @_ZNSt3__16searchIPiS1_EET_S2_S2_T0_S3_(
 // CHECK-NOT: cir.narrow_char_params
+// CHECK-SAME: cir.wide_char_params
 
 char *search_mixed(char *first1, char *last1, unsigned char *first2,
                    unsigned char *last2) {
@@ -866,8 +870,20 @@ wchar_t *search_wchar(wchar_t *first1, wchar_t *last1, wchar_t *first2,
   return std::search(first1, last1, first2, last2);
 }
 // CHECK-LABEL: cir.func{{.*}} @_Z12search_wcharPwS_S_S_
-// CHECK: cir.call @_ZNSt3__16searchIPwS1_EET_S2_S2_T0_S3_
+// CHECK: cir.call @_ZNSt3__16searchIPwS1_EET_S2_S2_T0_S3_(
 // CHECK-NOT: cir.narrow_char_params
+// CHECK-SAME: cir.wide_char_params
+
+short *search_short(short *first1, short *last1, short *first2,
+                    short *last2) {
+  return std::search(first1, last1, first2, last2);
+}
+// short is not a trusted builtin kind for the wide whitelist on any
+// target, so it gets neither marker.
+// CHECK-LABEL: cir.func{{.*}} @_Z12search_shortPsS_S_S_
+// CHECK: cir.call @_ZNSt3__16searchIPsS1_EET_S2_S2_T0_S3_
+// CHECK-NOT: cir.narrow_char_params
+// CHECK-NOT: cir.wide_char_params
 
 volatile char *search_volatile(volatile char *first1, volatile char *last1,
                                volatile char *first2,
