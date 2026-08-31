@@ -220,15 +220,14 @@ unsigned char *test_byte_find(unsigned char *first, unsigned char *last,
 // CHECK-NEXT: }, false {
 // CHECK: %[[BYTE:.*]] = cir.load %arg2 : !cir.ptr<!u8i>, !u8i
 // CHECK: %[[LEN:.*]] = cir.ptr_diff %[[LAST]], %[[FIRST]] : !cir.ptr<!u8i> -> !u64i
-// CHECK: %[[SRC:.*]] = cir.cast bitcast %[[FIRST]] : !cir.ptr<!u8i> -> !cir.ptr<!void>
 // CHECK: %[[PATTERN:.*]] = cir.cast integral %[[BYTE]] : !u8i -> !s32i
-// CHECK: %[[PTR:.*]] = cir.libc.memchr(%[[SRC]], %[[PATTERN]], %[[LEN]]) : !cir.ptr<!void>, !s32i, !u64i
-// CHECK: %[[RES:.*]] = cir.cast bitcast %[[PTR]] : !cir.ptr<!void> -> !cir.ptr<!u8i>
-// CHECK: %[[NULL:.*]] = cir.const #cir.ptr<null> : !cir.ptr<!u8i>
-// CHECK: %[[MISS:.*]] = cir.cmp eq %[[RES]], %[[NULL]]
-// CHECK: %[[SELECT:.*]] = cir.select if %[[MISS]] then %[[LAST]] else %[[RES]]
-// CHECK-NEXT: cir.yield %[[SELECT]] : !cir.ptr<!u8i>
-// CHECK-NEXT: }) : (!cir.bool) -> !cir.ptr<!u8i>
+// The inline head words come first, the remainder goes to the call.
+// CHECK: %[[BCAST:.*]] = cir.mul %{{.*}}, %{{.*}} : !u64i
+// CHECK: %[[WORD:.*]] = cir.load align(1) %{{.*}} : !cir.ptr<!u64i>, !u64i
+// CHECK: cir.xor %[[WORD]], %[[BCAST]] : !u64i
+// CHECK: cir.ctz %{{.*}} poison_zero : !u64i
+// CHECK: cir.libc.memchr(%{{.*}}, %[[PATTERN]], %{{.*}}) : !cir.ptr<!void>, !s32i, !u64i
+// CHECK: cir.select if %{{.*}} then %[[LAST]] else %{{.*}}
 
 char *test_char_find(char *first, char *last, const char &value) {
   return std::find(first, last, value);
@@ -237,10 +236,14 @@ char *test_char_find(char *first, char *last, const char &value) {
 // CHECK-NOT: cir.call
 // CHECK: %[[CLEN:.*]] = cir.ptr_diff %{{.*}}, %{{.*}} : !cir.ptr<!s8i> -> !u64i
 // CHECK: cir.cast integral %{{.*}} : !s8i -> !s32i
-// CHECK: %[[CPTR:.*]] = cir.libc.memchr(%{{.*}}, %{{.*}}, %[[CLEN]]) : !cir.ptr<!void>, !s32i, !u64i
-// CHECK: %[[CRES:.*]] = cir.cast bitcast %[[CPTR]] : !cir.ptr<!void> -> !cir.ptr<!s8i>
-// CHECK: %[[CMISS:.*]] = cir.cmp eq %[[CRES]], %{{.*}}
-// CHECK: cir.select if %[[CMISS]] then %{{.*}} else %[[CRES]]
+// The signed element widens through the unsigned byte for the broadcast.
+// CHECK: cir.cast integral %{{.*}} : !s8i -> !u8i
+// CHECK: cir.load align(1) %{{.*}} : !cir.ptr<!u64i>, !u64i
+// CHECK: %[[CPTR:.*]] = cir.libc.memchr(%{{.*}}, %{{.*}}, %{{.*}}) : !cir.ptr<!void>, !s32i, !u64i
+// CHECK: cir.cast bitcast %[[CPTR]] : !cir.ptr<!void> -> !cir.ptr<!s8i>
+// The null to last mapping runs once on the joined result of the head
+// arms and the calls.
+// CHECK: cir.select if %{{.*}} then %{{.*}} else %{{.*}}
 
 signed char *test_high_bit_find(signed char *first, signed char *last) {
   signed char value = -128;
@@ -284,10 +287,9 @@ signed char *test_signed_char_find(signed char *first, signed char *last,
 // CHECK-NOT: cir.call
 // CHECK: %[[SLEN:.*]] = cir.ptr_diff %{{.*}}, %{{.*}} : !cir.ptr<!s8i> -> !u64i
 // CHECK: cir.cast integral %{{.*}} : !s8i -> !s32i
-// CHECK: %[[SPTR:.*]] = cir.libc.memchr(%{{.*}}, %{{.*}}, %[[SLEN]]) : !cir.ptr<!void>, !s32i, !u64i
-// CHECK: %[[SRES:.*]] = cir.cast bitcast %[[SPTR]] : !cir.ptr<!void> -> !cir.ptr<!s8i>
-// CHECK: %[[SMISS:.*]] = cir.cmp eq %[[SRES]], %{{.*}}
-// CHECK: cir.select if %[[SMISS]] then %{{.*}} else %[[SRES]]
+// CHECK: %[[SPTR:.*]] = cir.libc.memchr(%{{.*}}, %{{.*}}, %{{.*}}) : !cir.ptr<!void>, !s32i, !u64i
+// CHECK: cir.cast bitcast %[[SPTR]] : !cir.ptr<!void> -> !cir.ptr<!s8i>
+// CHECK: cir.select if %{{.*}} then %{{.*}} else %{{.*}}
 
 int *test_int_find(int *first, int *last, const int &value) {
   return std::find(first, last, value);
