@@ -21,15 +21,31 @@ module attributes {cir.triple = "x86_64-unknown-linux-gnu", cir.size_type_width 
 // CHECK-NEXT: }, false {
 // CHECK: %[[BYTE:.*]] = cir.load %[[VALUE]] : !cir.ptr<!u8i>, !u8i
 // CHECK: %[[LEN:.*]] = cir.ptr_diff %[[LAST]], %[[FIRST]] : !cir.ptr<!u8i> -> !u64i
-// CHECK: %[[SRC:.*]] = cir.cast bitcast %[[FIRST]] : !cir.ptr<!u8i> -> !cir.ptr<!void>
 // CHECK: %[[PATTERN:.*]] = cir.cast integral %[[BYTE]] : !u8i -> !s32i
-// CHECK: %[[PTR:.*]] = cir.libc.memchr(%[[SRC]], %[[PATTERN]], %[[LEN]]) : !cir.ptr<!void>, !s32i, !u64i
-// CHECK: %[[RES:.*]] = cir.cast bitcast %[[PTR]] : !cir.ptr<!void> -> !cir.ptr<!u8i>
-// CHECK: %[[NULL:.*]] = cir.const #cir.ptr<null> : !cir.ptr<!u8i>
-// CHECK: %[[MISS:.*]] = cir.cmp eq %[[RES]], %[[NULL]] : !cir.ptr<!u8i>
-// CHECK: %[[SELECT:.*]] = cir.select if %[[MISS]] then %[[LAST]] else %[[RES]]
-// CHECK-NEXT: cir.yield %[[SELECT]] : !cir.ptr<!u8i>
-// CHECK-NEXT: }) : (!cir.bool) -> !cir.ptr<!u8i>
+// The head scans the first words inline when the range admits them. The
+// broadcast byte xors a match down to zero, the borrow mask exposes it,
+// and ctz names the first one, then the remainder goes to the call.
+// CHECK: %[[LANE:.*]] = cir.cast integral %[[BYTE]] : !u8i -> !u64i
+// CHECK: %[[ONES:.*]] = cir.const #cir.int<72340172838076673> : !u64i
+// CHECK: %[[HIGHS:.*]] = cir.const #cir.int<9259542123273814144> : !u64i
+// CHECK: %[[BCAST:.*]] = cir.mul %[[LANE]], %[[ONES]] : !u64i
+// The guard is what keeps the eight byte load inside the range, so the
+// bound is pinned rather than wildcarded.
+// CHECK: %[[G8:.*]] = cir.const #cir.int<8> : !u64i
+// CHECK: cir.cmp ge %[[LEN]], %[[G8]] : !u64i
+// CHECK: %[[WADDR:.*]] = cir.cast bitcast %[[FIRST]] : !cir.ptr<!u8i> -> !cir.ptr<!u64i>
+// CHECK: %[[WORD:.*]] = cir.load align(1) %[[WADDR]] : !cir.ptr<!u64i>, !u64i
+// CHECK: %[[Y:.*]] = cir.xor %[[WORD]], %[[BCAST]] : !u64i
+// CHECK: %[[BORROW:.*]] = cir.sub %[[Y]], %[[ONES]] : !u64i
+// CHECK: %[[INV:.*]] = cir.not %[[Y]] : !u64i
+// CHECK: %[[SPREAD:.*]] = cir.and %[[BORROW]], %[[INV]] : !u64i
+// CHECK: %[[HIT:.*]] = cir.and %[[SPREAD]], %[[HIGHS]] : !u64i
+// CHECK: cir.cmp ne %[[HIT]], %{{.*}} : !u64i
+// CHECK: %[[TZ:.*]] = cir.ctz %[[HIT]] poison_zero : !u64i
+// CHECK: cir.shift(right, %[[TZ]] : !u64i, %{{.*}} : !u64i) -> !u64i
+// CHECK: cir.ptr_stride %[[FIRST]], %{{.*}} : (!cir.ptr<!u8i>, !u64i) -> !cir.ptr<!u8i>
+// CHECK: cir.libc.memchr(%{{.*}}, %[[PATTERN]], %{{.*}}) : !cir.ptr<!void>, !s32i, !u64i
+// CHECK: cir.select if %{{.*}} then %[[LAST]] else %{{.*}}
 // CHECK: cir.return %[[RESULT]] : !cir.ptr<!u8i>
 
   cir.func @keeps_without_narrow(%arg0: !cir.ptr<!u8i>, %arg1: !cir.ptr<!u8i>, %arg2: !cir.ptr<!u8i>) -> !cir.ptr<!u8i> {
@@ -293,9 +309,11 @@ module attributes {cir.triple = "x86_64-unknown-linux-gnu",
     %0 = cir.std.find(%arg0 : !cir.ptr<!u8i>, %arg1 : !cir.ptr<!u8i>, %arg2 : !cir.ptr<!u8i>, @_ZSt4findIPhhET_S1_S1_RKT0_) -> !cir.ptr<!u8i> {cir.narrow_char_params}
     cir.return %0 : !cir.ptr<!u8i>
   }
+// The head fallback arms each carry their own call site, and every one
+// of them has to use the recorded size width.
 // CHECK-LABEL: @rewrites_with_32_bit_size_record
 // CHECK: cir.libc.memchr({{.*}}) : !cir.ptr<!void>, !s32i, !u32i
-// CHECK-NOT: cir.libc.memchr
+// CHECK-NOT: cir.libc.memchr({{.*}}!u64i
 }
 
 // -----
@@ -642,12 +660,11 @@ module attributes {cir.triple = "x86_64-unknown-linux-gnu",
 // CHECK: }, false {
 // CHECK: %[[BYTE:.*]] = cir.load %[[VALUE]] : !cir.ptr<!s8i>, !s8i
 // CHECK: %[[LEN:.*]] = cir.ptr_diff %[[LAST]], %[[FIRST]] : !cir.ptr<!s8i> -> !u64i
-// CHECK: %[[SRC:.*]] = cir.cast bitcast %[[FIRST]] : !cir.ptr<!s8i> -> !cir.ptr<!void>
 // CHECK: %[[PATTERN:.*]] = cir.cast integral %[[BYTE]] : !s8i -> !s32i
-// CHECK: %[[PTR:.*]] = cir.libc.memchr(%[[SRC]], %[[PATTERN]], %[[LEN]]) : !cir.ptr<!void>, !s32i, !u64i
-// CHECK: %[[RES:.*]] = cir.cast bitcast %[[PTR]] : !cir.ptr<!void> -> !cir.ptr<!s8i>
-// CHECK: %[[MISS:.*]] = cir.cmp eq %[[RES]], %{{.*}}
-// CHECK: cir.select if %[[MISS]] then %[[LAST]] else %[[RES]]
+// CHECK: cir.load align(1) %{{.*}} : !cir.ptr<!u64i>, !u64i
+// CHECK: cir.ctz %{{.*}} poison_zero : !u64i
+// CHECK: cir.libc.memchr(%{{.*}}, %[[PATTERN]], %{{.*}}) : !cir.ptr<!void>, !s32i, !u64i
+// CHECK: cir.select if %{{.*}} then %[[LAST]] else %{{.*}}
 // CHECK: %[[SEED:.*]] = cir.const #cir.undef : !rec_std3A3A__13A3A__wrap_iter3Cchar_2A3E
 // CHECK: %[[WRAPPED:.*]] = cir.insert_member %[[SEED]][0], %{{.*}}
 // CHECK: cir.return %[[WRAPPED]]
@@ -907,4 +924,27 @@ module attributes {cir.triple = "x86_64-unknown-linux-gnu",
 // CHECK-LABEL: @keeps_foreign_wmemchr_symbol
 // CHECK: cir.std.find_if
 // CHECK-NOT: cir.libc.wmemchr
+}
+
+// -----
+
+!u8i = !cir.int<u, 8>
+
+// ctz names the lowest lane, which is the first byte in memory only on a
+// little endian target, so a big endian module keeps the plain call shape.
+module attributes {cir.triple = "s390x-unknown-linux-gnu",
+                   cir.int_type_width = 32 : i32,
+                   cir.size_type_width = 64 : i32} {
+  cir.func private @_ZSt4findIPhhET_S1_S1_RKT0_(!cir.ptr<!u8i>, !cir.ptr<!u8i>, !cir.ptr<!u8i>) -> !cir.ptr<!u8i> func_info<#cir.func_identity<"std::find">>
+
+  cir.func @big_endian_keeps_plain_call(%arg0: !cir.ptr<!u8i>, %arg1: !cir.ptr<!u8i>, %arg2: !cir.ptr<!u8i>) -> !cir.ptr<!u8i> {
+    %0 = cir.std.find(%arg0 : !cir.ptr<!u8i>, %arg1 : !cir.ptr<!u8i>, %arg2 : !cir.ptr<!u8i>, @_ZSt4findIPhhET_S1_S1_RKT0_) -> !cir.ptr<!u8i> {cir.narrow_char_params}
+    cir.return %0 : !cir.ptr<!u8i>
+  }
+// CHECK-LABEL: @big_endian_keeps_plain_call
+// CHECK-NOT: cir.ctz
+// CHECK: %[[BELEN:.*]] = cir.ptr_diff %{{.*}}, %{{.*}} : !cir.ptr<!u8i> -> !u64i
+// CHECK-NOT: cir.ctz
+// CHECK: cir.libc.memchr(%{{.*}}, %{{.*}}, %[[BELEN]]) : !cir.ptr<!void>, !s32i, !u64i
+// CHECK-NOT: cir.ctz
 }

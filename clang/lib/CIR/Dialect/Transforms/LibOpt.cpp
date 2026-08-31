@@ -735,6 +735,13 @@ rewriteFindLikeToMemchr(OpT findOp, mlir::SymbolTableCollection &symbolTables,
   if (!hasEqSearchMarker(findOp, wide, predicateValue))
     return;
 
+  // The inline head before the memchr call reads whole words, and ctz on
+  // the hit mask picks the lowest lane, which is the first byte in memory
+  // only on a little endian target. The word arithmetic also wants a real
+  // 64 bit machine rather than paired halves.
+  const bool inlineHead =
+      !wide && env->triple.isLittleEndian() && env->triple.isArch64Bit();
+
   mlir::ModuleOp moduleOp = env->moduleOp;
 
   unsigned patternWidth, sizeWidth;
@@ -819,12 +826,132 @@ rewriteFindLikeToMemchr(OpT findOp, mlir::SymbolTableCollection &symbolTables,
               if (callElemTy != elemTy)
                 res = builder.createBitcast(loc, res, iterTy);
             } else {
-              mlir::Value src =
-                  builder.createBitcast(loc, first, builder.getVoidPtrTy());
               mlir::Value pattern = builder.createIntCast(
                   sought, builder.getSIntNTy(patternWidth));
-              res = cir::MemChrOp::create(builder, loc, src, pattern, len);
-              res = builder.createBitcast(loc, res, iterTy);
+              // Emits the call over the range past byteOff. A zero length
+              // tail never reaches C, whose pointer argument must be valid
+              // even then, so it yields the not found null directly.
+              auto emitMemChrFrom = [&](uint64_t byteOff) -> mlir::Value {
+                if (!byteOff) {
+                  mlir::Value src =
+                      builder.createBitcast(loc, first, builder.getVoidPtrTy());
+                  mlir::Value r =
+                      cir::MemChrOp::create(builder, loc, src, pattern, len);
+                  return builder.createBitcast(loc, r, iterTy);
+                }
+                mlir::Value offV =
+                    builder.getUnsignedInt(loc, byteOff, sizeWidth);
+                mlir::Value hasTail =
+                    builder.createCompare(loc, cir::CmpOpKind::gt, len, offV);
+                return cir::TernaryOp::create(
+                           builder, loc, hasTail,
+                           [&](mlir::OpBuilder &, mlir::Location tl) {
+                             mlir::Value from = cir::PtrStrideOp::create(
+                                 builder, tl, iterTy, first, offV);
+                             mlir::Value src = builder.createBitcast(
+                                 tl, from, builder.getVoidPtrTy());
+                             mlir::Value tailLen =
+                                 builder.createSub(tl, len, offV);
+                             mlir::Value r = cir::MemChrOp::create(
+                                 builder, tl, src, pattern, tailLen);
+                             builder.createYield(
+                                 tl, builder.createBitcast(tl, r, iterTy));
+                           },
+                           [&](mlir::OpBuilder &, mlir::Location tl) {
+                             builder.createYield(
+                                 tl,
+                                 builder.getNullPtr(iterTy, tl).getResult());
+                           })
+                    .getResult();
+              };
+              if (!inlineHead) {
+                res = emitMemChrFrom(0);
+              } else {
+                // The first 32 bytes are scanned inline before the call.
+                // xor against the broadcast byte turns a match into a
+                // zero lane and the borrow trick exposes it in the mask.
+                auto u64Ty = builder.getUIntNTy(64);
+                auto sizeTy = builder.getUIntNTy(sizeWidth);
+                mlir::Value byteVal =
+                    builder.createIntCast(sought, builder.getUIntNTy(8));
+                mlir::Value soughtWide = builder.createIntCast(byteVal, u64Ty);
+                mlir::Value ones =
+                    builder.getUnsignedInt(loc, 0x0101010101010101ull, 64);
+                mlir::Value highs =
+                    builder.getUnsignedInt(loc, 0x8080808080808080ull, 64);
+                mlir::Value bcast = builder.createMul(loc, soughtWide, ones);
+                auto wordPtrTy = builder.getPointerTo(u64Ty);
+                auto step = [&](auto &&self, unsigned i) -> mlir::Value {
+                  if (i == 4)
+                    return emitMemChrFrom(32);
+                  mlir::Value fits = builder.createCompare(
+                      loc, cir::CmpOpKind::ge, len,
+                      builder.getUnsignedInt(loc, 8 * (i + 1), sizeWidth));
+                  return cir::TernaryOp::create(
+                             builder, loc, fits,
+                             [&](mlir::OpBuilder &, mlir::Location sl) {
+                               mlir::Value at = first;
+                               if (i)
+                                 at = cir::PtrStrideOp::create(
+                                     builder, sl, iterTy, first,
+                                     builder.getUnsignedInt(sl, 8 * i,
+                                                            sizeWidth));
+                               mlir::Value wordAddr =
+                                   builder.createBitcast(sl, at, wordPtrTy);
+                               // The range holds bytes, so the eight byte
+                               // load carries byte alignment.
+                               mlir::Value word =
+                                   builder.createAlignedLoad(sl, wordAddr, 1);
+                               mlir::Value y =
+                                   builder.createXor(sl, word, bcast);
+                               mlir::Value borrow =
+                                   builder.createSub(sl, y, ones);
+                               mlir::Value hit = builder.createAnd(
+                                   sl,
+                                   builder.createAnd(sl, borrow,
+                                                     builder.createNot(y)),
+                                   highs);
+                               mlir::Value anyHit = builder.createCompare(
+                                   sl, cir::CmpOpKind::ne, hit,
+                                   builder.getUnsignedInt(sl, 0, 64));
+                               mlir::Value r =
+                                   cir::TernaryOp::create(
+                                       builder, sl, anyHit,
+                                       [&](mlir::OpBuilder &,
+                                           mlir::Location hl) {
+                                         mlir::Value tz = cir::BitCtzOp::create(
+                                             builder, hl, hit, true);
+                                         mlir::Value byteIdx =
+                                             builder.createIntCast(
+                                                 builder.createShiftRight(
+                                                     hl, tz, 3),
+                                                 sizeTy);
+                                         if (i)
+                                           byteIdx = builder.createAdd(
+                                               hl, byteIdx,
+                                               builder.getUnsignedInt(
+                                                   hl, 8 * i, sizeWidth));
+                                         mlir::Value hitPtr =
+                                             cir::PtrStrideOp::create(
+                                                 builder, hl, iterTy, first,
+                                                 byteIdx);
+                                         builder.createYield(hl, hitPtr);
+                                       },
+                                       [&](mlir::OpBuilder &,
+                                           mlir::Location hl) {
+                                         builder.createYield(hl,
+                                                             self(self, i + 1));
+                                       })
+                                       .getResult();
+                               builder.createYield(sl, r);
+                             },
+                             [&](mlir::OpBuilder &, mlir::Location sl) {
+                               builder.createYield(sl, emitMemChrFrom(8 * i));
+                             })
+                      .getResult();
+                };
+                res = step(step, 0);
+              }
             }
             builder.createYield(
                 loc, builder.createSelect(loc, builder.createPtrIsNull(res),
