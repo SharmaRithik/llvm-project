@@ -403,6 +403,41 @@ void band_noninjective_statement(void) {
     }
 }
 
+// CHECK-DAG: recognized anchored loop band in @band_transposed_strict {{.*}} band memory safe candidate 0 locality improved 3 regressed 0 profitable
+// CHECK-DAG: distributed and interchanged 1 nested loop phase
+void band_transposed_strict(void) {
+  for (int i = 0; i < N; ++i)
+    for (int j = i + 1; j < N; ++j) {
+      B[i][j] = 0.0;
+      for (int k = 0; k < N; ++k)
+        B[i][j] += A[k][i] * A[k][j];
+      B[j][i] = B[i][j];
+    }
+}
+
+// CHECK-DAG: recognized anchored loop band in @band_transposed_inclusive {{.*}} band memory safe candidate 0 locality improved 3 regressed 0 profitable
+// CHECK-DAG: distributed and interchanged 1 nested loop phase
+void band_transposed_inclusive(void) {
+  for (int i = 0; i < N; ++i)
+    for (int j = i; j < N; ++j) {
+      B[i][j] = 0.0;
+      for (int k = 0; k < N; ++k)
+        B[i][j] += A[k][i] * A[k][j];
+      B[j][i] = B[i][j];
+    }
+}
+
+// CHECK-DAG: recognized anchored loop band in @band_transposed_offset {{.*}} band memory potential dependence
+void band_transposed_offset(void) {
+  for (int i = 0; i < N - 1; ++i)
+    for (int j = i + 1; j < N; ++j) {
+      B[i][j] = 0.0;
+      for (int k = 0; k < N; ++k)
+        B[i][j] += A[k][i] * A[k][j];
+      B[j][i + 1] = B[i][j];
+    }
+}
+
 // CHECK-DAG: recognized anchored loop band in @band_distribution_dependence {{.*}} band memory potential dependence
 void band_distribution_dependence(void) {
   for (int i = 0; i < N; ++i)
@@ -846,6 +881,32 @@ void rejected_volatile(void) {
 // INTERCHANGE-NEXT: [[SHIFTOUTERZERO:%[0-9]+]] = cir.const #cir.int<0>
 // INTERCHANGE-NEXT: cir.store{{.*}} [[SHIFTOUTERZERO]], [[SHIFTOUTERI]]
 // INTERCHANGE-NEXT: cir.for : cond {
+
+// INTERCHANGE-LABEL: cir.func dso_local @band_transposed_strict()
+// INTERCHANGE: [[TRANSPOSESTRICTI:%[0-9]+]] = cir.alloca "i"
+// INTERCHANGE: cir.for : cond {
+// INTERCHANGE: [[TRANSPOSESTRICTINITJ:%[0-9]+]] = cir.alloca "j"
+// INTERCHANGE: cir.for : cond {
+// INTERCHANGE: [[TRANSPOSESTRICTK:%[0-9]+]] = cir.alloca "k"
+// INTERCHANGE: cir.for : cond {
+// INTERCHANGE: } body {
+// INTERCHANGE: [[TRANSPOSESTRICTUPDATEJ:%[0-9]+]] = cir.alloca "j"
+// INTERCHANGE: cir.for : cond {
+// INTERCHANGE: [[TRANSPOSESTRICTCOPYJ:%[0-9]+]] = cir.alloca "j"
+// INTERCHANGE: cir.for : cond {
+
+// INTERCHANGE-LABEL: cir.func dso_local @band_transposed_inclusive()
+// INTERCHANGE: [[TRANSPOSEINCLUSIVEI:%[0-9]+]] = cir.alloca "i"
+// INTERCHANGE: cir.for : cond {
+// INTERCHANGE: [[TRANSPOSEINCLUSIVEINITJ:%[0-9]+]] = cir.alloca "j"
+// INTERCHANGE: cir.for : cond {
+// INTERCHANGE: [[TRANSPOSEINCLUSIVEK:%[0-9]+]] = cir.alloca "k"
+// INTERCHANGE: cir.for : cond {
+// INTERCHANGE: } body {
+// INTERCHANGE: [[TRANSPOSEINCLUSIVEUPDATEJ:%[0-9]+]] = cir.alloca "j"
+// INTERCHANGE: cir.for : cond {
+// INTERCHANGE: [[TRANSPOSEINCLUSIVECOPYJ:%[0-9]+]] = cir.alloca "j"
+// INTERCHANGE: cir.for : cond {
 
 // INTERCHANGE-LABEL: cir.func dso_local @band_distribution_dependence()
 // INTERCHANGE: [[DISTRIBUTIONJ:%[0-9]+]] = cir.alloca "j"

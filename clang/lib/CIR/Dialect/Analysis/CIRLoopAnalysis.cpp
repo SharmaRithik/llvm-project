@@ -427,6 +427,40 @@ static bool hasCommonInductionSubscript(const LoopMemoryAccess &lhs,
   return false;
 }
 
+static bool hasTransposedBandSubscripts(const LoopMemoryAccess &lhs,
+                                        const LoopMemoryAccess &rhs,
+                                        cir::AllocaOp anchor,
+                                        cir::AllocaOp outer) {
+  if (lhs.subscripts.size() != rhs.subscripts.size())
+    return false;
+
+  bool foundAnchorOuter = false;
+  bool foundOuterAnchor = false;
+  for (auto [lhsSubscript, rhsSubscript] :
+       llvm::zip(lhs.subscripts, rhs.subscripts)) {
+    if (lhsSubscript.isStructurallyEqual(rhsSubscript))
+      continue;
+    if (lhsSubscript.getKind() != LoopDomainExpr::Kind::Induction ||
+        rhsSubscript.getKind() != LoopDomainExpr::Kind::Induction)
+      return false;
+
+    cir::AllocaOp lhsInduction = lhsSubscript.getInduction();
+    cir::AllocaOp rhsInduction = rhsSubscript.getInduction();
+    if (lhsInduction == anchor && rhsInduction == outer &&
+        !foundAnchorOuter) {
+      foundAnchorOuter = true;
+      continue;
+    }
+    if (lhsInduction == outer && rhsInduction == anchor &&
+        !foundOuterAnchor) {
+      foundOuterAnchor = true;
+      continue;
+    }
+    return false;
+  }
+  return foundAnchorOuter && foundOuterAnchor;
+}
+
 static bool isInjectiveOverInductions(const LoopMemoryAccess &access,
                                       ArrayRef<cir::AllocaOp> inductions) {
   SmallVector<cir::AllocaOp, 3> found;
@@ -696,6 +730,9 @@ static bool areBandAccessesIndependent(
   if (isRecurrenceAccessPair(lhs, rhs, recurrences))
     return true;
   if (hasCommonInductionSubscript(lhs, rhs, band.outer.induction))
+    return true;
+  if (hasTransposedBandSubscripts(lhs, rhs, band.anchor.induction,
+                                  band.outer.induction))
     return true;
 
   if (lhs.subscripts.size() != rhs.subscripts.size())
