@@ -359,6 +359,23 @@ void outer_carried_recurrence(void) {
   }
 }
 
+// CHECK-DAG: recognized anchored loop band in @inclusive_invariant_band {{.*}} band memory safe candidate 0 locality improved 4 regressed 2 profitable
+// CHECK-DAG: distributed and interchanged 1 nested loop phase
+void inclusive_invariant_band(void) {
+  for (int i = 0; i < N; ++i)
+    for (int k = 0; k < N; ++k)
+      for (int j = 0; j <= i; ++j)
+        C[i][j] += A[i][k] * B[j][k] + B[i][k] * A[j][k];
+}
+
+// CHECK-DAG: recognized anchored loop band in @inclusive_dependent_band {{.*}} band memory safe candidate 0 locality improved 4 regressed 2 profitable
+void inclusive_dependent_band(void) {
+  for (int i = 0; i < N; ++i)
+    for (int k = 0; k < N - 1; ++k)
+      for (int j = 0; j <= k + 1; ++j)
+        C[i][j] += A[i][k] * B[j][k] + B[i][k] * A[j][k];
+}
+
 // CHECK-DAG: recognized anchored loop band in @shifted_outer_recurrence {{.*}} floating recurrences 0 band memory potential dependence
 void shifted_outer_recurrence(void) {
   for (int i = 0; i < N; ++i)
@@ -874,6 +891,24 @@ void rejected_volatile(void) {
 // INTERCHANGE: cir.for : cond {
 // INTERCHANGE: } body {
 // INTERCHANGE: [[UPDATEK:%[0-9]+]] = cir.alloca "k"
+// INTERCHANGE: cir.for : cond {
+
+// INTERCHANGE-LABEL: cir.func dso_local @inclusive_invariant_band()
+// INTERCHANGE: [[INCLUSIVEINVARIANTI:%[0-9]+]] = cir.alloca "i"
+// INTERCHANGE: cir.for : cond {
+// INTERCHANGE: [[INCLUSIVEINVARIANTJ:%[0-9]+]] = cir.alloca "j"
+// INTERCHANGE: cir.for : cond {
+// INTERCHANGE: cir.cmp le
+// INTERCHANGE: } body {
+// INTERCHANGE: [[INCLUSIVEINVARIANTK:%[0-9]+]] = cir.alloca "k"
+// INTERCHANGE: cir.for : cond {
+
+// INTERCHANGE-LABEL: cir.func dso_local @inclusive_dependent_band()
+// INTERCHANGE: [[INCLUSIVEDEPENDENTI:%[0-9]+]] = cir.alloca "i"
+// INTERCHANGE: cir.for : cond {
+// INTERCHANGE: [[INCLUSIVEDEPENDENTK:%[0-9]+]] = cir.alloca "k"
+// INTERCHANGE: cir.for : cond {
+// INTERCHANGE: [[INCLUSIVEDEPENDENTJ:%[0-9]+]] = cir.alloca "j"
 // INTERCHANGE: cir.for : cond {
 
 // INTERCHANGE-LABEL: cir.func dso_local @shifted_outer_recurrence()

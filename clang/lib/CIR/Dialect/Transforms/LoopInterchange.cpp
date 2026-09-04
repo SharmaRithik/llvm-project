@@ -9,6 +9,7 @@
 #include "PassDetail.h"
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/IRMapping.h"
+#include "mlir/Interfaces/SideEffectInterfaces.h"
 #include "clang/CIR/Dialect/Analysis/CIRAliasAnalysis.h"
 #include "clang/CIR/Dialect/Analysis/CIRLoopAnalysis.h"
 #include "clang/CIR/Dialect/IR/CIRDialect.h"
@@ -528,14 +529,18 @@ matchLoopInterchangeDomain(LoopNest &nest) {
   return std::nullopt;
 }
 
+static bool isForwardBandComparison(cir::CmpOpKind comparison) {
+  return comparison == cir::CmpOpKind::lt || comparison == cir::CmpOpKind::le;
+}
+
 template <typename LoopNest>
 static std::optional<DomainInterchangePlan>
 matchBandInterchangeDomain(LoopNest &nest) {
   if (std::optional<DomainInterchangePlan> plan =
           matchLoopInterchangeDomain(nest))
     return plan;
-  if (nest.outer.comparison.getKind() != cir::CmpOpKind::lt ||
-      nest.inner.comparison.getKind() != cir::CmpOpKind::lt ||
+  if (!isForwardBandComparison(nest.outer.comparison.getKind()) ||
+      !isForwardBandComparison(nest.inner.comparison.getKind()) ||
       nest.outer.conditionLHS.getKind() !=
           cir::LoopDomainExpr::Kind::Induction ||
       nest.outer.conditionLHS.getInduction() != nest.outer.induction ||
@@ -1214,6 +1219,668 @@ static unsigned applyBandRewrite(BandRewritePlan &plan) {
   return interchanged;
 }
 
+struct TileAddress {
+  Value base;
+  SmallVector<cir::LoopDomainExpr, 2> subscripts;
+};
+
+static FailureOr<Value> stripTileIndexCast(Value value) {
+  while (auto cast = value.getDefiningOp<cir::CastOp>()) {
+    if (cast.getKind() != cir::CastKind::integral)
+      return failure();
+
+    auto sourceType = dyn_cast<cir::IntType>(cast.getSrc().getType());
+    auto resultType = dyn_cast<cir::IntType>(cast.getResult().getType());
+    if (!sourceType || !resultType ||
+        sourceType.isSigned() != resultType.isSigned() ||
+        sourceType.getWidth() > resultType.getWidth())
+      return failure();
+    value = cast.getSrc();
+  }
+  return value;
+}
+
+static FailureOr<TileAddress>
+analyzeTileAddress(Value address, ArrayRef<cir::AllocaOp> inductions) {
+  SmallVector<cir::LoopDomainExpr, 2> subscripts;
+  Value current = address;
+  while (true) {
+    Value index;
+    if (auto element = current.getDefiningOp<cir::GetElementOp>()) {
+      index = element.getIndex();
+      current = element.getBase();
+    } else if (auto stride = current.getDefiningOp<cir::PtrStrideOp>()) {
+      index = stride.getStride();
+      current = stride.getBase();
+    } else {
+      break;
+    }
+
+    FailureOr<Value> stripped = stripTileIndexCast(index);
+    if (failed(stripped))
+      return failure();
+    FailureOr<cir::LoopDomainExpr> expression =
+        cir::buildLoopDomainExpr(*stripped, inductions);
+    if (failed(expression))
+      return failure();
+    subscripts.insert(subscripts.begin(), std::move(*expression));
+  }
+
+  if (failed(cir::resolveCIRPointerArgument(current)) &&
+      failed(cir::resolveCIRConstantGlobalPointer(current)))
+    return failure();
+
+  return TileAddress{current, std::move(subscripts)};
+}
+
+static bool isSimpleInduction(const cir::LoopDomainExpr &expression,
+                              cir::AllocaOp induction) {
+  return expression.getKind() == cir::LoopDomainExpr::Kind::Induction &&
+         expression.getInduction() == induction;
+}
+
+static bool hasInvariantLeaf(const cir::LoopDomainExpr &expression,
+                             cir::ForOp loop) {
+  if (expression.getKind() == cir::LoopDomainExpr::Kind::Constant)
+    return true;
+  if (expression.getKind() != cir::LoopDomainExpr::Kind::Symbol)
+    return false;
+  if (isa<BlockArgument>(expression.getSource()))
+    return true;
+  return isInvariantSymbol(expression, loop);
+}
+
+static bool sameAddress(const TileAddress &lhs,
+                        const cir::LoopMemoryAccess &rhs,
+                        AliasAnalysis &aliasAnalysis) {
+  if (!aliasAnalysis.alias(lhs.base, rhs.base.pointer).isMust() ||
+      lhs.subscripts.size() != rhs.subscripts.size())
+    return false;
+  return llvm::all_of(
+      llvm::zip(lhs.subscripts, rhs.subscripts), [](const auto &pair) {
+        return std::get<0>(pair).isStructurallyEqual(std::get<1>(pair));
+      });
+}
+
+static bool dependsOn(Value value, Value target,
+                      llvm::SmallPtrSetImpl<Operation *> &visited) {
+  if (value == target)
+    return true;
+  Operation *operation = value.getDefiningOp();
+  if (!operation || !visited.insert(operation).second)
+    return false;
+  return llvm::any_of(operation->getOperands(), [&](Value operand) {
+    return dependsOn(operand, target, visited);
+  });
+}
+
+static bool isInvariantTileLoad(cir::LoadOp load, cir::ForOp loop) {
+  auto alloca = load.getAddr().getDefiningOp<cir::AllocaOp>();
+  if (!alloca || loop->isAncestor(alloca.getOperation()))
+    return false;
+  for (OpOperand &use : alloca.getAddr().getUses()) {
+    Operation *user = use.getOwner();
+    if (auto candidate = dyn_cast<cir::LoadOp>(user)) {
+      if (use.getOperandNumber() != cir::LoadOp::odsIndex_addr ||
+          candidate.getIsVolatile() || candidate.getMemOrder())
+        return false;
+      continue;
+    }
+    if (auto candidate = dyn_cast<cir::StoreOp>(user)) {
+      if (use.getOperandNumber() != cir::StoreOp::odsIndex_addr ||
+          candidate.getIsVolatile() || candidate.getMemOrder() ||
+          loop->isAncestor(user))
+        return false;
+      continue;
+    }
+    return false;
+  }
+  return true;
+}
+
+static bool matchScaleBody(cir::ForOp scaleLoop, cir::ForOp enclosingLoop,
+                           const cir::LoopElementRecurrence &recurrence,
+                           ArrayRef<cir::AllocaOp> inductions,
+                           AliasAnalysis &aliasAnalysis,
+                           SmallVectorImpl<Operation *> &bodyOperations) {
+  SmallVector<cir::LoadOp, 8> loads;
+  SmallVector<cir::StoreOp, 2> stores;
+  bool supported = true;
+  scaleLoop.getBody().walk([&](Operation *operation) {
+    if (isa<cir::ForOp, cir::AllocaOp>(operation)) {
+      supported = false;
+      return WalkResult::interrupt();
+    }
+    if (auto load = dyn_cast<cir::LoadOp>(operation)) {
+      if (load.getIsVolatile() || load.getMemOrder()) {
+        supported = false;
+        return WalkResult::interrupt();
+      }
+      loads.push_back(load);
+      return WalkResult::advance();
+    }
+    if (auto store = dyn_cast<cir::StoreOp>(operation)) {
+      if (store.getIsVolatile() || store.getMemOrder()) {
+        supported = false;
+        return WalkResult::interrupt();
+      }
+      stores.push_back(store);
+      return WalkResult::advance();
+    }
+    if (isa<cir::YieldOp, cir::ScopeOp, cir::FMulOp, cir::GetElementOp>(
+            operation) ||
+        mlir::isMemoryEffectFree(operation))
+      return WalkResult::advance();
+    supported = false;
+    return WalkResult::interrupt();
+  });
+  if (!supported || stores.size() != 1)
+    return false;
+
+  cir::StoreOp targetStore = stores.front();
+  cir::LoadOp targetLoad;
+  for (cir::LoadOp load : loads) {
+    if (load.getAddr() == targetStore.getAddr()) {
+      if (targetLoad)
+        return false;
+      targetLoad = load;
+      continue;
+    }
+    if (llvm::any_of(inductions, [&](cir::AllocaOp induction) {
+          return load.getAddr() == induction.getAddr();
+        }))
+      continue;
+    if (!isInvariantTileLoad(load, enclosingLoop))
+      return false;
+  }
+  if (!targetLoad)
+    return false;
+
+  llvm::SmallPtrSet<Operation *, 16> visited;
+  if (!dependsOn(targetStore.getValue(), targetLoad.getResult(), visited))
+    return false;
+
+  FailureOr<TileAddress> address =
+      analyzeTileAddress(targetStore.getAddr(), inductions);
+  if (failed(address) ||
+      !sameAddress(*address, recurrence.target, aliasAnalysis))
+    return false;
+
+  for (Operation &operation : scaleLoop.getBody().front().without_terminator())
+    bodyOperations.push_back(&operation);
+  return true;
+}
+
+static Value cloneInvariantLeaf(OpBuilder &builder,
+                                const cir::LoopDomainExpr &expression) {
+  Value source = expression.getSource();
+  if (isa<BlockArgument>(source))
+    return source;
+  Operation *operation = source.getDefiningOp();
+  assert(operation && operation->getNumResults() == 1);
+  return builder.clone(*operation)->getResult(0);
+}
+
+static Value createTileConstant(OpBuilder &builder, Location location,
+                                cir::IntType type, uint64_t value) {
+  return cir::ConstantOp::create(
+      builder, location,
+      cir::IntAttr::get(type, llvm::APInt(type.getWidth(), value)));
+}
+
+static Value createTileLoad(OpBuilder &builder, Location location,
+                            cir::AllocaOp variable) {
+  return cir::LoadOp::create(builder, location, variable.getAllocaType(),
+                             variable.getAddr());
+}
+
+using TileValueBuilder = llvm::function_ref<Value(OpBuilder &, Location)>;
+using TileBodyBuilder = llvm::function_ref<void(OpBuilder &, Location)>;
+
+static void emitLoopScope(OpBuilder &builder, Location location,
+                          cir::AllocaOp induction,
+                          TileValueBuilder initialBuilder,
+                          TileValueBuilder conditionBuilder,
+                          TileValueBuilder stepBuilder,
+                          TileBodyBuilder bodyBuilder) {
+  cir::ScopeOp::create(
+      builder, location, [&](OpBuilder &builder, Location location) {
+        Value initial = initialBuilder(builder, location);
+        cir::StoreOp::create(builder, location, initial, induction.getAddr());
+        cir::ForOp::create(
+            builder, location,
+            [&](OpBuilder &builder, Location location) {
+              cir::ConditionOp::create(builder, location,
+                                       conditionBuilder(builder, location));
+            },
+            [&](OpBuilder &builder, Location location) {
+              bodyBuilder(builder, location);
+              cir::YieldOp::create(builder, location);
+            },
+            [&](OpBuilder &builder, Location location) {
+              cir::StoreOp::create(builder, location,
+                                   stepBuilder(builder, location),
+                                   induction.getAddr());
+              cir::YieldOp::create(builder, location);
+            });
+        cir::YieldOp::create(builder, location);
+      });
+}
+
+static void cloneTileBody(OpBuilder &builder,
+                          ArrayRef<Operation *> operations) {
+  IRMapping mapping;
+  for (Operation *operation : operations)
+    builder.clone(*operation, mapping);
+}
+
+class TriangularTileEmitter {
+public:
+  TriangularTileEmitter(cir::IntType type, cir::IntType wideType,
+                        cir::AllocaOp tileI, cir::AllocaOp tileJ,
+                        cir::AllocaOp tileK, cir::AllocaOp pointI,
+                        cir::AllocaOp pointJ, cir::AllocaOp pointK,
+                        const cir::LoopDomainExpr &iBound,
+                        const cir::LoopDomainExpr &kBound,
+                        ArrayRef<Operation *> scaleBody,
+                        ArrayRef<Operation *> updateBody)
+      : type(type), wideType(wideType), tileI(tileI), tileJ(tileJ),
+        tileK(tileK), pointI(pointI), pointJ(pointJ), pointK(pointK),
+        iBound(iBound), kBound(kBound), scaleBody(scaleBody),
+        updateBody(updateBody) {}
+
+  void emitScale(OpBuilder &builder, Location location) {
+    emitTileI(builder, location, [&](OpBuilder &builder, Location location) {
+      emitTileJ(builder, location, [&](OpBuilder &builder, Location location) {
+        emitPointI(builder, location,
+                   [&](OpBuilder &builder, Location location) {
+                     emitRectangularJ(builder, location,
+                                      [&](OpBuilder &builder, Location) {
+                                        cloneTileBody(builder, scaleBody);
+                                      });
+                   });
+      });
+      emitPointI(builder, location, [&](OpBuilder &builder, Location location) {
+        emitDiagonalJ(builder, location, [&](OpBuilder &builder, Location) {
+          cloneTileBody(builder, scaleBody);
+        });
+      });
+    });
+  }
+
+  void emitUpdate(OpBuilder &builder, Location location) {
+    emitTileI(builder, location, [&](OpBuilder &builder, Location location) {
+      emitTileJ(builder, location, [&](OpBuilder &builder, Location location) {
+        emitKBand(builder, location,
+                  [&](OpBuilder &builder, Location location, bool fullTile) {
+                    emitPointI(
+                        builder, location,
+                        [&](OpBuilder &builder, Location location) {
+                          emitRectangularJ(
+                              builder, location,
+                              [&](OpBuilder &builder, Location location) {
+                                emitPointK(builder, location, fullTile);
+                              });
+                        });
+                  });
+      });
+      emitKBand(builder, location,
+                [&](OpBuilder &builder, Location location, bool fullTile) {
+                  emitPointI(builder, location,
+                             [&](OpBuilder &builder, Location location) {
+                               emitDiagonalJ(
+                                   builder, location,
+                                   [&](OpBuilder &builder, Location location) {
+                                     emitPointK(builder, location, fullTile);
+                                   });
+                             });
+                });
+    });
+  }
+
+private:
+  using KBandBodyBuilder =
+      llvm::function_ref<void(OpBuilder &, Location, bool)>;
+
+  static constexpr uint64_t rowTileSize = 32;
+  static constexpr uint64_t reductionTileSize = 4;
+
+  Value constant(OpBuilder &builder, Location location, uint64_t value) {
+    return createTileConstant(builder, location, type, value);
+  }
+
+  Value wideConstant(OpBuilder &builder, Location location, uint64_t value) {
+    return createTileConstant(builder, location, wideType, value);
+  }
+
+  Value wideLoad(OpBuilder &builder, Location location) {
+    return createTileLoad(builder, location, tileI);
+  }
+
+  Value pointTileI(OpBuilder &builder, Location location) {
+    return cir::CastOp::create(builder, location, type, cir::CastKind::integral,
+                               wideLoad(builder, location));
+  }
+
+  Value wideBound(OpBuilder &builder, Location location) {
+    return cir::CastOp::create(builder, location, wideType,
+                               cir::CastKind::integral,
+                               cloneInvariantLeaf(builder, iBound));
+  }
+
+  Value load(OpBuilder &builder, Location location, cir::AllocaOp variable) {
+    return createTileLoad(builder, location, variable);
+  }
+
+  Value add(OpBuilder &builder, Location location, Value lhs, Value rhs) {
+    return cir::AddOp::create(builder, location, type, lhs, rhs);
+  }
+
+  Value subtract(OpBuilder &builder, Location location, Value lhs, Value rhs) {
+    return cir::SubOp::create(builder, location, type, lhs, rhs);
+  }
+
+  Value increment(OpBuilder &builder, Location location,
+                  cir::AllocaOp variable) {
+    return cir::IncOp::create(builder, location,
+                              load(builder, location, variable),
+                              /*noSignedWrap=*/true);
+  }
+
+  Value cappedUpper(OpBuilder &builder, Location location, Value start,
+                    Value bound, uint64_t width) {
+    Value distance = subtract(builder, location, bound, start);
+    Value tileWidth = constant(builder, location, width);
+    Value shortTile = cir::CmpOp::create(builder, location, cir::CmpOpKind::lt,
+                                         distance, tileWidth);
+    Value advance = cir::SelectOp::create(builder, location, type, shortTile,
+                                          distance, tileWidth);
+    return add(builder, location, start, advance);
+  }
+
+  void emitTileI(OpBuilder &builder, Location location,
+                 TileBodyBuilder bodyBuilder) {
+    emitLoopScope(
+        builder, location, tileI,
+        [&](OpBuilder &builder, Location location) {
+          return wideConstant(builder, location, 0);
+        },
+        [&](OpBuilder &builder, Location location) {
+          return cir::CmpOp::create(builder, location, cir::CmpOpKind::lt,
+                                    wideLoad(builder, location),
+                                    wideBound(builder, location));
+        },
+        [&](OpBuilder &builder, Location location) {
+          return cir::AddOp::create(
+              builder, location, wideType, wideLoad(builder, location),
+              wideConstant(builder, location, rowTileSize));
+        },
+        bodyBuilder);
+  }
+
+  void emitTileJ(OpBuilder &builder, Location location,
+                 TileBodyBuilder bodyBuilder) {
+    emitLoopScope(
+        builder, location, tileJ,
+        [&](OpBuilder &builder, Location location) {
+          return constant(builder, location, 0);
+        },
+        [&](OpBuilder &builder, Location location) {
+          Value remaining =
+              subtract(builder, location, pointTileI(builder, location),
+                       load(builder, location, tileJ));
+          return cir::CmpOp::create(builder, location, cir::CmpOpKind::ge,
+                                    remaining,
+                                    constant(builder, location, rowTileSize));
+        },
+        [&](OpBuilder &builder, Location location) {
+          return add(builder, location, load(builder, location, tileJ),
+                     constant(builder, location, rowTileSize));
+        },
+        bodyBuilder);
+  }
+
+  void emitPointI(OpBuilder &builder, Location location,
+                  TileBodyBuilder bodyBuilder) {
+    emitLoopScope(
+        builder, location, pointI,
+        [&](OpBuilder &builder, Location location) {
+          return pointTileI(builder, location);
+        },
+        [&](OpBuilder &builder, Location location) {
+          Value start = pointTileI(builder, location);
+          Value upper =
+              cappedUpper(builder, location, start,
+                          cloneInvariantLeaf(builder, iBound), rowTileSize);
+          return cir::CmpOp::create(builder, location, cir::CmpOpKind::lt,
+                                    load(builder, location, pointI), upper);
+        },
+        [&](OpBuilder &builder, Location location) {
+          return increment(builder, location, pointI);
+        },
+        bodyBuilder);
+  }
+
+  void emitRectangularJ(OpBuilder &builder, Location location,
+                        TileBodyBuilder bodyBuilder) {
+    emitLoopScope(
+        builder, location, pointJ,
+        [&](OpBuilder &builder, Location location) {
+          return load(builder, location, tileJ);
+        },
+        [&](OpBuilder &builder, Location location) {
+          Value upper = add(builder, location, load(builder, location, tileJ),
+                            constant(builder, location, rowTileSize));
+          return cir::CmpOp::create(builder, location, cir::CmpOpKind::lt,
+                                    load(builder, location, pointJ), upper);
+        },
+        [&](OpBuilder &builder, Location location) {
+          return increment(builder, location, pointJ);
+        },
+        bodyBuilder);
+  }
+
+  void emitDiagonalJ(OpBuilder &builder, Location location,
+                     TileBodyBuilder bodyBuilder) {
+    emitLoopScope(
+        builder, location, pointJ,
+        [&](OpBuilder &builder, Location location) {
+          return pointTileI(builder, location);
+        },
+        [&](OpBuilder &builder, Location location) {
+          return cir::CmpOp::create(builder, location, cir::CmpOpKind::le,
+                                    load(builder, location, pointJ),
+                                    load(builder, location, pointI));
+        },
+        [&](OpBuilder &builder, Location location) {
+          return increment(builder, location, pointJ);
+        },
+        bodyBuilder);
+  }
+
+  void emitKBand(OpBuilder &builder, Location location,
+                 KBandBodyBuilder bodyBuilder) {
+    emitLoopScope(
+        builder, location, tileK,
+        [&](OpBuilder &builder, Location location) {
+          return constant(builder, location, 0);
+        },
+        [&](OpBuilder &builder, Location location) {
+          Value remaining =
+              subtract(builder, location, cloneInvariantLeaf(builder, kBound),
+                       load(builder, location, tileK));
+          return cir::CmpOp::create(
+              builder, location, cir::CmpOpKind::ge, remaining,
+              constant(builder, location, reductionTileSize));
+        },
+        [&](OpBuilder &builder, Location location) {
+          return add(builder, location, load(builder, location, tileK),
+                     constant(builder, location, reductionTileSize));
+        },
+        [&](OpBuilder &builder, Location location) {
+          bodyBuilder(builder, location, true);
+        });
+    bodyBuilder(builder, location, false);
+  }
+
+  void emitPointK(OpBuilder &builder, Location location, bool fullTile) {
+    emitLoopScope(
+        builder, location, pointK,
+        [&](OpBuilder &builder, Location location) {
+          return load(builder, location, tileK);
+        },
+        [&](OpBuilder &builder, Location location) {
+          Value upper =
+              fullTile ? add(builder, location, load(builder, location, tileK),
+                             constant(builder, location, reductionTileSize))
+                       : cloneInvariantLeaf(builder, kBound);
+          return cir::CmpOp::create(builder, location, cir::CmpOpKind::lt,
+                                    load(builder, location, pointK), upper);
+        },
+        [&](OpBuilder &builder, Location location) {
+          return increment(builder, location, pointK);
+        },
+        [&](OpBuilder &builder, Location) {
+          cloneTileBody(builder, updateBody);
+        });
+  }
+
+  cir::IntType type;
+  cir::IntType wideType;
+  cir::AllocaOp tileI;
+  cir::AllocaOp tileJ;
+  cir::AllocaOp tileK;
+  cir::AllocaOp pointI;
+  cir::AllocaOp pointJ;
+  cir::AllocaOp pointK;
+  const cir::LoopDomainExpr &iBound;
+  const cir::LoopDomainExpr &kBound;
+  ArrayRef<Operation *> scaleBody;
+  ArrayRef<Operation *> updateBody;
+};
+
+static cir::AllocaOp cloneTileInduction(OpBuilder &builder,
+                                        cir::AllocaOp source, StringRef name) {
+  auto clone = cast<cir::AllocaOp>(builder.clone(*source.getOperation()));
+  clone->setAttr("name", builder.getStringAttr(name));
+  return clone;
+}
+
+static cir::AllocaOp createWideTileInduction(OpBuilder &builder,
+                                             cir::AllocaOp source,
+                                             cir::IntType type) {
+  return cir::AllocaOp::create(builder, source.getLoc(),
+                               cir::PointerType::get(type), "i.tile",
+                               source.getAlignmentAttr());
+}
+
+static bool tileTriangularRecurrenceBand(cir::ForOp loop,
+                                         AliasAnalysis &aliasAnalysis) {
+  FailureOr<cir::ThreeLevelLoopBand> band =
+      cir::analyzeThreeLevelLoopBand(loop);
+  if (failed(band) || band->innerCandidates.size() != 1)
+    return false;
+
+  cir::LoopDomain &i = band->anchor;
+  cir::LoopDomain &j = band->outer;
+  cir::LoopDomain &k = band->innerCandidates.front();
+  auto type = dyn_cast<cir::IntType>(i.stepLoad.getResult().getType());
+  if (!type || !type.isSigned() || j.stepLoad.getResult().getType() != type ||
+      k.stepLoad.getResult().getType() != type ||
+      i.comparison.getKind() != cir::CmpOpKind::lt ||
+      j.comparison.getKind() != cir::CmpOpKind::le ||
+      k.comparison.getKind() != cir::CmpOpKind::lt ||
+      !isConstantZero(i.initial) || !isConstantZero(j.initial) ||
+      !isConstantZero(k.initial) ||
+      !isSimpleInduction(i.conditionLHS, i.induction) ||
+      !isSimpleInduction(j.conditionLHS, j.induction) ||
+      !isSimpleInduction(j.conditionRHS, i.induction) ||
+      !isSimpleInduction(k.conditionLHS, k.induction) ||
+      !hasInvariantLeaf(i.conditionRHS, i.loop) ||
+      !hasInvariantLeaf(k.conditionRHS, i.loop) ||
+      !i.increment.getNoSignedWrap() || !j.increment.getNoSignedWrap() ||
+      !k.increment.getNoSignedWrap())
+    return false;
+
+  cir::LoopBandMemoryAnalysis memory =
+      cir::analyzeLoopBandMemory(*band, aliasAnalysis);
+  if (!memory.isSafe() || memory.recurrences.size() != 1)
+    return false;
+  const cir::LoopElementRecurrence &recurrence = memory.recurrences.front();
+  if (recurrence.recurrenceInduction != k.induction ||
+      recurrence.laneInductions.size() != 1 ||
+      recurrence.laneInductions.front() != j.induction ||
+      recurrence.target.subscripts.size() != 2 ||
+      !isSimpleInduction(recurrence.target.subscripts[0], i.induction) ||
+      !isSimpleInduction(recurrence.target.subscripts[1], j.induction))
+    return false;
+
+  auto iSetup = dyn_cast_or_null<cir::ScopeOp>(i.loop->getParentOp());
+  if (!iSetup || !i.loop.getBody().hasOneBlock())
+    return false;
+  Block &iBody = i.loop.getBody().front();
+  if (iBody.getOperations().size() != 2 || !isa<cir::YieldOp>(iBody.back()))
+    return false;
+  auto iteration = dyn_cast<cir::ScopeOp>(iBody.front());
+  if (!iteration || !iteration.getScopeRegion().hasOneBlock())
+    return false;
+
+  Block &iterationBlock = iteration.getScopeRegion().front();
+  SmallVector<Operation *, 2> phases;
+  for (Operation &operation : iterationBlock.without_terminator())
+    phases.push_back(&operation);
+  Operation *updatePhase =
+      getIterationRoot(j.loop.getOperation(), iterationBlock);
+  if (phases.size() != 2 || !updatePhase ||
+      !llvm::is_contained(phases, updatePhase))
+    return false;
+  Operation *scalePhase =
+      phases.front() == updatePhase ? phases.back() : phases.front();
+  auto scaleScope = dyn_cast<cir::ScopeOp>(scalePhase);
+  if (!scaleScope)
+    return false;
+
+  SmallVector<cir::ForOp, 2> scaleLoops;
+  scaleScope.walk(
+      [&](cir::ForOp candidate) { scaleLoops.push_back(candidate); });
+  if (scaleLoops.size() != 1)
+    return false;
+  FailureOr<cir::LoopDomain> scale =
+      cir::analyzeLoopDomain(scaleLoops.front(), {i.induction});
+  if (failed(scale) || scale->induction != j.induction ||
+      scale->comparison.getKind() != cir::CmpOpKind::le ||
+      !isConstantZero(scale->initial) ||
+      !isSimpleInduction(scale->conditionLHS, j.induction) ||
+      !isSimpleInduction(scale->conditionRHS, i.induction))
+    return false;
+
+  SmallVector<Operation *, 8> scaleBody;
+  SmallVector<cir::AllocaOp, 3> inductions = {i.induction, j.induction,
+                                              k.induction};
+  if (!matchScaleBody(scale->loop, i.loop, recurrence, inductions,
+                      aliasAnalysis, scaleBody))
+    return false;
+
+  SmallVector<Operation *, 8> updateBody;
+  for (Operation &operation : k.loop.getBody().front().without_terminator())
+    updateBody.push_back(&operation);
+
+  OpBuilder builder(iSetup);
+  cir::IntType wideType =
+      cir::IntType::get(type.getContext(), 64, /*isSigned=*/true);
+  cir::AllocaOp tileI = createWideTileInduction(builder, i.induction, wideType);
+  cir::AllocaOp tileJ = cloneTileInduction(builder, j.induction, "j.tile");
+  cir::AllocaOp tileK = cloneTileInduction(builder, k.induction, "k.tile");
+
+  TriangularTileEmitter emitter(
+      type, wideType, tileI, tileJ, tileK, i.induction, j.induction,
+      k.induction, i.conditionRHS, k.conditionRHS, scaleBody, updateBody);
+  emitter.emitScale(builder, i.loop.getLoc());
+  emitter.emitUpdate(builder, i.loop.getLoc());
+  iSetup.erase();
+  return true;
+}
+
 struct CIRLoopInterchangePass
     : public impl::CIRLoopInterchangeBase<CIRLoopInterchangePass> {
   using CIRLoopInterchangeBase::CIRLoopInterchangeBase;
@@ -1283,6 +1950,7 @@ struct CIRLoopInterchangePass
                  << " nested loop " << (nestedPhases == 1 ? "phase" : "phases");
               loop.emitRemark(os.str());
             }
+            tileTriangularRecurrenceBand(loop, aliasAnalysis);
             continue;
           }
         }
