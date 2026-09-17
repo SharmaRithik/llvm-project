@@ -118,6 +118,46 @@ void UpdateVCEPass::runOnOperation() {
   SetVector<spirv::Extension> deducedExtensions;
   SetVector<spirv::Capability> deducedCapabilities;
 
+  // Per the SPIR-V spec (OpEntryPoint): "Before version 1.4, the interface's
+  // storage classes are limited to the Input and Output storage classes.
+  // Starting with version 1.4, the interface's storage classes are all storage
+  // classes used in declaring all global variables referenced by the entry
+  // point's call tree." LowerABIAttributesPass lists StorageBuffer, Uniform
+  // and Workgroup variables in the interface when the target env is 1.4 or
+  // newer, so a module with such an interface needs at least version 1.4 or
+  // spirv-val rejects the serialized binary.
+  auto bumpVersionForEntryPointInterfaces = [&]() -> LogicalResult {
+    for (spirv::EntryPointOp entryPoint : module.getOps<spirv::EntryPointOp>()) {
+      for (Attribute var : entryPoint.getInterface().getValue()) {
+        auto symRef = dyn_cast<FlatSymbolRefAttr>(var);
+        if (!symRef)
+          continue;
+        auto globalVar = module.lookupSymbol<spirv::GlobalVariableOp>(symRef);
+        if (!globalVar)
+          continue;
+        auto ptrType = dyn_cast<spirv::PointerType>(globalVar.getType());
+        if (!ptrType)
+          continue;
+        spirv::StorageClass sc = ptrType.getStorageClass();
+        if (sc == spirv::StorageClass::Input || sc == spirv::StorageClass::Output)
+          continue;
+        deducedVersion = std::max(deducedVersion, spirv::Version::V_1_4);
+        if (deducedVersion > allowedVersion) {
+          return entryPoint.emitError("entry point interface variable '")
+                 << symRef.getValue() << "' has storage class "
+                 << spirv::stringifyStorageClass(sc)
+                 << ", which requires min version 1.4 but target environment "
+                    "allows up to "
+                 << spirv::stringifyVersion(allowedVersion);
+        }
+        return success();
+      }
+    }
+    return success();
+  };
+  if (failed(bumpVersionForEntryPointInterfaces()))
+    return signalPassFailure();
+
   // Walk each SPIR-V op to deduce the minimal version/extension/capability
   // requirements.
   WalkResult walkResult = module.walk([&](Operation *op) -> WalkResult {

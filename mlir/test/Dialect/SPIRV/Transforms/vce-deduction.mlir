@@ -458,3 +458,55 @@ spirv.module Logical GLSL450 attributes {
       linkage_type = <Weak>>
   } : !spirv.ptr<i32, Private>
 }
+
+// -----
+
+// Test deducing the version from the entry point interface.
+// Before v1.4 the interface may only list Input and Output variables, so a
+// StorageBuffer variable in the interface requires v1.4 even when no op does.
+
+// CHECK: requires #spirv.vce<v1.4, [Shader, Matrix], [SPV_KHR_storage_buffer_storage_class]>
+spirv.module Logical GLSL450 attributes {
+  spirv.target_env = #spirv.target_env<
+    #spirv.vce<v1.5, [Shader], [SPV_KHR_storage_buffer_storage_class]>, #spirv.resource_limits<>>
+} {
+  spirv.GlobalVariable @data bind(0, 0) : !spirv.ptr<!spirv.struct<(!spirv.array<8 x i32, stride=4> [0])>, StorageBuffer>
+  spirv.GlobalVariable @id built_in("GlobalInvocationId") : !spirv.ptr<vector<3xi32>, Input>
+  spirv.func @main() "None" {
+    spirv.Return
+  }
+  spirv.EntryPoint "GLCompute" @main, @data, @id
+  spirv.ExecutionMode @main "LocalSize", 1, 1, 1
+}
+
+// An interface with only Input and Output variables stays at v1.0.
+
+// CHECK: requires #spirv.vce<v1.0, [Shader, Matrix], []>
+spirv.module Logical GLSL450 attributes {
+  spirv.target_env = #spirv.target_env<
+    #spirv.vce<v1.5, [Shader], []>, #spirv.resource_limits<>>
+} {
+  spirv.GlobalVariable @id built_in("GlobalInvocationId") : !spirv.ptr<vector<3xi32>, Input>
+  spirv.func @main() "None" {
+    spirv.Return
+  }
+  spirv.EntryPoint "GLCompute" @main, @id
+  spirv.ExecutionMode @main "LocalSize", 1, 1, 1
+}
+
+// -----
+
+// A StorageBuffer interface variable under a v1.3 target env is an error.
+
+spirv.module Logical GLSL450 attributes {
+  spirv.target_env = #spirv.target_env<
+    #spirv.vce<v1.3, [Shader], [SPV_KHR_storage_buffer_storage_class]>, #spirv.resource_limits<>>
+} {
+  spirv.GlobalVariable @data bind(0, 0) : !spirv.ptr<!spirv.struct<(!spirv.array<8 x i32, stride=4> [0])>, StorageBuffer>
+  spirv.func @main() "None" {
+    spirv.Return
+  }
+  // expected-error @+1 {{entry point interface variable 'data' has storage class StorageBuffer, which requires min version 1.4 but target environment allows up to v1.3}}
+  spirv.EntryPoint "GLCompute" @main, @data
+  spirv.ExecutionMode @main "LocalSize", 1, 1, 1
+}
