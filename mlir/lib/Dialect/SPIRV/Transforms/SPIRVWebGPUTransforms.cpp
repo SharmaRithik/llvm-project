@@ -310,6 +310,75 @@ struct ExpandShiftRightArithmeticPattern final
   }
 };
 
+/// Returns `select(x <s 0, 0 - x, x)`, the absolute value spelled without a
+/// signed builtin.
+static Value emitSignlessAbs(PatternRewriter &rewriter, Location loc, Value x,
+                             Value zero, Type boolType) {
+  Type type = x.getType();
+  Value neg = ISubOp::create(rewriter, loc, type, zero, x);
+  Value isNeg = SLessThanOp::create(rewriter, loc, boolType, x, zero);
+  return SelectOp::create(rewriter, loc, type, isNeg, neg, x);
+}
+
+static Type boolTypeFor(PatternRewriter &rewriter, Type type) {
+  Type boolType = rewriter.getI1Type();
+  if (auto vecType = dyn_cast<VectorType>(type))
+    boolType = VectorType::get(vecType.getShape(), boolType);
+  return boolType;
+}
+
+/// `SDiv` on a signless integer is read by Naga as an unsigned division.
+/// Express it as `UDiv(|a|, |b|)` with the sign restored:
+/// `q = udiv(|a|, |b|); select((a <s 0) != (b <s 0), 0 - q, q)`.
+struct ExpandSDivPattern final : OpRewritePattern<SDivOp> {
+  using OpRewritePattern::OpRewritePattern;
+
+  LogicalResult matchAndRewrite(SDivOp op,
+                                PatternRewriter &rewriter) const override {
+    Location loc = op.getLoc();
+    Type type = op.getType();
+    Type boolType = boolTypeFor(rewriter, type);
+    Value a = op.getOperand1();
+    Value b = op.getOperand2();
+    Value zero = ConstantOp::getZero(type, loc, rewriter);
+    Value absA = emitSignlessAbs(rewriter, loc, a, zero, boolType);
+    Value absB = emitSignlessAbs(rewriter, loc, b, zero, boolType);
+    Value q = UDivOp::create(rewriter, loc, type, absA, absB);
+    Value negQ = ISubOp::create(rewriter, loc, type, zero, q);
+    Value aNeg = SLessThanOp::create(rewriter, loc, boolType, a, zero);
+    Value bNeg = SLessThanOp::create(rewriter, loc, boolType, b, zero);
+    Value signDiffers =
+        LogicalNotEqualOp::create(rewriter, loc, boolType, aNeg, bNeg);
+    rewriter.replaceOpWithNewOp<SelectOp>(op, type, signDiffers, negQ, q);
+    return success();
+  }
+};
+
+/// `GLSL.std.450 SMin` and `SMax` on signless integers become unsigned min
+/// and max in a WGSL translator that typed the values `u32`. A signed
+/// comparison plus select says the same thing for any signedness.
+template <typename Op, bool IsMin>
+struct ExpandSMinMaxPattern final : OpRewritePattern<Op> {
+  using OpRewritePattern<Op>::OpRewritePattern;
+
+  LogicalResult matchAndRewrite(Op op,
+                                PatternRewriter &rewriter) const override {
+    Location loc = op.getLoc();
+    Type type = op.getType();
+    Type boolType = boolTypeFor(rewriter, type);
+    Value a = op.getOperand(0);
+    Value b = op.getOperand(1);
+    Value aLess = SLessThanOp::create(rewriter, loc, boolType, a, b);
+    if (IsMin)
+      rewriter.replaceOpWithNewOp<SelectOp>(op, type, aLess, a, b);
+    else
+      rewriter.replaceOpWithNewOp<SelectOp>(op, type, aLess, b, a);
+    return success();
+  }
+};
+using ExpandSMinPattern = ExpandSMinMaxPattern<GLSMinOp, true>;
+using ExpandSMaxPattern = ExpandSMinMaxPattern<GLSMaxOp, false>;
+
 //===----------------------------------------------------------------------===//
 // Passes
 //===----------------------------------------------------------------------===//
@@ -355,5 +424,6 @@ void mlir::spirv::populateSPIRVExpandSignednessDependentIntegerPatterns(
   // SPIR-V. Naga types such values as u32 and rejects or misreads the ops, see
   // the discussion in the pass documentation.
   patterns.add<ExpandSNegatePattern, ExpandSAbsPattern,
-               ExpandShiftRightArithmeticPattern>(patterns.getContext());
+               ExpandShiftRightArithmeticPattern, ExpandSDivPattern,
+               ExpandSMinPattern, ExpandSMaxPattern>(patterns.getContext());
 }

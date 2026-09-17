@@ -318,4 +318,32 @@ spirv.func @sra_i32(%x : i32, %n : i32) -> i32 "None" {
   spirv.ReturnValue %0 : i32
 }
 
+// CHECK-LABEL: func @sdiv_i32
+// CHECK-SAME:       ([[A:%.+]]: i32, [[B:%.+]]: i32)
+// CHECK-DAG:        [[ZERO:%.+]]  = spirv.Constant 0 : i32
+// CHECK-DAG:        [[ABSA:%.+]]  = spirv.Select {{%.+}}, {{%.+}}, [[A]] : i1, i32
+// CHECK-DAG:        [[ABSB:%.+]]  = spirv.Select {{%.+}}, {{%.+}}, [[B]] : i1, i32
+// CHECK:            [[Q:%.+]]     = spirv.UDiv [[ABSA]], [[ABSB]] : i32
+// CHECK-DAG:        [[NEGQ:%.+]]  = spirv.ISub [[ZERO]], [[Q]] : i32
+// CHECK-DAG:        [[DIFF:%.+]]  = spirv.LogicalNotEqual {{%.+}}, {{%.+}} : i1
+// CHECK:            [[RES:%.+]]   = spirv.Select [[DIFF]], [[NEGQ]], [[Q]] : i1, i32
+// CHECK-NEXT:       spirv.ReturnValue [[RES]] : i32
+spirv.func @sdiv_i32(%a : i32, %b : i32) -> i32 "None" {
+  %0 = spirv.SDiv %a, %b : i32
+  spirv.ReturnValue %0 : i32
+}
+
+// CHECK-LABEL: func @smin_smax_i32
+// CHECK-SAME:       ([[A:%.+]]: i32, [[B:%.+]]: i32)
+// CHECK:            [[LT:%.+]]  = spirv.SLessThan [[A]], [[B]] : i32
+// CHECK-DAG:        [[MIN:%.+]] = spirv.Select [[LT]], [[A]], [[B]] : i1, i32
+// CHECK-DAG:        [[MAX:%.+]] = spirv.Select [[LT]], [[B]], [[A]] : i1, i32
+// CHECK:            spirv.IAdd [[MIN]], [[MAX]] : i32
+spirv.func @smin_smax_i32(%a : i32, %b : i32) -> i32 "None" {
+  %0 = spirv.GL.SMin %a, %b : i32
+  %1 = spirv.GL.SMax %a, %b : i32
+  %2 = spirv.IAdd %0, %1 : i32
+  spirv.ReturnValue %2 : i32
+}
+
 } // end module

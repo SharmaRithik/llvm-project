@@ -27,8 +27,9 @@ void populateSPIRVExpandExtendedMultiplicationPatterns(
 /// Appends patterns to expand non-finite arithmetic ops `IsNan` and `IsInf`.
 /// These are not supported by the WebGPU Shading Language (WGSL). We follow
 /// fast math assumptions and assume that all floating point values are finite.
-/// Appends patterns to expand `spirv.SNegate`, `spirv.GL.SAbs` and
-/// `spirv.ShiftRightArithmetic` on signless
+/// Appends patterns to expand `spirv.SNegate`, `spirv.GL.SAbs`,
+/// `spirv.ShiftRightArithmetic`, `spirv.SDiv`, `spirv.GL.SMin` and
+/// `spirv.GL.SMax` on signless
 /// integers into ops whose meaning does not depend on the SPIR-V signedness
 /// bit, which WGSL translators use to pick `i32` or `u32`.
 void populateSPIRVExpandSignednessDependentIntegerPatterns(
