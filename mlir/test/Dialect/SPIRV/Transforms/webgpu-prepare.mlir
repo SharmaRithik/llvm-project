@@ -78,14 +78,16 @@ spirv.func @umul_extended_i16(%arg : i16) -> !spirv.struct<(i16, i16)> "None" {
 // CHECK-SAME:       ([[ARG0:%.+]]: i32, [[ARG1:%.+]]: i32)
 // CHECK-DAG:        [[CSTMASK:%.+]] = spirv.Constant 65535 : i32
 // CHECK-DAG:        [[CST16:%.+]]   = spirv.Constant 16 : i32
-// CHECK-NEXT:       [[LHSLOW:%.+]]  = spirv.BitwiseAnd [[ARG0]], [[CSTMASK]] : i32
-// CHECK-NEXT:       [[LHSHI:%.+]]   = spirv.ShiftRightLogical [[ARG0]], [[CST16]] : i32
-// CHECK-NEXT:       [[LHSSIGN:%.+]] = spirv.ShiftRightArithmetic [[ARG0]], [[CST16]] : i32
-// CHECK-NEXT:       [[LHSEXT:%.+]]  = spirv.ShiftRightLogical [[LHSSIGN]], [[CST16]] : i32
-// CHECK-NEXT:       [[RHSLOW:%.+]]  = spirv.BitwiseAnd [[ARG1]], [[CSTMASK]] : i32
-// CHECK-NEXT:       [[RHSHI:%.+]]   = spirv.ShiftRightLogical [[ARG1]], [[CST16]] : i32
-// CHECK-NEXT:       [[RHSSIGN:%.+]] = spirv.ShiftRightArithmetic [[ARG1]], [[CST16]] : i32
-// CHECK-NEXT:       [[RHSEXT:%.+]]  = spirv.ShiftRightLogical [[RHSSIGN]], [[CST16]] : i32
+// CHECK-DAG:        [[LHSLOW:%.+]]  = spirv.BitwiseAnd [[ARG0]], [[CSTMASK]] : i32
+// CHECK-DAG:        [[LHSHI:%.+]]   = spirv.ShiftRightLogical [[ARG0]], [[CST16]] : i32
+// The arithmetic shift that extracts the sign is itself expanded (see the
+// ShiftRightArithmetic tests below); after CSE its false branch is LHSHI.
+// CHECK-DAG:        [[LHSSIGN:%.+]] = spirv.Select {{%.+}}, {{%.+}}, [[LHSHI]] : i1, i32
+// CHECK-DAG:        [[LHSEXT:%.+]]  = spirv.ShiftRightLogical [[LHSSIGN]], [[CST16]] : i32
+// CHECK-DAG:        [[RHSLOW:%.+]]  = spirv.BitwiseAnd [[ARG1]], [[CSTMASK]] : i32
+// CHECK-DAG:        [[RHSHI:%.+]]   = spirv.ShiftRightLogical [[ARG1]], [[CST16]] : i32
+// CHECK-DAG:        [[RHSSIGN:%.+]] = spirv.Select {{%.+}}, {{%.+}}, [[RHSHI]] : i1, i32
+// CHECK-DAG:        [[RHSEXT:%.+]]  = spirv.ShiftRightLogical [[RHSSIGN]], [[CST16]] : i32
 // CHECK-DAG:                          spirv.IMul [[LHSLOW]], [[RHSLOW]]
 // CHECK-DAG:                          spirv.IMul [[LHSLOW]], [[RHSHI]]
 // CHECK-DAG:                          spirv.IMul [[LHSLOW]], [[RHSEXT]]
@@ -109,14 +111,16 @@ spirv.func @smul_extended_i32(%arg0 : i32, %arg1 : i32) -> !spirv.struct<(i32, i
 // CHECK-SAME:       ([[ARG0:%.+]]: vector<3xi32>, [[ARG1:%.+]]: vector<3xi32>)
 // CHECK-DAG:        [[CSTMASK:%.+]] = spirv.Constant dense<65535> : vector<3xi32>
 // CHECK-DAG:        [[CST16:%.+]]   = spirv.Constant dense<16> : vector<3xi32>
-// CHECK-NEXT:       [[LHSLOW:%.+]]  = spirv.BitwiseAnd [[ARG0]], [[CSTMASK]] : vector<3xi32>
-// CHECK-NEXT:       [[LHSHI:%.+]]   = spirv.ShiftRightLogical [[ARG0]], [[CST16]] : vector<3xi32>
-// CHECK-NEXT:       [[LHSSIGN:%.+]] = spirv.ShiftRightArithmetic [[ARG0]], [[CST16]] : vector<3xi32>
-// CHECK-NEXT:       [[LHSEXT:%.+]]  = spirv.ShiftRightLogical [[LHSSIGN]], [[CST16]] : vector<3xi32>
-// CHECK-NEXT:       [[RHSLOW:%.+]]  = spirv.BitwiseAnd [[ARG1]], [[CSTMASK]] : vector<3xi32>
-// CHECK-NEXT:       [[RHSHI:%.+]]   = spirv.ShiftRightLogical [[ARG1]], [[CST16]] : vector<3xi32>
-// CHECK-NEXT:       [[RHSSIGN:%.+]] = spirv.ShiftRightArithmetic [[ARG1]], [[CST16]] : vector<3xi32>
-// CHECK-NEXT:       [[RHSEXT:%.+]]  = spirv.ShiftRightLogical [[RHSSIGN]], [[CST16]] : vector<3xi32>
+// CHECK-DAG:        [[LHSLOW:%.+]]  = spirv.BitwiseAnd [[ARG0]], [[CSTMASK]] : vector<3xi32>
+// CHECK-DAG:        [[LHSHI:%.+]]   = spirv.ShiftRightLogical [[ARG0]], [[CST16]] : vector<3xi32>
+// The arithmetic shift that extracts the sign is itself expanded (see the
+// ShiftRightArithmetic tests below); after CSE its false branch is LHSHI.
+// CHECK-DAG:        [[LHSSIGN:%.+]] = spirv.Select {{%.+}}, {{%.+}}, [[LHSHI]] : vector<3xi1>, vector<3xi32>
+// CHECK-DAG:        [[LHSEXT:%.+]]  = spirv.ShiftRightLogical [[LHSSIGN]], [[CST16]] : vector<3xi32>
+// CHECK-DAG:        [[RHSLOW:%.+]]  = spirv.BitwiseAnd [[ARG1]], [[CSTMASK]] : vector<3xi32>
+// CHECK-DAG:        [[RHSHI:%.+]]   = spirv.ShiftRightLogical [[ARG1]], [[CST16]] : vector<3xi32>
+// CHECK-DAG:        [[RHSSIGN:%.+]] = spirv.Select {{%.+}}, {{%.+}}, [[RHSHI]] : vector<3xi1>, vector<3xi32>
+// CHECK-DAG:        [[RHSEXT:%.+]]  = spirv.ShiftRightLogical [[RHSSIGN]], [[CST16]] : vector<3xi32>
 // CHECK-DAG:                          spirv.IMul [[LHSLOW]], [[RHSLOW]]
 // CHECK-DAG:                          spirv.IMul [[LHSLOW]], [[RHSHI]]
 // CHECK-DAG:                          spirv.IMul [[LHSLOW]], [[RHSEXT]]
@@ -297,6 +301,21 @@ spirv.func @sabs_i32(%a : i32) -> i32 "None" {
 spirv.func @sabs_vector_i32(%a : vector<3xi32>) -> vector<3xi32> "None" {
   %0 = spirv.GL.SAbs %a : vector<3xi32>
   spirv.ReturnValue %0 : vector<3xi32>
+}
+
+// CHECK-LABEL: func @sra_i32
+// CHECK-SAME:       ([[X:%.+]]: i32, [[N:%.+]]: i32)
+// CHECK-DAG:        [[ZERO:%.+]] = spirv.Constant 0 : i32
+// CHECK-DAG:        [[LOG:%.+]]  = spirv.ShiftRightLogical [[X]], [[N]] : i32, i32
+// CHECK-DAG:        [[NX:%.+]]   = spirv.Not [[X]] : i32
+// CHECK-DAG:        [[NS:%.+]]   = spirv.ShiftRightLogical [[NX]], [[N]] : i32, i32
+// CHECK-DAG:        [[NEG:%.+]]  = spirv.Not [[NS]] : i32
+// CHECK-DAG:        [[LT:%.+]]   = spirv.SLessThan [[X]], [[ZERO]] : i32
+// CHECK:            [[RES:%.+]]  = spirv.Select [[LT]], [[NEG]], [[LOG]] : i1, i32
+// CHECK-NEXT:       spirv.ReturnValue [[RES]] : i32
+spirv.func @sra_i32(%x : i32, %n : i32) -> i32 "None" {
+  %0 = spirv.ShiftRightArithmetic %x, %n : i32, i32
+  spirv.ReturnValue %0 : i32
 }
 
 } // end module

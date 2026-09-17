@@ -280,6 +280,36 @@ struct ExpandSAbsPattern final : OpRewritePattern<GLSAbsOp> {
   }
 };
 
+/// `ShiftRightArithmetic` on a signless integer is emitted by the extended
+/// multiplication expansion above (sign extension of the 16 bit digits) and by
+/// `arith.shrsi`. Naga emits it as a logical shift on `u32`, which silently
+/// drops the sign. Express it through logical shifts only:
+/// `sra(x, n) = select(x <s 0, ~(~x >>l n), x >>l n)`.
+struct ExpandShiftRightArithmeticPattern final
+    : OpRewritePattern<ShiftRightArithmeticOp> {
+  using OpRewritePattern::OpRewritePattern;
+
+  LogicalResult matchAndRewrite(ShiftRightArithmeticOp op,
+                                PatternRewriter &rewriter) const override {
+    Location loc = op.getLoc();
+    Type type = op.getType();
+    Value x = op.getOperand1();
+    Value n = op.getOperand2();
+    Value zero = ConstantOp::getZero(type, loc, rewriter);
+    Value logical = ShiftRightLogicalOp::create(rewriter, loc, type, x, n);
+    Value notX = NotOp::create(rewriter, loc, type, x);
+    Value notShifted = ShiftRightLogicalOp::create(rewriter, loc, type, notX, n);
+    Value negativeCase = NotOp::create(rewriter, loc, type, notShifted);
+    Type boolType = rewriter.getI1Type();
+    if (auto vecType = dyn_cast<VectorType>(type))
+      boolType = VectorType::get(vecType.getShape(), boolType);
+    Value isNegative = SLessThanOp::create(rewriter, loc, boolType, x, zero);
+    rewriter.replaceOpWithNewOp<SelectOp>(op, type, isNegative, negativeCase,
+                                          logical);
+    return success();
+  }
+};
+
 //===----------------------------------------------------------------------===//
 // Passes
 //===----------------------------------------------------------------------===//
@@ -324,5 +354,6 @@ void mlir::spirv::populateSPIRVExpandSignednessDependentIntegerPatterns(
   // SNegate and SAbs read a sign that signless MLIR integers do not carry into
   // SPIR-V. Naga types such values as u32 and rejects or misreads the ops, see
   // the discussion in the pass documentation.
-  patterns.add<ExpandSNegatePattern, ExpandSAbsPattern>(patterns.getContext());
+  patterns.add<ExpandSNegatePattern, ExpandSAbsPattern,
+               ExpandShiftRightArithmeticPattern>(patterns.getContext());
 }
