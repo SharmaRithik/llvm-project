@@ -34,6 +34,13 @@ std::optional<spirv::StorageClass>
 /// unsupported.
 std::optional<unsigned> mapVulkanStorageClassToMemorySpace(spirv::StorageClass);
 
+/// Maps MemRef memory spaces to storage classes for WebGPU: the Vulkan
+/// numbering restricted to the storage classes WebGPU has, plus the gpu
+/// dialect's `#gpu.address_space<...>` attribute (global to StorageBuffer,
+/// workgroup to Workgroup, private to Function).
+std::optional<spirv::StorageClass>
+    mapMemorySpaceToWebGPUStorageClass(Attribute);
+
 /// Maps MemRef memory spaces to storage classes for OpenCL-flavored SPIR-V
 /// using the default rule. Returns std::nullopt if the memory space is unknown.
 std::optional<spirv::StorageClass>

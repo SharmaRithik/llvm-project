@@ -14,6 +14,7 @@
 #include "mlir/Conversion/MemRefToSPIRV/MemRefToSPIRVPass.h"
 
 #include "mlir/Conversion/MemRefToSPIRV/MemRefToSPIRV.h"
+#include "mlir/Dialect/GPU/IR/GPUDialect.h"
 #include "mlir/Dialect/SPIRV/IR/SPIRVAttributes.h"
 #include "mlir/Dialect/SPIRV/IR/SPIRVDialect.h"
 #include "mlir/Dialect/SPIRV/IR/SPIRVEnums.h"
@@ -106,6 +107,48 @@ spirv::mapVulkanStorageClassToMemorySpace(spirv::StorageClass storageClass) {
 }
 
 #undef VULKAN_STORAGE_SPACE_MAP_LIST
+
+//===----------------------------------------------------------------------===//
+// WebGPU
+//===----------------------------------------------------------------------===//
+
+std::optional<spirv::StorageClass>
+spirv::mapMemorySpaceToWebGPUStorageClass(Attribute memorySpaceAttr) {
+  // WebGPU exposes storage buffers, uniforms, workgroup memory and function
+  // locals. Numeric memory spaces follow the Vulkan numbering, and the gpu
+  // dialect's address space attribute is accepted directly so kernels written
+  // with `#gpu.address_space<...>` need no renumbering step.
+  if (auto gpuSpace = dyn_cast_if_present<gpu::AddressSpaceAttr>(memorySpaceAttr)) {
+    switch (gpuSpace.getValue()) {
+    case gpu::AddressSpace::Global:
+      return spirv::StorageClass::StorageBuffer;
+    case gpu::AddressSpace::Workgroup:
+      return spirv::StorageClass::Workgroup;
+    case gpu::AddressSpace::Private:
+      return spirv::StorageClass::Function;
+    }
+    return std::nullopt;
+  }
+  std::optional<spirv::StorageClass> sc =
+      spirv::mapMemorySpaceToVulkanStorageClass(memorySpaceAttr);
+  if (!sc)
+    return std::nullopt;
+  switch (*sc) {
+  case spirv::StorageClass::StorageBuffer:
+  case spirv::StorageClass::Uniform:
+  case spirv::StorageClass::Workgroup:
+  case spirv::StorageClass::Function:
+  case spirv::StorageClass::Private:
+  case spirv::StorageClass::Input:
+  case spirv::StorageClass::Output:
+  case spirv::StorageClass::UniformConstant:
+    return sc;
+  default:
+    // PushConstant, PhysicalStorageBuffer, Generic and Image have no WebGPU
+    // counterpart.
+    return std::nullopt;
+  }
+}
 
 #define OPENCL_STORAGE_SPACE_MAP_LIST(MAP_FN)                                  \
   MAP_FN(spirv::StorageClass::CrossWorkgroup, 0)                               \
@@ -281,6 +324,8 @@ public:
 
     if (clientAPI == "opencl")
       memorySpaceMap = spirv::mapMemorySpaceToOpenCLStorageClass;
+    else if (clientAPI == "webgpu")
+      memorySpaceMap = spirv::mapMemorySpaceToWebGPUStorageClass;
     else if (clientAPI != "vulkan")
       return errorHandler(llvm::Twine("Invalid clienAPI: ") + clientAPI);
 
@@ -292,12 +337,16 @@ public:
     Operation *op = getOperation();
 
     spirv::MemorySpaceToStorageClassMap spaceToStorage = memorySpaceMap;
-    if (spirv::TargetEnvAttr attr = spirv::lookupTargetEnv(op)) {
-      spirv::TargetEnv targetEnv(attr);
-      if (targetEnv.allows(spirv::Capability::Kernel)) {
-        spaceToStorage = spirv::mapMemorySpaceToOpenCLStorageClass;
-      } else if (targetEnv.allows(spirv::Capability::Shader)) {
-        spaceToStorage = spirv::mapMemorySpaceToVulkanStorageClass;
+    // An explicit WebGPU choice wins over the target env heuristic below, which
+    // cannot tell a WebGPU target from a Vulkan one (both allow Shader).
+    if (clientAPI != "webgpu") {
+      if (spirv::TargetEnvAttr attr = spirv::lookupTargetEnv(op)) {
+        spirv::TargetEnv targetEnv(attr);
+        if (targetEnv.allows(spirv::Capability::Kernel)) {
+          spaceToStorage = spirv::mapMemorySpaceToOpenCLStorageClass;
+        } else if (targetEnv.allows(spirv::Capability::Shader)) {
+          spaceToStorage = spirv::mapMemorySpaceToVulkanStorageClass;
+        }
       }
     }
 

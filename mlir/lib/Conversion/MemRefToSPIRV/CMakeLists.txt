@@ -12,6 +12,7 @@ add_mlir_conversion_library(MLIRMemRefToSPIRV
 
   LINK_LIBS PUBLIC
   MLIRFunctionInterfaces
+  MLIRGPUDialect
   MLIRIR
   MLIRMemRefDialect
   MLIRPass

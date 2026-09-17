@@ -1025,7 +1025,9 @@ def MapMemRefStorageClass : Pass<"map-memref-spirv-storage-class"> {
   let dependentDialects = ["spirv::SPIRVDialect"];
   let options = [
     Option<"clientAPI", "client-api", "std::string", /*default=*/"\"vulkan\"",
-           "The client API to use for populating mappings">
+           "The client API to use for populating mappings: vulkan, opencl or "
+           "webgpu (Vulkan numbering restricted to WebGPU storage classes, "
+           "plus #gpu.address_space attributes)">
   ];
 }
 
