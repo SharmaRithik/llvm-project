@@ -251,4 +251,52 @@ spirv.func @is_nan_4xf32(%a : vector<4xf32>) -> vector<4xi1> "None" {
   spirv.ReturnValue %0 : vector<4xi1>
 }
 
+//===----------------------------------------------------------------------===//
+// spirv.SNegate and spirv.GL.SAbs
+//===----------------------------------------------------------------------===//
+
+// CHECK-LABEL: func @snegate_i32
+// CHECK-SAME:       ([[ARG:%.+]]: i32)
+// CHECK-NEXT:       [[ZERO:%.+]] = spirv.Constant 0 : i32
+// CHECK-NEXT:       [[RES:%.+]]  = spirv.ISub [[ZERO]], [[ARG]] : i32
+// CHECK-NEXT:       spirv.ReturnValue [[RES]] : i32
+spirv.func @snegate_i32(%a : i32) -> i32 "None" {
+  %0 = spirv.SNegate %a : i32
+  spirv.ReturnValue %0 : i32
+}
+
+// CHECK-LABEL: func @snegate_vector_i32
+// CHECK-SAME:       ([[ARG:%.+]]: vector<2xi32>)
+// CHECK-NEXT:       [[ZERO:%.+]] = spirv.Constant dense<0> : vector<2xi32>
+// CHECK-NEXT:       [[RES:%.+]]  = spirv.ISub [[ZERO]], [[ARG]] : vector<2xi32>
+// CHECK-NEXT:       spirv.ReturnValue [[RES]] : vector<2xi32>
+spirv.func @snegate_vector_i32(%a : vector<2xi32>) -> vector<2xi32> "None" {
+  %0 = spirv.SNegate %a : vector<2xi32>
+  spirv.ReturnValue %0 : vector<2xi32>
+}
+
+// CHECK-LABEL: func @sabs_i32
+// CHECK-SAME:       ([[ARG:%.+]]: i32)
+// CHECK-NEXT:       [[ZERO:%.+]] = spirv.Constant 0 : i32
+// CHECK-NEXT:       [[NEG:%.+]]  = spirv.ISub [[ZERO]], [[ARG]] : i32
+// CHECK-NEXT:       [[LT:%.+]]   = spirv.SLessThan [[ARG]], [[ZERO]] : i32
+// CHECK-NEXT:       [[RES:%.+]]  = spirv.Select [[LT]], [[NEG]], [[ARG]] : i1, i32
+// CHECK-NEXT:       spirv.ReturnValue [[RES]] : i32
+spirv.func @sabs_i32(%a : i32) -> i32 "None" {
+  %0 = spirv.GL.SAbs %a : i32
+  spirv.ReturnValue %0 : i32
+}
+
+// CHECK-LABEL: func @sabs_vector_i32
+// CHECK-SAME:       ([[ARG:%.+]]: vector<3xi32>)
+// CHECK-NEXT:       [[ZERO:%.+]] = spirv.Constant dense<0> : vector<3xi32>
+// CHECK-NEXT:       [[NEG:%.+]]  = spirv.ISub [[ZERO]], [[ARG]] : vector<3xi32>
+// CHECK-NEXT:       [[LT:%.+]]   = spirv.SLessThan [[ARG]], [[ZERO]] : vector<3xi32>
+// CHECK-NEXT:       [[RES:%.+]]  = spirv.Select [[LT]], [[NEG]], [[ARG]] : vector<3xi1>, vector<3xi32>
+// CHECK-NEXT:       spirv.ReturnValue [[RES]] : vector<3xi32>
+spirv.func @sabs_vector_i32(%a : vector<3xi32>) -> vector<3xi32> "None" {
+  %0 = spirv.GL.SAbs %a : vector<3xi32>
+  spirv.ReturnValue %0 : vector<3xi32>
+}
+
 } // end module

@@ -239,6 +239,47 @@ struct ExpandIsNanPattern final : OpRewritePattern<IsNanOp> {
   }
 };
 
+/// WGSL is strictly typed and Naga assigns `u32` to values whose SPIR-V type has
+/// signedness 0, which is how MLIR serializes signless integers. Naga then
+/// rejects `OpSNegate` on such a value and compiles `GLSL.std.450 SAbs` as a
+/// plain `abs`, which is the identity on `u32`. Both ops are emitted by the
+/// `arith.remsi` lowering. Rewrite them into ops that mean the same thing for
+/// any signedness: `SNegate x` is `0 - x` in two's complement, and `SAbs x` is
+/// `select(x <s 0, 0 - x, x)`.
+struct ExpandSNegatePattern final : OpRewritePattern<SNegateOp> {
+  using OpRewritePattern::OpRewritePattern;
+
+  LogicalResult matchAndRewrite(SNegateOp op,
+                                PatternRewriter &rewriter) const override {
+    Location loc = op.getLoc();
+    Type type = op.getType();
+    Value zero = ConstantOp::getZero(type, loc, rewriter);
+    rewriter.replaceOpWithNewOp<ISubOp>(op, type, zero, op.getOperand());
+    return success();
+  }
+};
+
+struct ExpandSAbsPattern final : OpRewritePattern<GLSAbsOp> {
+  using OpRewritePattern::OpRewritePattern;
+
+  LogicalResult matchAndRewrite(GLSAbsOp op,
+                                PatternRewriter &rewriter) const override {
+    Location loc = op.getLoc();
+    Type type = op.getType();
+    Value operand = op.getOperand();
+    Value zero = ConstantOp::getZero(type, loc, rewriter);
+    Value negated = ISubOp::create(rewriter, loc, type, zero, operand);
+    Type boolType = rewriter.getI1Type();
+    if (auto vecType = dyn_cast<VectorType>(type))
+      boolType = VectorType::get(vecType.getShape(), boolType);
+    Value isNegative =
+        SLessThanOp::create(rewriter, loc, boolType, operand, zero);
+    rewriter.replaceOpWithNewOp<SelectOp>(op, type, isNegative, negated,
+                                          operand);
+    return success();
+  }
+};
+
 //===----------------------------------------------------------------------===//
 // Passes
 //===----------------------------------------------------------------------===//
@@ -248,6 +289,7 @@ struct WebGPUPreparePass final
     RewritePatternSet patterns(&getContext());
     populateSPIRVExpandExtendedMultiplicationPatterns(patterns);
     populateSPIRVExpandNonFiniteArithmeticPatterns(patterns);
+    populateSPIRVExpandSignednessDependentIntegerPatterns(patterns);
 
     if (failed(applyPatternsGreedily(getOperation(), std::move(patterns))))
       signalPassFailure();
@@ -276,3 +318,11 @@ void populateSPIRVExpandNonFiniteArithmeticPatterns(
 
 } // namespace spirv
 } // namespace mlir
+
+void mlir::spirv::populateSPIRVExpandSignednessDependentIntegerPatterns(
+    RewritePatternSet &patterns) {
+  // SNegate and SAbs read a sign that signless MLIR integers do not carry into
+  // SPIR-V. Naga types such values as u32 and rejects or misreads the ops, see
+  // the discussion in the pass documentation.
+  patterns.add<ExpandSNegatePattern, ExpandSAbsPattern>(patterns.getContext());
+}
