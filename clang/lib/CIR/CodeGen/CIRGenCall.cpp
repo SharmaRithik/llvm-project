@@ -386,6 +386,16 @@ void CIRGenModule::constructAttributeList(
           addUnitAttr(cir::CIRDialect::getNoReturnAttrName());
         nba = func->getAttr<NoBuiltinAttr>();
       }
+
+      // The trivially equality comparable marker goes on the call, not on the
+      // callee's FuncOp, so that the recognizer copies it onto the raised op
+      // with the other call attributes. Only a call to a known std entity is
+      // marked, since a std call is raised by its func_identity tag.
+      if (attrOnCallSite && getKnownFuncKind(func) &&
+          hasTriviallyEqualityComparableParams(func)) {
+        addUnitAttr(
+            cir::CIRDialect::getTriviallyEqualityComparableParamsAttrName());
+      }
     }
 
     assert(!cir::MissingFeatures::opCallAttrs());

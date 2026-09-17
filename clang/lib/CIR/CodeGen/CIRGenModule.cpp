@@ -3773,32 +3773,86 @@ void CIRGenModule::setFuncInfoAttr(cir::FuncOp funcOp,
     return;
   }
 
-  // Otherwise tag a function that matches a known standard library entity. A
-  // known entity is named by a plain identifier in std. For a member the
-  // record decides std membership. Inline namespaces, like the versioning
-  // namespace of libc++, count as part of std.
-  if (!funcDecl->getIdentifier())
-    return;
-  bool inStdNamespace = method ? method->getParent()->isInStdNamespace()
-                               : funcDecl->isInStdNamespace();
-  if (!inStdNamespace)
-    return;
-
-  // The names and the tags come from CIRStdOps.td, and the recognizer checks
-  // the shape of each call. Only free functions name a known entity today, so
-  // a member like char_traits::find never shares the tag of the free std::find.
-  std::optional<cir::KnownFuncKind> kind;
-  if (!method) {
-    kind = llvm::StringSwitch<std::optional<cir::KnownFuncKind>>(
-               funcDecl->getName())
-               .Case(cir::StdFindOp::getFunctionName(),
-                     cir::StdFindOp::getFuncKind())
-               .Default(std::nullopt);
-  }
+  // Otherwise tag a known std entity.
+  std::optional<cir::KnownFuncKind> kind = getKnownFuncKind(funcDecl);
   if (!kind)
     return;
 
   funcOp.setFuncInfoAttr(cir::FuncIdentityAttr::get(&getMLIRContext(), *kind));
+}
+
+std::optional<cir::KnownFuncKind>
+CIRGenModule::getKnownFuncKind(const FunctionDecl *funcDecl) {
+  // A known entity is named by a plain identifier in std. For a member the
+  // record decides std membership. Inline namespaces, like the versioning
+  // namespace of libc++, count as part of std.
+  if (!funcDecl->getIdentifier())
+    return std::nullopt;
+  const auto *method = dyn_cast<CXXMethodDecl>(funcDecl);
+  bool inStdNamespace = method ? method->getParent()->isInStdNamespace()
+                               : funcDecl->isInStdNamespace();
+  if (!inStdNamespace)
+    return std::nullopt;
+
+  // The names and the tags come from CIRStdOps.td, and the recognizer checks
+  // the shape of each call. Only free functions name a known entity today, so
+  // a member like char_traits::find never shares the tag of the free std::find.
+  if (method)
+    return std::nullopt;
+  return llvm::StringSwitch<std::optional<cir::KnownFuncKind>>(
+             funcDecl->getName())
+      .Case(cir::StdFindOp::getFunctionName(), cir::StdFindOp::getFuncKind())
+      .Default(std::nullopt);
+}
+
+// The check runs on the AST because one CIR type can stand for several AST
+// types. An enum with underlying type unsigned char, _Atomic(unsigned char)
+// and unsigned char all lower to the same !u8i, yet an enum may carry its own
+// operator== and an atomic needs atomic loads. For that reason only an
+// integer BuiltinType is accepted.
+bool CIRGenModule::hasTriviallyEqualityComparableParams(
+    const FunctionDecl *funcDecl) const {
+  // With no parameters the loop below never sets commonType and the final
+  // check asserts on a null type. A variadic function takes extra arguments
+  // with no declared type, so nothing can be said about them.
+  if (funcDecl->parameters().empty() || funcDecl->isVariadic())
+    return false;
+
+  QualType commonType;
+  for (const ParmVarDecl *param : funcDecl->parameters()) {
+    QualType paramType = param->getType();
+    if (!paramType->isPointerType() && !paramType->isReferenceType())
+      return false;
+
+    // A byte compare would skip volatile accesses.
+    QualType pointee = paramType->getPointeeType();
+    if (pointee.isVolatileQualified())
+      return false;
+
+    // Drop const so a const T& value matches a T* iterator. Other qualifiers
+    // stay in the compare below.
+    QualType elementType = pointee.getCanonicalType();
+    elementType.removeLocalConst();
+    // isInteger includes bool, but bool reaches CIR as !cir.bool and not as an
+    // integer.
+    const auto *builtinTy = dyn_cast<BuiltinType>(elementType);
+    if (!builtinTy || !builtinTy->isInteger() || builtinTy->isBooleanType())
+      return false;
+
+    // A plain integer and its __ptrauth form both lower to !u64i but hold
+    // different bytes for one value, so all params must share one AST type.
+    if (commonType.isNull())
+      commonType = elementType;
+    else if (elementType != commonType)
+      return false;
+  }
+
+  // This is the final check of __is_trivially_equality_comparable. For a
+  // builtin integer it fails only for an address discriminated __ptrauth
+  // qualifier, which signs each value with its storage address, so equal
+  // values can hold different bytes.
+  return getASTContext().hasUniqueObjectRepresentations(
+      commonType, /*CheckIfTriviallyCopyable=*/false);
 }
 
 static void setWindowsItaniumDLLImport(CIRGenModule &cgm, bool isLocal,

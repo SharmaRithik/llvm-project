@@ -94,6 +94,12 @@ def CIR_Dialect : Dialect {
     // precomputed by CIRGen so later passes don't need a live ASTContext.
     static llvm::StringRef getCXXModuleInitFnNameAttrName() { return "cir.cxx_module_init_fn_name"; }
     static llvm::StringRef getMustTailAttrName() { return "musttail"; }
+    // Set by CIRGen on a call to a known std entity that has parameters and is
+    // not variadic. Every parameter is a pointer or reference to the same
+    // builtin integer type, const on the pointee aside. That type is not bool
+    // and not volatile, and its values are equal exactly when their bytes are
+    // equal. This is narrower than __is_trivially_equality_comparable.
+    static llvm::StringRef getTriviallyEqualityComparableParamsAttrName() { return "cir.trivially_equality_comparable_params"; }
     static llvm::StringRef getCatchCopyThunkAttrName() { return "cir.eh.catch_copy_thunk"; }
 
     static llvm::StringRef getAMDGPUCodeObjectVersionAttrName() { return "cir.amdhsa_code_object_version"; }

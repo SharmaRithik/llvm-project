@@ -2165,7 +2165,9 @@ lowerCallAttributes(cir::CIRCallOpInterface op,
         attr.getName() == CIRDialect::getNoUnwindAttrName() ||
         attr.getName() == CIRDialect::getNoReturnAttrName() ||
         attr.getName() == op.getInlineKindAttrName() ||
-        attr.getName() == CIRDialect::getMustTailAttrName())
+        attr.getName() == CIRDialect::getMustTailAttrName() ||
+        attr.getName() ==
+            CIRDialect::getTriviallyEqualityComparableParamsAttrName())
       continue;
 
     assert(!cir::MissingFeatures::opFuncExtraAttrs());

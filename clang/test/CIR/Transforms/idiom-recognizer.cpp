@@ -34,6 +34,7 @@ char *test_find(char *first, char *last, const char &value) {
 // operands in source order and its attributes.
 // RAISED: cir.std.find(
 // RAISED-SAME: @_ZSt4findIPccET_S1_S1_RKT0_
+// RAISED-SAME: cir.trivially_equality_comparable_params
 // NO-BUILTINS: cir.std.find(
 // NO-BUILTINS-SAME: @_ZSt4findIPccET_S1_S1_RKT0_
 // FINAL: %[[FIRST_ADDR:.*]] = cir.alloca "first"
@@ -44,6 +45,7 @@ char *test_find(char *first, char *last, const char &value) {
 // FINAL: %[[VALUE:.*]] = cir.load{{.*}} %[[VALUE_ADDR]] :
 // FINAL: cir.call @_ZSt4findIPccET_S1_S1_RKT0_(%[[FIRST]], %[[LAST]], %[[VALUE]])
 // FINAL-SAME: nothrow side_effect(pure)
+// FINAL-SAME: {cir.trivially_equality_comparable_params}
 // FINAL-SAME: {llvm.noundef}
 // FINAL-SAME: -> (!cir.ptr<!s8i> {llvm.noundef})
 // FINAL-NOT: cir.call @_ZSt4find

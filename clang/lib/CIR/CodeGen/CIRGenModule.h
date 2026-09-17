@@ -943,6 +943,15 @@ public:
   void addGlobalAnnotations(const clang::ValueDecl *d, mlir::Operation *gv);
 
 private:
+  /// Whether \p funcDecl is a known std entity and which one.
+  static std::optional<cir::KnownFuncKind>
+  getKnownFuncKind(const clang::FunctionDecl *funcDecl);
+
+  /// Whether the parameters of \p funcDecl meet the type contract documented
+  /// at CIRDialect::getTriviallyEqualityComparableParamsAttrName.
+  bool hasTriviallyEqualityComparableParams(
+      const clang::FunctionDecl *funcDecl) const;
+
   /// Search \p currentClass and its non-virtual base subobjects for \p field,
   /// appending CIR field indices along the path from \p currentClass.
   bool findFieldMemberPath(const CXXRecordDecl *currentClass,
