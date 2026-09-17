@@ -369,6 +369,20 @@ LogicalResult GPUFuncOpConversion::matchAndRewrite(
   if (!gpu::GPUDialect::isKernel(funcOp))
     return failure();
 
+  // Workgroup and private memory attributions are extra block arguments of the
+  // kernel body. Nothing below converts them (they have no SPIR-V counterpart
+  // as function arguments), and letting the signature conversion see them
+  // asserted deep in the dialect conversion framework. Reject them with a
+  // diagnostic instead; workgroup memory can be expressed with a memref.alloc
+  // in the Workgroup storage class, which MemRefToSPIRV turns into a global.
+  if (funcOp.getNumWorkgroupAttributions() != 0 ||
+      funcOp.getNumPrivateAttributions() != 0) {
+    return funcOp.emitError(
+        "gpu.func workgroup and private memory attributions are not supported "
+        "when converting to SPIR-V; use a memref.alloc in the Workgroup "
+        "storage class instead");
+  }
+
   auto *typeConverter = getTypeConverter<SPIRVTypeConverter>();
   SmallVector<spirv::InterfaceVarABIAttr, 4> argABI;
   if (failed(
