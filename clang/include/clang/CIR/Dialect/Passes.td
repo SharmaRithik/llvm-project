@@ -207,6 +207,18 @@ def LibOpt : Pass<"cir-lib-opt"> {
   let dependentDialects = ["cir::CIRDialect"];
 }
 
+def LibCallLowering : Pass<"cir-libcall-lowering", "mlir::ModuleOp"> {
+  let summary = "Lower CIR library call operations to calls";
+  let description = [{
+    This pass replaces an operation that stands for a C library call, such
+    as `cir.libc.memchr`, with a `cir.call` to the library function, so the
+    call goes through the same lowering as a call the user wrote. It needs
+    no ASTContext and must run before the calling convention lowering.
+  }];
+  let constructor = "mlir::createLibCallLoweringPass()";
+  let dependentDialects = ["cir::CIRDialect"];
+}
+
 def CallConvLowering : Pass<"cir-call-conv-lowering", "mlir::ModuleOp"> {
   let summary = "Lower CIR function signatures and call sites to match target ABI";
   let description = [{

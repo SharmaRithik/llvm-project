@@ -119,10 +119,10 @@ static void addAttributesFromFunctionProtoType(CIRGenBuilderTy &builder,
               mlir::UnitAttr::get(builder.getContext()));
 }
 
-static void addNoBuiltinAttributes(mlir::MLIRContext &ctx,
-                                   mlir::NamedAttrList &attrs,
-                                   const LangOptions &langOpts,
-                                   const NoBuiltinAttr *nba = nullptr) {
+void CIRGenModule::addNoBuiltinAttributes(mlir::NamedAttrList &attrs,
+                                          const NoBuiltinAttr *nba) {
+  mlir::MLIRContext &ctx = getMLIRContext();
+  const LangOptions &langOpts = getLangOpts();
   // First, handle the language options passed through -fno-builtin.
   // or, if there is a wildcard in the builtin names specified through the
   // attribute, disable them all.
@@ -468,7 +468,7 @@ void CIRGenModule::constructAttributeList(
     }
   }
 
-  addNoBuiltinAttributes(getMLIRContext(), attrs, getLangOpts(), nba);
+  addNoBuiltinAttributes(attrs, nba);
 
   bool hasOptNoneAttr = targetDecl && targetDecl->hasAttr<OptimizeNoneAttr>();
   addDefaultFunctionAttributes(name, hasOptNoneAttr, attrOnCallSite, attrs);

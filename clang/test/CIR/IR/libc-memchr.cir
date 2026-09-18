@@ -10,4 +10,10 @@ module attributes {cir.int_type_width = 32 : i32,
     %ptr = cir.libc.memchr(%src, %pattern, %len) : !voidptr, !s32i, !u64i
     cir.return %ptr : !voidptr
   }
+
+  cir.func @g(%src : !voidptr, %pattern : !s32i, %len : !u64i) -> !voidptr {
+    // CHECK: cir.libc.memchr({{.*}}, {{.*}}, {{.*}}) {nobuiltins = ["memchr"]} : !cir.ptr<!void>, !s32i, !u64i
+    %ptr = cir.libc.memchr(%src, %pattern, %len) {nobuiltins = ["memchr"]} : !voidptr, !s32i, !u64i
+    cir.return %ptr : !voidptr
+  }
 }

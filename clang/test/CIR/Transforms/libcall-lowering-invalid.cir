@@ -1,0 +1,16 @@
+// RUN: cir-opt %s --cir-libcall-lowering --verify-diagnostics
+
+!s32i = !cir.int<s, 32>
+!u64i = !cir.int<u, 64>
+!void = !cir.void
+
+// A memchr symbol that is neither a cir.func nor a cir.global cannot take
+// the call.
+module attributes {cir.int_type_width = 32 : i32, cir.size_type_width = 64 : i32} {
+  llvm.func @memchr(!llvm.ptr, i32, i64) -> !llvm.ptr
+  cir.func @foreign(%p: !cir.ptr<!void>, %c: !s32i, %n: !u64i) -> !cir.ptr<!void> {
+    // expected-error@+1 {{memchr names neither a function nor a variable}}
+    %r = cir.libc.memchr(%p, %c, %n) : !cir.ptr<!void>, !s32i, !u64i
+    cir.return %r : !cir.ptr<!void>
+  }
+}

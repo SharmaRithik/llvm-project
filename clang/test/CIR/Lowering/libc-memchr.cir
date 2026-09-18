@@ -1,0 +1,16 @@
+// RUN: cir-opt %s --cir-to-llvm -o - | FileCheck %s
+
+!s32i = !cir.int<s, 32>
+!u64i = !cir.int<u, 64>
+!void = !cir.void
+
+// The standalone pipeline lowers the op without an ASTContext.
+module attributes {cir.int_type_width = 32 : i32, cir.size_type_width = 64 : i32, cir.triple = "x86_64-unknown-linux-gnu"} {
+  cir.func @f(%p: !cir.ptr<!void>, %c: !s32i, %n: !u64i) -> !cir.ptr<!void> {
+    %r = cir.libc.memchr(%p, %c, %n) : !cir.ptr<!void>, !s32i, !u64i
+    cir.return %r : !cir.ptr<!void>
+  }
+}
+// CHECK-LABEL: llvm.func @f(
+// CHECK: llvm.call @memchr(%arg0, %arg1, %arg2) {no_unwind} : (!llvm.ptr {llvm.noundef}, i32 {llvm.noundef}, i64 {llvm.noundef}) -> !llvm.ptr
+// CHECK: llvm.func @memchr(!llvm.ptr {llvm.noundef}, i32 {llvm.noundef}, i64 {llvm.noundef}) -> !llvm.ptr

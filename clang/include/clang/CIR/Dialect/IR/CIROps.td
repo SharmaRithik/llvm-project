@@ -9429,17 +9429,24 @@ def CIR_MemChrOp : CIR_Op<"libc.memchr",
     operands against them. `src` must be a void pointer in the default
     address space and `result` has the same type as `src`.
 
+    `nobuiltins` is the no builtin list a `cir.call` carries, an empty list
+    for `-fno-builtin` and the disabled names for `-fno-builtin-<name>`. It
+    is absent when no builtin is disabled.
+
     Examples:
 
     ```
     %p = cir.libc.memchr(%src, %pattern, %len) : !cir.ptr<!void>, !s32i, !u64i
+    %q = cir.libc.memchr(%src, %pattern, %len) {nobuiltins = []}
+        : !cir.ptr<!void>, !s32i, !u64i
     ```
   }];
 
   let arguments = (ins
     Arg<CIR_VoidPtrType, "", [MemRead]>:$src,
     CIR_AnyFundamentalSIntType:$pattern,
-    CIR_AnyFundamentalUIntType:$len
+    CIR_AnyFundamentalUIntType:$len,
+    OptionalAttr<StrArrayAttr>:$nobuiltins
   );
 
   let results = (outs CIR_VoidPtrType:$result);
@@ -9451,6 +9458,7 @@ def CIR_MemChrOp : CIR_Op<"libc.memchr",
   }];
 
   let hasVerifier = 1;
+  let hasLLVMLowering = false;
 }
 
 //===----------------------------------------------------------------------===//

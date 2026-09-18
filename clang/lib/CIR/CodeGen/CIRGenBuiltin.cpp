@@ -2326,8 +2326,14 @@ RValue CIRGenFunction::emitBuiltinExpr(const GlobalDecl &gd, unsigned builtinID,
         builder.createBitcast(srcPtr.getPointer(), builder.getVoidPtrTy());
     mlir::Value pattern = emitScalarExpr(e->getArg(1));
     mlir::Value len = emitScalarExpr(e->getArg(2));
+    // The op carries the no builtin list a call gets, from the language
+    // options alone.
+    mlir::NamedAttrList attrs;
+    cgm.addNoBuiltinAttributes(attrs);
+    auto nbFuncs = mlir::dyn_cast_if_present<mlir::ArrayAttr>(
+        attrs.get(cir::CIRDialect::getNoBuiltinsAttrName()));
     mlir::Value res = cir::MemChrOp::create(builder, getLoc(e->getExprLoc()),
-                                            src, pattern, len);
+                                            src, pattern, len, nbFuncs);
     return RValue::get(res);
   }
   case Builtin::BImemcpy:

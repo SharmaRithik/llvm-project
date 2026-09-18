@@ -1,0 +1,111 @@
+// RUN: cir-opt %s --split-input-file --cir-libcall-lowering -o - | FileCheck %s
+
+!s32i = !cir.int<s, 32>
+!u64i = !cir.int<u, 64>
+!void = !cir.void
+
+// No memchr in the module. A private declaration is created and the call
+// carries noundef and nothrow.
+module attributes {cir.int_type_width = 32 : i32, cir.size_type_width = 64 : i32} {
+  cir.func @create(%p: !cir.ptr<!void>, %c: !s32i, %n: !u64i) -> !cir.ptr<!void> {
+    %r = cir.libc.memchr(%p, %c, %n) : !cir.ptr<!void>, !s32i, !u64i
+    cir.return %r : !cir.ptr<!void>
+  }
+}
+// CHECK-LABEL: cir.func @create(
+// CHECK: cir.call @memchr(%arg0, %arg1, %arg2) nothrow : (!cir.ptr<!void> {llvm.noundef}, !s32i {llvm.noundef}, !u64i {llvm.noundef}) -> !cir.ptr<!void>
+// CHECK: cir.func private @memchr(!cir.ptr<!void> {llvm.noundef}, !s32i {llvm.noundef}, !u64i {llvm.noundef}) -> !cir.ptr<!void> attributes {nothrow}
+
+// -----
+
+!s32i = !cir.int<s, 32>
+!u64i = !cir.int<u, 64>
+!void = !cir.void
+
+// A memchr of the call's type is reused as it is.
+module attributes {cir.int_type_width = 32 : i32, cir.size_type_width = 64 : i32} {
+  cir.func private @memchr(!cir.ptr<!void>, !s32i, !u64i) -> !cir.ptr<!void>
+  cir.func @reuse(%p: !cir.ptr<!void>, %c: !s32i, %n: !u64i) -> !cir.ptr<!void> {
+    %r = cir.libc.memchr(%p, %c, %n) : !cir.ptr<!void>, !s32i, !u64i
+    cir.return %r : !cir.ptr<!void>
+  }
+}
+// CHECK: cir.func private @memchr(!cir.ptr<!void>, !s32i, !u64i) -> !cir.ptr<!void>
+// CHECK-LABEL: cir.func @reuse(
+// CHECK: cir.call @memchr(%arg0, %arg1, %arg2) nothrow : (!cir.ptr<!void> {llvm.noundef}, !s32i {llvm.noundef}, !u64i {llvm.noundef}) -> !cir.ptr<!void>
+
+// -----
+
+!s8i = !cir.int<s, 8>
+!s32i = !cir.int<s, 32>
+!u32i = !cir.int<u, 32>
+!u64i = !cir.int<u, 64>
+!void = !cir.void
+
+// A memchr of another type is called through its address cast to the call's
+// type.
+module attributes {cir.int_type_width = 32 : i32, cir.size_type_width = 64 : i32} {
+  cir.func private @memchr(!cir.ptr<!s8i>, !s8i, !u32i) -> !cir.ptr<!s8i>
+  cir.func @other_type(%p: !cir.ptr<!void>, %c: !s32i, %n: !u64i) -> !cir.ptr<!void> {
+    %r = cir.libc.memchr(%p, %c, %n) : !cir.ptr<!void>, !s32i, !u64i
+    cir.return %r : !cir.ptr<!void>
+  }
+}
+// CHECK-LABEL: cir.func @other_type(
+// CHECK: %[[ADDR:.*]] = cir.get_global @memchr : !cir.ptr<!cir.func<(!cir.ptr<!s8i>, !s8i, !u32i) -> !cir.ptr<!s8i>>>
+// CHECK: %[[FN:.*]] = cir.cast bitcast %[[ADDR]] : !cir.ptr<!cir.func<(!cir.ptr<!s8i>, !s8i, !u32i) -> !cir.ptr<!s8i>>> -> !cir.ptr<!cir.func<(!cir.ptr<!void>, !s32i, !u64i) -> !cir.ptr<!void>>>
+// CHECK: cir.call %[[FN]](%arg0, %arg1, %arg2) nothrow : (!cir.ptr<!cir.func<(!cir.ptr<!void>, !s32i, !u64i) -> !cir.ptr<!void>>>, !cir.ptr<!void> {llvm.noundef}, !s32i {llvm.noundef}, !u64i {llvm.noundef}) -> !cir.ptr<!void>
+
+// -----
+
+!s32i = !cir.int<s, 32>
+!u64i = !cir.int<u, 64>
+!void = !cir.void
+
+// A variable named memchr is called the same way.
+module attributes {cir.int_type_width = 32 : i32, cir.size_type_width = 64 : i32} {
+  cir.global external @memchr = #cir.int<0> : !s32i
+  cir.func @variable(%p: !cir.ptr<!void>, %c: !s32i, %n: !u64i) -> !cir.ptr<!void> {
+    %r = cir.libc.memchr(%p, %c, %n) : !cir.ptr<!void>, !s32i, !u64i
+    cir.return %r : !cir.ptr<!void>
+  }
+}
+// CHECK-LABEL: cir.func @variable(
+// CHECK: %[[ADDR:.*]] = cir.get_global @memchr : !cir.ptr<!s32i>
+// CHECK: %[[FN:.*]] = cir.cast bitcast %[[ADDR]] : !cir.ptr<!s32i> -> !cir.ptr<!cir.func<(!cir.ptr<!void>, !s32i, !u64i) -> !cir.ptr<!void>>>
+// CHECK: cir.call %[[FN]](%arg0, %arg1, %arg2) nothrow : (!cir.ptr<!cir.func<(!cir.ptr<!void>, !s32i, !u64i) -> !cir.ptr<!void>>>, !cir.ptr<!void> {llvm.noundef}, !s32i {llvm.noundef}, !u64i {llvm.noundef}) -> !cir.ptr<!void>
+
+// -----
+
+!s32i = !cir.int<s, 32>
+!u64i = !cir.int<u, 64>
+!void = !cir.void
+
+// The recorded list goes on the call and on the created declaration. It
+// names memchr, so the call is also nobuiltin.
+module attributes {cir.int_type_width = 32 : i32, cir.size_type_width = 64 : i32} {
+  cir.func @nobuiltin(%p: !cir.ptr<!void>, %c: !s32i, %n: !u64i) -> !cir.ptr<!void> {
+    %r = cir.libc.memchr(%p, %c, %n) {nobuiltins = ["memchr"]} : !cir.ptr<!void>, !s32i, !u64i
+    cir.return %r : !cir.ptr<!void>
+  }
+}
+// CHECK-LABEL: cir.func @nobuiltin(
+// CHECK: cir.call @memchr(%arg0, %arg1, %arg2) nothrow {nobuiltin, nobuiltins = ["memchr"]} : (
+// CHECK: cir.func private @memchr({{.*}}) -> !cir.ptr<!void> attributes {nobuiltins = ["memchr"], nothrow}
+
+// -----
+
+!s32i = !cir.int<s, 32>
+!u64i = !cir.int<u, 64>
+!void = !cir.void
+
+// A list that does not name memchr is carried without nobuiltin.
+module attributes {cir.int_type_width = 32 : i32, cir.size_type_width = 64 : i32} {
+  cir.func @other_name(%p: !cir.ptr<!void>, %c: !s32i, %n: !u64i) -> !cir.ptr<!void> {
+    %r = cir.libc.memchr(%p, %c, %n) {nobuiltins = ["strlen"]} : !cir.ptr<!void>, !s32i, !u64i
+    cir.return %r : !cir.ptr<!void>
+  }
+}
+// CHECK-LABEL: cir.func @other_name(
+// CHECK: cir.call @memchr(%arg0, %arg1, %arg2) nothrow {nobuiltins = ["strlen"]} : (
+// CHECK: cir.func private @memchr({{.*}}) -> !cir.ptr<!void> attributes {nobuiltins = ["strlen"], nothrow}

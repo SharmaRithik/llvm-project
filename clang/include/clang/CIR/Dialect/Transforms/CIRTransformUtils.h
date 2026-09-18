@@ -9,6 +9,7 @@
 #ifndef LLVM_CLANG_CIR_DIALECT_TRANSFORMS_CIRTRANSFORMUTILS_H
 #define LLVM_CLANG_CIR_DIALECT_TRANSFORMS_CIRTRANSFORMUTILS_H
 
+#include "mlir/IR/BuiltinOps.h"
 #include "mlir/IR/Location.h"
 #include "mlir/IR/PatternMatch.h"
 #include "clang/CIR/Dialect/IR/CIRDialect.h"
@@ -16,6 +17,16 @@
 #include "llvm/ADT/SmallVector.h"
 
 namespace cir {
+
+/// Return the function named \p name in \p mod, or create a private external
+/// declaration of type \p funcTy at the end of the module.
+cir::FuncOp getOrCreateRuntimeFuncDecl(mlir::ModuleOp mod, mlir::Location loc,
+                                       llvm::StringRef name,
+                                       cir::FuncType funcTy);
+
+/// True when a `nobuiltins` list disables the builtin \p name. An empty list
+/// disables every builtin, a null attribute disables none.
+bool noBuiltinListDisables(mlir::ArrayAttr noBuiltins, llvm::StringRef name);
 
 /// Replace a `cir::CallOp` with a `cir::TryCallOp` whose unwind destination
 /// is \p unwindDest. The call's parent block is split immediately after the

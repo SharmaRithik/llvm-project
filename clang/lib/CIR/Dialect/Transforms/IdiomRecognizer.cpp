@@ -16,6 +16,7 @@
 #include "clang/CIR/Dialect/Builder/CIRBaseBuilder.h"
 #include "clang/CIR/Dialect/IR/CIRDialect.h"
 #include "clang/CIR/Dialect/Passes.h"
+#include "clang/CIR/Dialect/Transforms/CIRTransformUtils.h"
 #include "llvm/ADT/StringRef.h"
 
 #include <utility>
@@ -37,15 +38,10 @@ bool isNoBuiltin(CallOp call, llvm::StringRef name) {
     return false;
   if (call->hasAttr(cir::CIRDialect::getNoBuiltinAttrName()))
     return true;
-  auto noBuiltins = call->getAttrOfType<mlir::ArrayAttr>(
-      cir::CIRDialect::getNoBuiltinsAttrName());
-  if (!noBuiltins)
-    return false;
-  return noBuiltins.empty() ||
-         llvm::any_of(noBuiltins, [name](mlir::Attribute entry) {
-           auto builtinName = mlir::dyn_cast<mlir::StringAttr>(entry);
-           return builtinName && builtinName.getValue() == name;
-         });
+  return cir::noBuiltinListDisables(
+      call->getAttrOfType<mlir::ArrayAttr>(
+          cir::CIRDialect::getNoBuiltinsAttrName()),
+      name);
 }
 
 // Raises a direct cir.call to the first candidate in `TargetOps` that matches.

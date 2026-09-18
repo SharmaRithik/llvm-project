@@ -46,6 +46,7 @@ class CodeGenOptions;
 class Decl;
 class GlobalDecl;
 class LangOptions;
+class NoBuiltinAttr;
 class OpenACCConstructDecl;
 class OpenACCDeclareDecl;
 class OpenACCRoutineDecl;
@@ -376,6 +377,13 @@ public:
       llvm::MutableArrayRef<mlir::NamedAttrList> argAttrs,
       mlir::NamedAttrList &retAttrs, cir::CallingConv &callingConv,
       cir::SideEffect &sideEffect, bool attrOnCallSite, bool isThunk);
+  /// Record the no builtin state in `attrs` as the `nobuiltins` list, from
+  /// the language options and an optional no_builtin attribute. The list is
+  /// empty when every builtin is disabled, by -fno-builtin or by
+  /// no_builtin("*"), holds the disabled names when only some are, and is
+  /// left out when none is.
+  void addNoBuiltinAttributes(mlir::NamedAttrList &attrs,
+                              const NoBuiltinAttr *nba = nullptr);
   /// Helper function for constructAttributeList/others.  Builds a set of
   /// function attributes to add to a function based on language opts, codegen
   /// opts, and some small properties.

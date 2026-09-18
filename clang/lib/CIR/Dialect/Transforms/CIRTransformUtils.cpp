@@ -153,3 +153,29 @@ mlir::Block *cir::replaceThrowWithTryThrow(cir::ThrowOp throwOp,
 
   return normalDest;
 }
+
+cir::FuncOp cir::getOrCreateRuntimeFuncDecl(mlir::ModuleOp mod,
+                                            mlir::Location loc,
+                                            llvm::StringRef name,
+                                            cir::FuncType funcTy) {
+  if (auto existing = mod.lookupSymbol<cir::FuncOp>(name))
+    return existing;
+
+  mlir::OpBuilder builder(mod.getContext());
+  builder.setInsertionPointToEnd(mod.getBody());
+  auto funcOp = cir::FuncOp::create(builder, loc, name, funcTy);
+  funcOp.setLinkage(cir::GlobalLinkageKind::ExternalLinkage);
+  funcOp.setPrivate();
+  return funcOp;
+}
+
+bool cir::noBuiltinListDisables(mlir::ArrayAttr noBuiltins,
+                                llvm::StringRef name) {
+  if (!noBuiltins)
+    return false;
+  return noBuiltins.empty() ||
+         llvm::any_of(noBuiltins, [name](mlir::Attribute entry) {
+           auto builtinName = mlir::dyn_cast<mlir::StringAttr>(entry);
+           return builtinName && builtinName.getValue() == name;
+         });
+}

@@ -113,6 +113,12 @@ runCIRToCIRPasses(mlir::ModuleOp theModule, mlir::MLIRContext &mlirContext,
   // go unclassified and caller and callee disagree on the ABI.
   pm.addPass(mlir::createLoweringPreparePass(&astContext));
 
+  // LibCallLowering turns cir.libc.memchr into a cir.call so CallConvLowering
+  // classifies it like any other call. populateCIRPreLoweringPasses schedules
+  // it as well for cir-opt, cir-translate and -clangir-disable-passes, which
+  // skip this pipeline.
+  pm.addPass(mlir::createLibCallLoweringPass());
+
   if (enableCallConvLowering) {
     // CallConvLowering rewrites signatures and call sites using the classifier,
     // so it must run after CXXABILowering has lowered C++ ABI types to plain
@@ -136,6 +142,7 @@ runCIRToCIRPasses(mlir::ModuleOp theModule, mlir::MLIRContext &mlirContext,
 namespace mlir {
 
 void populateCIRPreLoweringPasses(OpPassManager &pm) {
+  pm.addPass(createLibCallLoweringPass());
   pm.addPass(createHoistAllocasPass());
   pm.addPass(createCIRFlattenCFGPass());
   pm.addPass(createCIREHABILoweringPass());

@@ -55,23 +55,6 @@ namespace {
 // Shared utilities
 //===----------------------------------------------------------------------===//
 
-/// Ensure a function with the given name and type exists in the module. If it
-/// does not exist, create a private external declaration.
-static cir::FuncOp getOrCreateRuntimeFuncDecl(mlir::ModuleOp mod,
-                                              mlir::Location loc,
-                                              StringRef name,
-                                              cir::FuncType funcTy) {
-  if (auto existing = mod.lookupSymbol<cir::FuncOp>(name))
-    return existing;
-
-  mlir::OpBuilder builder(mod.getContext());
-  builder.setInsertionPointToEnd(mod.getBody());
-  auto funcOp = cir::FuncOp::create(builder, loc, name, funcTy);
-  funcOp.setLinkage(cir::GlobalLinkageKind::ExternalLinkage);
-  funcOp.setPrivate();
-  return funcOp;
-}
-
 //===----------------------------------------------------------------------===//
 // EH ABI Lowering Base Class
 //===----------------------------------------------------------------------===//

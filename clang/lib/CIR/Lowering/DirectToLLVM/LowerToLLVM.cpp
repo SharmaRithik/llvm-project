@@ -5676,39 +5676,6 @@ mlir::LogicalResult CIRToLLVMCpuIdOpLowering::matchAndRewrite(
   return mlir::success();
 }
 
-mlir::LogicalResult CIRToLLVMMemChrOpLowering::matchAndRewrite(
-    cir::MemChrOp op, OpAdaptor adaptor,
-    mlir::ConversionPatternRewriter &rewriter) const {
-  auto llvmPtrTy = mlir::LLVM::LLVMPointerType::get(rewriter.getContext());
-  mlir::Type srcTy = getTypeConverter()->convertType(op.getSrc().getType());
-  mlir::Type patternTy =
-      getTypeConverter()->convertType(op.getPattern().getType());
-  mlir::Type lenTy = getTypeConverter()->convertType(op.getLen().getType());
-  auto fnTy =
-      mlir::LLVM::LLVMFunctionType::get(llvmPtrTy, {srcTy, patternTy, lenTy},
-                                        /*isVarArg=*/false);
-  llvm::StringRef fnName = "memchr";
-
-  mlir::Builder b(rewriter.getContext());
-  mlir::NamedAttribute noundefAttr =
-      b.getNamedAttr("llvm.noundef", b.getUnitAttr());
-  mlir::DictionaryAttr noundefDict = mlir::DictionaryAttr::get(
-      rewriter.getContext(), llvm::ArrayRef(noundefAttr));
-  SmallVector<mlir::Attribute> argAttrVec(3, noundefDict);
-  mlir::ArrayAttr argAttrs =
-      mlir::ArrayAttr::get(rewriter.getContext(), argAttrVec);
-
-  createLLVMFuncOpIfNotExist(rewriter, symbolTables, op, fnName, fnTy,
-                             argAttrs);
-
-  mlir::LLVM::CallOp newCall = rewriter.replaceOpWithNewOp<mlir::LLVM::CallOp>(
-      op, mlir::TypeRange{llvmPtrTy}, fnName,
-      mlir::ValueRange{adaptor.getSrc(), adaptor.getPattern(),
-                       adaptor.getLen()});
-  newCall.setArgAttrsAttr(argAttrs);
-  return mlir::success();
-}
-
 // Function to do the clear-padding operation. This is a faithful translation of
 // CGBuiltin.cpp's ClearPadding function.
 static void clearPadding(mlir::ConversionPatternRewriter &rewriter,
