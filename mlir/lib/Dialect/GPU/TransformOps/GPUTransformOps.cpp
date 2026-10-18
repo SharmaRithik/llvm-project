@@ -227,7 +227,8 @@ getSubgroupMmaNativeVectorSize(Operation *op, int64_t m, int64_t n, int64_t k) {
         return std::nullopt;
       sliceType = vecType;
     }
-    return llvm::to_vector(sliceType.getShape());
+    return sliceType ? std::optional(llvm::to_vector(sliceType.getShape()))
+                     : std::nullopt;
   }
   if ((OpTrait::hasElementwiseMappableTraits(op) && op->getNumResults() == 1)) {
     if (auto vecType = dyn_cast<VectorType>(op->getResultTypes()[0])) {
