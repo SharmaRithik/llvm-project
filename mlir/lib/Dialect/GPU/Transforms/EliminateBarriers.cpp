@@ -536,8 +536,9 @@ static bool mayAlias(Value first, Value second) {
     if (!bbArg)
       return false;
     auto iface = dyn_cast<FunctionOpInterface>(bbArg.getOwner()->getParentOp());
-    if (!iface)
+    if (!iface || bbArg.getArgNumber() >= iface.getNumArguments())
       return false;
+    // GPU attributions are block arguments past the signature.
     // TODO: we need a way to not depend on the LLVM dialect here.
     return iface.getArgAttr(bbArg.getArgNumber(), "llvm.noalias") != nullptr;
   };
