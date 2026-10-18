@@ -57,11 +57,13 @@ mapForallToBlocksImpl(RewriterBase &rewriter, TransformOpInterface transformOp,
 /// Dynamic, `scf.forall` trip counts are currently not supported.
 /// Dynamic `blockDims` sizes are currently not supported.
 /// `blockDims` is expected to be of size 3.
+/// `idBuilderOverride`, if set, replaces the default ID builder.
 DiagnosedSilenceableFailure
 mapOneForallToThreadsImpl(RewriterBase &rewriter,
                           std::optional<TransformOpInterface> transformOp,
                           scf::ForallOp forallOp, ArrayRef<int64_t> blockSizes,
-                          int64_t warpSize, bool syncAfterDistribute);
+                          int64_t warpSize, bool syncAfterDistribute,
+                          const GpuIdBuilder *idBuilderOverride = nullptr);
 
 /// Search `scf.forall` ops nested under `target` and map each such op to an
 /// explicit GPU implementation along `blockDims`.

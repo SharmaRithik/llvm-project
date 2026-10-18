@@ -847,7 +847,7 @@ getThreadIdBuilder(std::optional<TransformOpInterface> transformOp,
 DiagnosedSilenceableFailure mlir::transform::gpu::mapOneForallToThreadsImpl(
     RewriterBase &rewriter, std::optional<TransformOpInterface> transformOp,
     scf::ForallOp forallOp, ArrayRef<int64_t> blockSizes, int64_t warpSize,
-    bool syncAfterDistribute) {
+    bool syncAfterDistribute, const GpuIdBuilder *idBuilderOverride) {
 
   {
     // GPU-specific verifications. There is no better place to anchor
@@ -874,7 +874,8 @@ DiagnosedSilenceableFailure mlir::transform::gpu::mapOneForallToThreadsImpl(
   rewriter.setInsertionPointAfter(forallOp);
   ForallRewriteResult rewriteResult;
   DiagnosedSilenceableFailure diag = rewriteOneForallCommonImpl(
-      rewriter, transformOp, forallOp, blockSizes, rewriteResult, gpuIdBuilder);
+      rewriter, transformOp, forallOp, blockSizes, rewriteResult,
+      idBuilderOverride ? *idBuilderOverride : gpuIdBuilder);
   if (!diag.succeeded())
     return diag;
   // Add a syncthreads if needed. TODO: warpsync
