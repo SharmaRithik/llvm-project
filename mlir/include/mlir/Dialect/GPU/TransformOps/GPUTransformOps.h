@@ -16,6 +16,10 @@
 namespace mlir {
 namespace gpu {
 class GpuOp;
+
+/// Patterns of transform.apply_patterns.gpu.unroll_vectors_subgroup_mma.
+void populateSubgroupMmaUnrollPatterns(RewritePatternSet &patterns, int64_t m,
+                                       int64_t n, int64_t k);
 } // namespace gpu
 } // namespace mlir
 

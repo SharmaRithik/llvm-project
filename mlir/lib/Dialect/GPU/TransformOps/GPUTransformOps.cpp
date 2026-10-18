@@ -264,8 +264,9 @@ getSubgroupMmaNativeVectorSize(Operation *op, int64_t m, int64_t n, int64_t k) {
   return std::nullopt;
 }
 
-void transform::ApplyUnrollVectorsSubgroupMmaOp::populatePatterns(
-    RewritePatternSet &patterns) {
+void mlir::gpu::populateSubgroupMmaUnrollPatterns(RewritePatternSet &patterns,
+                                                 int64_t m, int64_t n,
+                                                 int64_t k) {
   auto unrollOrder = [](Operation *op) -> std::optional<SmallVector<int64_t>> {
     auto contract = dyn_cast<vector::ContractionOp>(op);
     if (!contract)
@@ -273,9 +274,6 @@ void transform::ApplyUnrollVectorsSubgroupMmaOp::populatePatterns(
     return gpuMmaUnrollOrder(contract);
   };
 
-  int64_t m = getM();
-  int64_t n = getN();
-  int64_t k = getK();
   auto nativeShapeFn =
       [m, n, k](Operation *op) -> std::optional<SmallVector<int64_t>> {
     return getSubgroupMmaNativeVectorSize(op, m, n, k);
@@ -284,6 +282,11 @@ void transform::ApplyUnrollVectorsSubgroupMmaOp::populatePatterns(
       patterns, vector::UnrollVectorOptions()
                     .setNativeShapeFn(nativeShapeFn)
                     .setUnrollTraversalOrderFn(unrollOrder));
+}
+
+void transform::ApplyUnrollVectorsSubgroupMmaOp::populatePatterns(
+    RewritePatternSet &patterns) {
+  mlir::gpu::populateSubgroupMmaUnrollPatterns(patterns, getM(), getN(), getK());
 }
 
 //===----------------------------------------------------------------------===//
