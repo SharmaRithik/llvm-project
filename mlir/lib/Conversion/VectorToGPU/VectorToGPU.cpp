@@ -12,7 +12,6 @@
 
 #include "mlir/Conversion/VectorToGPU/VectorToGPU.h"
 
-#include "mlir/Analysis/SliceAnalysis.h"
 #include "mlir/Analysis/TopologicalSortUtils.h"
 #include "mlir/Dialect/Affine/IR/AffineOps.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
@@ -29,6 +28,8 @@
 #include "mlir/IR/Region.h"
 #include "mlir/Pass/Pass.h"
 #include "mlir/Transforms/GreedyPatternRewriteDriver.h"
+#include "llvm/ADT/DenseSet.h"
+#include "llvm/ADT/SetVector.h"
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/TypeSwitch.h"
 #include "llvm/Support/DebugLog.h"
@@ -328,96 +329,76 @@ static bool supportsMMaMatrixType(Operation *op, bool useNvGpu) {
 // slice can be converted to MMA operations.
 static SetVector<Operation *> getOpToConvert(mlir::Operation *op,
                                              bool useNvGpu) {
-  auto hasVectorDest = [](Operation *op) {
-    return llvm::any_of(op->getResultTypes(), llvm::IsaPred<VectorType>);
-  };
-  BackwardSliceOptions backwardSliceOptions;
-  backwardSliceOptions.filter = hasVectorDest;
-
-  auto hasVectorSrc = [](Operation *op) {
-    return llvm::any_of(op->getOperandTypes(), llvm::IsaPred<VectorType>);
-  };
-  ForwardSliceOptions forwardSliceOptions;
-  forwardSliceOptions.filter = hasVectorSrc;
-
-  DenseMap<Operation *, SmallVector<Operation *>> backwardSliceCache;
-  DenseMap<Operation *, SmallVector<Operation *>> forwardSliceCache;
-  DenseMap<Operation *, bool> supportsMMAMatrixTypeCache;
-
-  auto getCachedBackwardSlice =
-      [&](Operation *currentOp) -> ArrayRef<Operation *> {
-    auto [it, inserted] = backwardSliceCache.try_emplace(currentOp);
-    if (!inserted)
-      return it->second;
-
-    SetVector<Operation *> backwardSlice;
-    LogicalResult result =
-        getBackwardSlice(currentOp, &backwardSlice, backwardSliceOptions);
-    assert(result.succeeded() && "expected a backward slice");
-    (void)result;
-    it->second = backwardSlice.takeVector();
-    return it->second;
-  };
-
-  auto getCachedForwardSlice =
-      [&](Operation *currentOp) -> ArrayRef<Operation *> {
-    auto [it, inserted] = forwardSliceCache.try_emplace(currentOp);
-    if (!inserted)
-      return it->second;
-
-    SetVector<Operation *> forwardSlice;
-    // Special case for ForOp, we don't want to include the whole region but
-    // only the value using the region arguments.
-    // TODO: We should refine this to only care about the region arguments being
-    // converted to matrix type.
-    if (auto forOp = dyn_cast<scf::ForOp>(currentOp)) {
-      for (Value forOpResult : forOp.getResults())
-        getForwardSlice(forOpResult, &forwardSlice, forwardSliceOptions);
-      for (BlockArgument &arg : forOp.getRegionIterArgs())
-        getForwardSlice(arg, &forwardSlice, forwardSliceOptions);
-    } else {
-      getForwardSlice(currentOp, &forwardSlice, forwardSliceOptions);
-    }
-    it->second = forwardSlice.takeVector();
-    return it->second;
-  };
-
-  auto cachedSupportsMMAMatrixType = [&](Operation *currentOp) {
-    auto [it, inserted] =
-        supportsMMAMatrixTypeCache.try_emplace(currentOp, false);
-    if (inserted)
-      it->second = supportsMMaMatrixType(currentOp, useNvGpu);
-    return it->second;
-  };
-
   SetVector<Operation *> opToConvert;
-  op->walk([&](Operation *nestedOp) {
-    if (!isa<vector::ContractionOp>(nestedOp) &&
-        !elementwiseSupportsMMAMatrixType(nestedOp))
-      return;
-    if (backwardSliceCache.contains(nestedOp))
+  DenseSet<Operation *> analyzedOps;
+  op->walk([&](Operation *seed) {
+    if ((!isa<vector::ContractionOp>(seed) &&
+         !elementwiseSupportsMMAMatrixType(seed)) ||
+        analyzedOps.contains(seed))
       return;
 
     SetVector<Operation *> dependentOps;
-    dependentOps.insert(nestedOp);
-    unsigned currentIndex = 0;
-    while (currentIndex != dependentOps.size()) {
-      Operation *currentOp = dependentOps[currentIndex++];
-      dependentOps.insert_range(getCachedBackwardSlice(currentOp));
-      dependentOps.insert_range(getCachedForwardSlice(currentOp));
+    SetVector<Value> values;
+    auto addOp = [&](Operation *current) {
+      if (!dependentOps.insert(current))
+        return;
+      for (Value value : current->getOperands())
+        if (isa<VectorType>(value.getType()))
+          values.insert(value);
+      for (Value value : current->getResults())
+        if (isa<VectorType>(value.getType()))
+          values.insert(value);
+    };
+    // Follow only this loop-carried value. Others form their own slices.
+    auto addIterArg = [&](scf::ForOp loop, unsigned pos) {
+      auto yield = cast<scf::YieldOp>(loop.getBody()->getTerminator());
+      dependentOps.insert(loop);
+      dependentOps.insert(yield);
+      values.insert(loop.getInitArgs()[pos]);
+      values.insert(loop.getRegionIterArg(pos));
+      values.insert(yield.getOperand(pos));
+      values.insert(loop.getResult(pos));
+    };
+
+    addOp(seed);
+    for (unsigned index = 0; index < values.size(); ++index) {
+      Value value = values[index];
+      if (auto arg = dyn_cast<BlockArgument>(value)) {
+        auto loop = dyn_cast<scf::ForOp>(arg.getOwner()->getParentOp());
+        if (loop)
+          addIterArg(loop, arg.getArgNumber() - loop.getNumInductionVars());
+        else
+          dependentOps.insert(arg.getOwner()->getParentOp());
+      } else if (auto result = dyn_cast<OpResult>(value)) {
+        if (auto loop = dyn_cast<scf::ForOp>(result.getOwner()))
+          addIterArg(loop, result.getResultNumber());
+        else
+          addOp(result.getOwner());
+      }
+      for (OpOperand &use : value.getUses()) {
+        if (auto loop = dyn_cast<scf::ForOp>(use.getOwner())) {
+          addIterArg(loop, use.getOperandNumber() - loop.getNumControlOperands());
+        } else if (auto yield = dyn_cast<scf::YieldOp>(use.getOwner())) {
+          if (auto loop = dyn_cast<scf::ForOp>(yield->getParentOp()))
+            addIterArg(loop, use.getOperandNumber());
+          else
+            dependentOps.insert(yield->getParentOp());
+        } else {
+          addOp(use.getOwner());
+        }
+      }
     }
-    // If any instruction cannot use MMA matrix type drop the whole
-    // chain. MMA matrix are stored in an opaque type so they cannot be used
-    // by all operations.
-    if (llvm::any_of(dependentOps, [&](Operation *op) {
-          if (!cachedSupportsMMAMatrixType(op)) {
-            LDBG() << "cannot convert op: " << *op;
+
+    analyzedOps.insert(dependentOps.begin(), dependentOps.end());
+    // MMA values are opaque: every vector use in the slice must support them.
+    if (llvm::any_of(dependentOps, [&](Operation *current) {
+          if (!supportsMMaMatrixType(current, useNvGpu)) {
+            LDBG() << "cannot convert op: " << *current;
             return true;
           }
           return false;
         }))
       return;
-
     opToConvert.insert_range(dependentOps);
   });
   // Sort the operations so that we can convert them in topological order.
