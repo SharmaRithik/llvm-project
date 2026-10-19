@@ -1166,9 +1166,9 @@ static scf::ForOp replaceForOpWithNewSignature(RewriterBase &rewriter,
   rewriter.setInsertionPoint(loop);
   auto operands = llvm::to_vector<4>(loop.getInitArgs());
   llvm::append_range(operands, newInitArgs);
-  scf::ForOp newLoop =
-      scf::ForOp::create(rewriter, loop.getLoc(), loop.getLowerBound(),
-                         loop.getUpperBound(), loop.getStep(), operands);
+  scf::ForOp newLoop = scf::ForOp::create(
+      rewriter, loop.getLoc(), loop.getLowerBound(), loop.getUpperBound(),
+      loop.getStep(), operands, /*bodyBuilder=*/nullptr, loop.getUnsignedCmp());
   rewriter.eraseBlock(newLoop.getBody());
 
   newLoop.getRegion().getBlocks().splice(

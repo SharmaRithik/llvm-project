@@ -135,6 +135,32 @@ func.func @matmul_loop(%arg0: memref<128x128xf16>, %arg1: memref<128x128xf16>, %
 #map1 = affine_map<(d0, d1, d2) -> (d0, d2)>
 #map2 = affine_map<(d0, d1, d2) -> (d1, d2)>
 #map3 = affine_map<(d0, d1, d2) -> (d0, d1)>
+
+// The loop is rebuilt with MMA iter_args and must stay unsigned.
+// CHECK-LABEL: func @matmul_loop_unsigned
+//       CHECK:   scf.for unsigned {{.*}} iter_args(%{{.*}} = %{{.*}}) -> (!gpu.mma_matrix<16x16xf16, "COp">)
+func.func @matmul_loop_unsigned(%arg0: memref<128x128xf16>, %arg1: memref<128x128xf16>, %arg2: memref<128x128xf16>) {
+  %c0 = arith.constant 0 : index
+  %c128 = arith.constant 128 : index
+  %c32 = arith.constant 32 : index
+  %cst = arith.constant 0.000000e+00 : f16
+  %C = vector.transfer_read %arg2[%c0, %c0], %cst {in_bounds = [true, true]} : memref<128x128xf16>, vector<16x16xf16>
+  %14 = scf.for unsigned %arg17 = %c0 to %c128 step %c32 iter_args(%arg18 = %C) -> (vector<16x16xf16>) {
+    %17 = vector.transfer_read %arg0[%c0, %arg17], %cst {in_bounds = [true, true]} : memref<128x128xf16>, vector<16x16xf16>
+    %18 = vector.transfer_read %arg1[%arg17, %c0], %cst {permutation_map = #map0, in_bounds = [true, true]} : memref<128x128xf16>, vector<16x16xf16>
+    %19 = vector.contract {indexing_maps = [#map1, #map2, #map3], iterator_types = ["parallel", "parallel", "reduction"], kind = #vector.kind<add>} %17, %18, %arg18 : vector<16x16xf16>, vector<16x16xf16> into vector<16x16xf16>
+    scf.yield %19 : vector<16x16xf16>
+  }
+  vector.transfer_write %14, %arg2[%c0, %c0] {in_bounds = [true, true]} : vector<16x16xf16>, memref<128x128xf16>
+  return
+}
+
+// -----
+
+#map0 = affine_map<(d0, d1) -> (d1, d0)>
+#map1 = affine_map<(d0, d1, d2) -> (d0, d2)>
+#map2 = affine_map<(d0, d1, d2) -> (d1, d2)>
+#map3 = affine_map<(d0, d1, d2) -> (d0, d1)>
 #map4 = affine_map<(d0) -> (d0, 0)>
 #map5 = affine_map<(d0, d1) -> (d0, d1)>
 
