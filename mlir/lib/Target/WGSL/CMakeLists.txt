@@ -16,3 +16,5 @@ add_mlir_translation_library(MLIRTargetWGSL
   MLIRUBDialect
   MLIRVectorDialect
   )
+
+add_subdirectory(Compiler)
