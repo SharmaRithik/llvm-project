@@ -24,6 +24,7 @@ void registerFromWasmTranslation();
 void registerToCppTranslation();
 void registerToLLVMIRTranslation();
 void registerToSPIRVTranslation();
+void registerToWGSLTranslation();
 
 namespace smt {
 void registerExportSMTLIBTranslation();
@@ -41,6 +42,7 @@ inline void registerAllTranslations() {
     registerToCppTranslation();
     registerToLLVMIRTranslation();
     registerToSPIRVTranslation();
+    registerToWGSLTranslation();
     smt::registerExportSMTLIBTranslation();
     return true;
   }();
