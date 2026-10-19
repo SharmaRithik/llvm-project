@@ -27,6 +27,7 @@ add_mlir_dialect_library(MLIRVectorTransforms
   VectorTransferSplitRewritePatterns.cpp
   VectorTransforms.cpp
   VectorUnroll.cpp
+  VectorUnrollLoopCarried.cpp
   VectorMaskElimination.cpp
 
   ADDITIONAL_HEADER_DIRS
@@ -50,6 +51,7 @@ add_mlir_dialect_library(MLIRVectorTransforms
   MLIRMemRefTransforms
   MLIRMemRefUtils
   MLIRSCFDialect
+  MLIRSCFTransforms
   MLIRSideEffectInterfaces
   MLIRSubsetOpInterface
   MLIRTensorDialect

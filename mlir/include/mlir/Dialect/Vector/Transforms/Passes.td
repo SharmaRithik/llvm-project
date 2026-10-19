@@ -63,4 +63,18 @@ def LowerVectorToFromElementsToShuffleTree
   let summary = "Lower `vector.to_elements` and `vector.from_elements` to a tree of `vector.shuffle` operations";
 }
 
+def VectorUnrollLoopCarried : Pass<"vector-unroll-loop-carried"> {
+  let summary = "Split vectors carried through scf ops into tiles";
+  let description = [{
+    Splits vectors carried through `scf.for`, `scf.if` and `scf.while` into
+    tiles of `target-shape`, dropping leading unit dimensions, so that the
+    extract/insert glue left by vector unrolling folds away.
+  }];
+  let dependentDialects = ["ub::UBDialect", "vector::VectorDialect"];
+  let options = [
+    ListOption<"targetShape", "target-shape", "int64_t",
+               "The shape of the tiles to split loop-carried vectors into">,
+  ];
+}
+
 #endif // MLIR_DIALECT_VECTOR_TRANSFORMS_PASSES

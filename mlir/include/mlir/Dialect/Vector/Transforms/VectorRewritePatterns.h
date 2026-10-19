@@ -322,6 +322,10 @@ void populateVectorUnrollPatterns(RewritePatternSet &patterns,
                                   const UnrollVectorOptions &options,
                                   PatternBenefit benefit = 1);
 
+/// Converts vectors that are a multiple of `targetShape` into tiles.
+void populateVectorUnrollLoopCarriedConversion(TypeConverter &converter,
+                                               ArrayRef<int64_t> targetShape);
+
 /// Compute indices for a transfer op slice.
 SmallVector<Value> sliceTransferIndices(ArrayRef<int64_t> elementOffsets,
                                         ArrayRef<Value> indices,
