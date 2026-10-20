@@ -141,6 +141,7 @@ set(MLIR_TEST_DEPENDS
   mlir-rewrite
   mlir-tblgen
   mlir-translate
+  mlir-wgsl-compile
   tblgen-lsp-server
   tblgen-to-irdl
   )

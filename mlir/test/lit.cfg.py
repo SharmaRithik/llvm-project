@@ -180,6 +180,7 @@ tools = [
     "llvm-strings",
     "mlir-tblgen",
     "mlir-translate",
+    "mlir-wgsl-compile",
     "mlir-lsp-server",
     "mlir-capi-execution-engine-test",
     "mlir-capi-global-constructors-test",
