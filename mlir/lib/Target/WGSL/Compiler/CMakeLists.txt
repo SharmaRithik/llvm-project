@@ -1,6 +1,7 @@
 add_mlir_library(MLIRWGSLMatmulCompiler SHARED
   StructuredSchedule.cpp
   SharedMemorySchedule.cpp
+  RuntimeBindings.cpp
   LINK_LIBS PRIVATE
   MLIRTargetWGSL
   MLIRAffineDialect
