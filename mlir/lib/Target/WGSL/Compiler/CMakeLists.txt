@@ -1,4 +1,5 @@
 add_mlir_library(MLIRWGSLMatmulCompiler SHARED
+  MatmulCompiler.cpp
   KernelOutlining.cpp
   StructuredSchedule.cpp
   SharedMemorySchedule.cpp
