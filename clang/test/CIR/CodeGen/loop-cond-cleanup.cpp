@@ -413,7 +413,7 @@ void do_body_temp_ref() {
 // LLVM:   br label %{{.*}}
 // LLVM:   br label %[[BODY:.*]]
 // LLVM: [[LOOP_COND:.*]]:
-// LLVM:   br i1 false, label %[[BODY]], label %[[AFTER:.*]]
+// LLVM:   br i1 false, label %[[BODY]], label %[[AFTER:[0-9]+]]
 // LLVM: [[BODY]]:
 // LLVM:   br i1 true, label %[[TRUE:.*]], label %[[FALSE:.*]]
 // LLVM: [[TRUE]]:

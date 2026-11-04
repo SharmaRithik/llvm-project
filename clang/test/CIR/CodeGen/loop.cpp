@@ -436,7 +436,7 @@ void test_do_while_false() {
 // LLVM: [[LABEL1]]:
 // LLVM:   br label %[[LABEL3:.*]]
 // LLVM: [[LABEL2:.*]]:
-// LLVM:   br i1 false, label %[[LABEL3]], label %[[LABEL4:.*]]
+// LLVM:   br i1 false, label %[[LABEL3]], label %[[LABEL4:[0-9]+]]
 // LLVM: [[LABEL3]]:
 // LLVM:   br label %[[LABEL2]]
 // LLVM: [[LABEL4]]:

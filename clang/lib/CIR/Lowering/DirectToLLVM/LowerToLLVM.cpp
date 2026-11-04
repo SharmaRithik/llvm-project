@@ -1905,6 +1905,42 @@ mlir::LogicalResult CIRToLLVMBitPopcountOpLowering::matchAndRewrite(
   return mlir::LogicalResult::success();
 }
 
+// TODO: Lower the remaining loop hints.
+static mlir::LLVM::LoopAnnotationAttr lowerLoopHints(mlir::DistinctAttr id,
+                                                     cir::LoopHintAttr hints) {
+  if (!hints)
+    return {};
+
+  mlir::MLIRContext *ctx = hints.getContext();
+  std::optional<cir::LoopUnrollMode> mode = hints.getUnroll();
+  mlir::BoolAttr disable, full;
+  if (mode == cir::LoopUnrollMode::Full)
+    full = mlir::BoolAttr::get(ctx, true);
+  else if (mode)
+    disable = mlir::BoolAttr::get(ctx, *mode == cir::LoopUnrollMode::Disable);
+
+  mlir::IntegerAttr count;
+  if (uint32_t unrollCount = hints.getUnrollCount())
+    count =
+        mlir::IntegerAttr::get(mlir::IntegerType::get(ctx, 32), unrollCount);
+
+  mlir::LLVM::LoopUnrollAttr unroll;
+  if (disable || full || count)
+    unroll = mlir::LLVM::LoopUnrollAttr::get(ctx, disable, count, {}, full, {},
+                                             {}, {});
+
+  mlir::BoolAttr mustProgress;
+  if (hints.getMustProgress())
+    mustProgress = mlir::BoolAttr::get(ctx, true);
+
+  if (!unroll && !mustProgress)
+    return {};
+
+  return mlir::LLVM::LoopAnnotationAttr::get(ctx, id, {}, {}, {}, unroll, {},
+                                             {}, {}, {}, {}, {}, mustProgress,
+                                             {}, {}, {}, {}, {});
+}
+
 mlir::LogicalResult CIRToLLVMBrCondOpLowering::matchAndRewrite(
     cir::BrCondOp brOp, OpAdaptor adaptor,
     mlir::ConversionPatternRewriter &rewriter) const {
@@ -1913,10 +1949,13 @@ mlir::LogicalResult CIRToLLVMBrCondOpLowering::matchAndRewrite(
   assert(!cir::MissingFeatures::zextOp());
 
   mlir::Value i1Condition = adaptor.getCond();
+  mlir::LLVM::LoopAnnotationAttr annotation =
+      lowerLoopHints(brOp.getLoopIdAttr(), brOp.getLoopHintsAttr());
 
-  rewriter.replaceOpWithNewOp<mlir::LLVM::CondBrOp>(
+  auto newOp = rewriter.replaceOpWithNewOp<mlir::LLVM::CondBrOp>(
       brOp, i1Condition, brOp.getDestTrue(), adaptor.getDestOperandsTrue(),
       brOp.getDestFalse(), adaptor.getDestOperandsFalse());
+  newOp.setLoopAnnotationAttr(annotation);
 
   return mlir::success();
 }
@@ -4972,8 +5011,9 @@ void ConvertCIRToLLVMPass::runOnOperation() {
 mlir::LogicalResult CIRToLLVMBrOpLowering::matchAndRewrite(
     cir::BrOp op, OpAdaptor adaptor,
     mlir::ConversionPatternRewriter &rewriter) const {
-  rewriter.replaceOpWithNewOp<mlir::LLVM::BrOp>(op, adaptor.getOperands(),
-                                                op.getDest());
+  rewriter.replaceOpWithNewOp<mlir::LLVM::BrOp>(
+      op, adaptor.getOperands(),
+      lowerLoopHints(op.getLoopIdAttr(), op.getLoopHintsAttr()), op.getDest());
   return mlir::LogicalResult::success();
 }
 
